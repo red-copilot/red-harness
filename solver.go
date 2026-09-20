@@ -1,7 +1,5 @@
 package harness
 
-import "context"
-
 // EventKind 是归一化后的事件种类。pi 的原始事件名（tool_execution_start 等）
 // 在 piai 包里被映射到这些种类，其余子系统只认这里。
 type EventKind string
@@ -20,11 +18,16 @@ const (
 	EventError        EventKind = "error"
 )
 
+// Event 是一个归一化事件。
+//
+// ⚠️ **Event 会被扇出到公开面**（看板、日志、transcript），所以它**不得携带
+// 候选明文**。gate 从 Output/Args 里抽候选是内部行为，抽出来的明文只进
+// private/ 账本。
 type Event struct {
 	Kind EventKind
 	Tool string
 	Args map[string]any
-	// ToolCallID 是 pi 的 toolCallId。它是 DAG 推导链的锚点：事实靠它回溯到
+	// ToolCallID 是 pi 的 toolCallId。它是推导链的锚点：事实靠它回溯到
 	// 「哪一次工具调用产出了我」，gate 的 provenance 判定也靠它。
 	ToolCallID string
 	// Output 是工具输出的文本（已由 piai 从 pi 的 content 块里拼好）。
@@ -38,71 +41,74 @@ type Event struct {
 	Err     string
 }
 
-// DefaultFlagFormat 是**未知答案形态时的占位提示**，不是判定依据。
-// 真正的判定依据是 answer.Shape（从题面推断）。渲染进 prompt 时若题目没有
-// 明确形态，应当把「答案格式以题面为准」这句话原样带上，而不是硬塞 flag{...}。
-const DefaultFlagFormat = "flag{...}"
-
 // 解题终止原因。护栏依赖这些字符串，不要改。
+//
+// **可以新增，不得改变已有值**——三个回归测试钉死了它们
+// （`docs/superpowers/plans/fixtures/v0.2-regression_test.go.txt`）。
 const (
 	ReasonCompleted = "completed"
 	ReasonTimeout   = "timeout"
-	ReasonStalled   = "stalled"
-	ReasonStopped   = "stopped"
-	ReasonMaxTurns  = "max_turns"
-	ReasonError     = "error"
+	// ReasonStalled 在 v1 未被写入任何代码路径。**保留常量**：它是公开 API 的
+	// 一部分（调用方可能已经按它写分支），删掉是破坏性变更。
+	ReasonStalled  = "stalled"
+	ReasonStopped  = "stopped"
+	ReasonMaxTurns = "max_turns"
+	ReasonError    = "error"
+	// ReasonMaxRounds 是 v0.3 新增：轮次预算耗尽。
+	//
+	// v0.2 里轮次耗尽返回 ReasonMaxTurns（`harness.go:33`），与工具调用次数
+	// 耗尽合成一个字符串——报告因此无法回答「为什么停」。
+	ReasonMaxRounds = "max_rounds"
+	// ReasonMaxCost 是 v0.3 新增：成本预算耗尽。
+	//
+	// v0.2 里成本耗尽返回 ReasonTimeout（`harness.go:42`，从墙钟分支拷来的）。
+	// 而且那条分支**从轮循环不可达**——`used.MaxCostUSD` 取自 `out.Stats.CostUSD`，
+	// 而 `out.Stats` 只在循环结束后才赋值一次。成本预算在 v0.2 实际是死代码。
+	ReasonMaxCost = "max_cost"
 	// ReasonNoIntent 表示意图前沿耗尽——所有方向都试过或都已证伪。
 	ReasonNoIntent = "no_intent"
 	// ReasonSolved 表示全部 flag 已被平台确认。
 	ReasonSolved = "solved"
-	// ReasonProviderFailure 表示 0 回合 + 有错误——pi 把 provider 错误呈现为
+	// ReasonProviderFailure 表示 provider 故障——pi 把 provider 错误呈现为
 	// 一次静默的空会话。这是前身「280 run / 0 flag / 63 题」事故的护栏。
 	ReasonProviderFailure = "provider_failure"
 )
 
-type SolveRequest struct {
-	Prompt     string
-	Workdir    string
-	FlagFormat string
-}
-
-type SolveResult struct {
-	Flags     []string
-	FinalText string
-	Turns     int
-	Reason    string
-	Err       string
-}
-
-// Solver 是**一次性**求解后端：给一个 prompt，跑完，返回。保留它用于降级与
-// 对照（例如 REDCOPILOT_PI_SESSION_REUSE=0 或替换成别的引擎）。
-type Solver interface {
-	Solve(ctx context.Context, req SolveRequest, emit func(Event)) (SolveResult, error)
-}
-
 // AgentStart 是启动一个持久 agent 会话所需的全部信息。
+//
+// 与 v0.2 的差异：多了 HomeDir 与 SessionReuse。
 type AgentStart struct {
 	Workdir string
 	// SystemPrompt 走 --append-system-prompt（保留 pi 默认编码能力）。
 	SystemPrompt string
-	// Extensions 是 extension 文件的**绝对路径**，走 -e。M0 实测：非交互模式下
-	// 项目本地资源默认被忽略，所以必须绝对路径 + Approve。
+	// Extensions 是 extension 文件的**绝对路径**，走 -e。
+	//
+	// M0 实测：非交互模式下相对路径被静默忽略，且不开 Approve 时项目本地资源
+	// 也被静默忽略。所以必须绝对路径 + Approve。
 	Extensions []string
 	SessionDir string
 	Provider   string
 	Model      string
-	// Approve 对应 pi 的 --approve。不开的话项目资源会被静默忽略。
+	// Approve 对应 pi 的 --approve。
 	Approve bool
 	// Thinking 对应 pi 的 --thinking（off/minimal/low/medium/high/xhigh/max）。
 	Thinking string
+	// HomeDir 是**每题独立**的 HOME。
+	//
+	// pi 从 `$HOME/.pi/agent/*` 发现扩展 / 角色 / 技能——共享 HOME 会跨题污染
+	// （前身已踩过）。为空时用进程默认 HOME。
+	HomeDir string
+	// SessionReuse 为假时每题强制新进程（前身降级开关
+	// REDCOPILOT_PI_SESSION_REUSE=0 的等价物）。
+	SessionReuse bool
 }
 
-// RoundResult 是**一轮**的结果。一轮 = 一个意图 = 一次 prompt → 等 agent_settled。
+// RoundResult 是**一轮**的结果。一轮 = 一个意图 = 一次 prompt → 等本轮结束。
 type RoundResult struct {
 	// Turns 是这一轮里的工具调用次数（沿用前身语义：数 tool_execution_start）。
 	// 护栏依赖它，不要改成别的含义。
 	Turns int
-	// Text 是本轮 agent 的最终文本（text_delta 拼接）。
+	// Text 是本轮 agent 的最终文本。
 	Text string
 	// Reason 见 Reason* 常量。
 	Reason string
@@ -126,7 +132,7 @@ type RoundResult struct {
 	CancelledUI int
 }
 
-// Stats 是 pi 会话的权威计数。M0 实测 get_session_stats 的字段已确认。
+// Stats 是 agent 会话的权威计数。M0 实测 get_session_stats 的字段已确认。
 type Stats struct {
 	Turns      int     `json:"turns"`
 	TokensIn   int     `json:"tokensIn"`
@@ -138,19 +144,4 @@ type Stats struct {
 	// ContextTokens / ContextWindow 用于观测上下文压力。
 	ContextTokens int `json:"contextTokens"`
 	ContextWindow int `json:"contextWindow"`
-}
-
-// Agent 是**持久**的解题 agent：进程常驻，每题一次 new_session，DAG 轮循环
-// 用它一轮一个意图地推进。
-type Agent interface {
-	// Start 起进程、握手、new_session，并断言会话已复位。
-	Start(ctx context.Context, req AgentStart) error
-	// Round 发一次 prompt 并等到 agent_settled（或出错/超时）。
-	Round(ctx context.Context, prompt string, emit func(Event)) (RoundResult, error)
-	// Steer 中途注入一条消息（hint / 剩余时间提醒）。agent 空闲时等价于 prompt。
-	Steer(ctx context.Context, msg string) error
-	// Stats 取权威计数（turns/tokens/cost/context）。
-	Stats(ctx context.Context) (Stats, error)
-	// Close 终止进程组。pi 不会自己退出（M0 实测），必须显式 killpg。
-	Close(ctx context.Context) error
 }
