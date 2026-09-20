@@ -1,0 +1,504 @@
+package gate
+
+import (
+	"strings"
+	"testing"
+
+	harness "github.com/red-copilot/red-harness"
+	"github.com/red-copilot/red-harness/answer"
+)
+
+// 本文件钉住 §一 provenance 矩阵的四情形。前身 verify.py 用 3,592 行 shell/AST
+// 事后分析做的事，这里靠「首现优先 + 命令文本判定」完成 —— 因为 ToolCallID 让
+// 事件自带因果链，不必事后从字符串重建。
+//
+// 四条里第 1 条与第 4 条的区别**只在命令文本**（`echo flag{x}` vs
+// `python3 solve.py`），所以它们必须成对出现：只测一条的话，把
+// commandCarriesShape 写成 `strings.Contains(cmd, "flag")` 也能过 —— 而那会
+// 顺手把 `curl http://t/flag` 判死。
+
+// gateFor 造一个「题面明说 flag{...}」的 Gate。刻意不用 Infer 的兜底形态：
+// 裸串形态会把命令片段当候选，混淆本文件要钉的判定。
+func gateFor(t *testing.T) *Gate {
+	t.Helper()
+	return NewGateShape(answer.New("flag"))
+}
+
+// toolEnd 造一次完整的工具调用（start + end），与 pi 的事件顺序一致。
+func toolEnd(g *Gate, callID, tool, cmd, output string) {
+	g.Observe(harness.Event{Kind: harness.EventToolStart, Tool: tool, ToolCallID: callID,
+		Args: map[string]any{"command": cmd}})
+	g.Observe(harness.Event{Kind: harness.EventToolEnd, Tool: tool, ToolCallID: callID,
+		Args: map[string]any{"command": cmd}, Output: output})
+}
+
+// provOf 返回某候选的族别。
+func provOf(t *testing.T, g *Gate, flag string) Provenance {
+	t.Helper()
+	for _, c := range g.Candidates() {
+		if c.Flag == flag {
+			return c.Provenance
+		}
+	}
+	t.Fatalf("候选 %q 不在账本里", flag)
+	return ""
+}
+
+func reasonOf(t *testing.T, g *Gate, flag string) string {
+	t.Helper()
+	for _, c := range g.Candidates() {
+		if c.Flag == flag {
+			return c.RejectReason
+		}
+	}
+	t.Fatalf("候选 %q 不在账本里", flag)
+	return ""
+}
+
+// 情形 1：命令参数里就含 flag ⇒ **非观测**。
+func TestMatrixEchoFlagIsNotObserved(t *testing.T) {
+	g := gateFor(t)
+	toolEnd(g, "c1", "bash", "echo 'flag{selfmade}' > /tmp/f", "")
+
+	if p := provOf(t, g, "flag{selfmade}"); p != ProvenanceFabricated {
+		t.Fatalf("echo 自造应为 fabricated，got %q", p)
+	}
+	if r := reasonOf(t, g, "flag{selfmade}"); r != ReasonCommandAuthored {
+		t.Errorf("拒绝原因应为 %s，got %q", ReasonCommandAuthored, r)
+	}
+	if n := len(g.New()); n != 0 {
+		t.Errorf("非观测候选不得进入 New()，got %d 条", n)
+	}
+}
+
+// 情形 2：`curl` 输出含 flag ⇒ **观测**。
+//
+// 注意 `curl http://t/flag` 的命令文本里有 "flag" 这个词 —— 判据必须是
+// 「有没有答案形状」而不是「有没有 flag 这个词」，否则这条会被误杀。
+func TestMatrixCurlOutputIsObserved(t *testing.T) {
+	g := gateFor(t)
+	toolEnd(g, "c2", "bash", "curl -s http://10.0.0.1/flag", "the flag is flag{real_from_target}\n")
+
+	if p := provOf(t, g, "flag{real_from_target}"); p != ProvenanceObserved {
+		t.Fatalf("靶标响应应为 observed，got %q", p)
+	}
+	nw := g.New()
+	if len(nw) != 1 || nw[0].Flag != "flag{real_from_target}" {
+		t.Fatalf("观测族候选应进入 New()，got %v", nw)
+	}
+}
+
+// 情形 2b：同一个词出现在 URL 路径里不算「含答案形状」—— 判据不能退化成
+// 子串包含。这条是情形 2 的护栏。
+func TestURLPathIsNotAnswerShape(t *testing.T) {
+	if commandCarriesShape("curl -s http://10.0.0.1/flag", answer.New("flag")) {
+		t.Error("`/flag` 路径不是答案形状，不得因此把观测判成自造")
+	}
+	if !commandCarriesShape("echo 'flag{x}' > /tmp/f", answer.New("flag")) {
+		t.Error("`flag{x}` 是答案形状，必须被认出")
+	}
+}
+
+// 情形 3：`cat FLAG`（读自己的投递文件）⇒ **非观测**。
+func TestMatrixCatOwnFlagFileIsNotObserved(t *testing.T) {
+	g := gateFor(t)
+	toolEnd(g, "c3", "bash", "cat FLAG", "flag{my_own_guess}\n")
+
+	if p := provOf(t, g, "flag{my_own_guess}"); p != ProvenanceFabricated {
+		t.Fatalf("读回自写内容应为 fabricated，got %q", p)
+	}
+	if r := reasonOf(t, g, "flag{my_own_guess}"); r != ReasonSelfReadback {
+		t.Errorf("拒绝原因应为 %s，got %q", ReasonSelfReadback, r)
+	}
+}
+
+// 情形 3b：小写 `/flag` 是靶标端点路径，不是 agent 的状态文件。
+// 前身 B37 的教训：URL 必须先摘除，否则靶标端点 `/flag` 会被当成自己的文件。
+func TestTargetPathFlagIsNotOwnStateFile(t *testing.T) {
+	if readsOwnState("curl -s http://10.0.0.1/flag") {
+		t.Error("靶标端点 /flag 不应被当成 agent 自己的状态文件")
+	}
+	for _, cmd := range []string{"cat FLAG", "cat /tmp/work/MEMORY.md", "cat _blackboard.json",
+		"cat tried_commands.md", "cat notes.txt", "echo x > FLAG", "cat FLAG.txt"} {
+		if !readsOwnState(cmd) {
+			t.Errorf("%q 应被认作读写自己的状态文件", cmd)
+		}
+	}
+}
+
+// 情形 4：`python3 solve.py` 输出含 flag ⇒ **观测**。
+//
+// 与情形 1 的唯一区别是命令文本 —— 所以这两条必须一起过。
+func TestMatrixScriptOutputIsObserved(t *testing.T) {
+	g := gateFor(t)
+	toolEnd(g, "c4", "bash", "python3 solve.py", "computed: flag{computed_locally}\n")
+
+	if p := provOf(t, g, "flag{computed_locally}"); p != ProvenanceObserved {
+		t.Fatalf("脚本输出应为 observed，got %q", p)
+	}
+}
+
+// 洗白路径（前身那条致命事故）：写文件再读回来。
+//
+// `echo 'flag{x}' > /tmp/f`（无输出）→ `cat /tmp/f`（输出里有 flag）。
+// 首现优先必须把族别钉在写的那一刻。注意 echo 那条命令**没有输出** ——
+// 只在「有输出」时判定的实现会漏掉它，候选要等到 cat 才被记账，那时它已经
+// 出现在工具输出里，看起来完全像观测。
+func TestLaunderingViaWriteThenReadIsCaught(t *testing.T) {
+	g := gateFor(t)
+	toolEnd(g, "w1", "bash", "echo 'flag{laundered}' > /tmp/f", "")
+	toolEnd(g, "r1", "bash", "cat /tmp/f", "flag{laundered}\n")
+
+	if p := provOf(t, g, "flag{laundered}"); p != ProvenanceFabricated {
+		t.Fatalf("洗白路径必须被判 fabricated，got %q", p)
+	}
+	if n := len(g.New()); n != 0 {
+		t.Errorf("洗白候选不得进入 New()，got %d 条", n)
+	}
+	// 出处应指向读回它的那次调用 —— 取证链要说得清它是怎么回来的。
+	for _, c := range g.Candidates() {
+		if c.Flag == "flag{laundered}" && c.ToolCallID != "r1" {
+			t.Errorf("出处应更新为读回它的工具调用 r1，got %q", c.ToolCallID)
+		}
+	}
+}
+
+// 洗白的另一条路径：写入命令自带输出（`tee`）。命令里有形状 ⇒ 非观测，
+// 且输出里同样出现 ⇒ 不得因此升族。
+func TestLaunderingViaTeeIsCaught(t *testing.T) {
+	g := gateFor(t)
+	toolEnd(g, "t1", "bash", "echo 'flag{tee_laundered}' | tee /tmp/f", "flag{tee_laundered}\n")
+	if p := provOf(t, g, "flag{tee_laundered}"); p != ProvenanceFabricated {
+		t.Fatalf("tee 洗白必须被判 fabricated，got %q", p)
+	}
+}
+
+// 洗白的第三条路径：写进脚本再执行。
+// 前身 B40：脚本体（heredoc 载荷）是 agent 的代码，不是命令参数 ——
+// `python3 - <<'EOF'` 里出现候选，同样是自造。
+func TestLaunderingViaHeredocScriptIsCaught(t *testing.T) {
+	g := gateFor(t)
+	cmd := "python3 - <<'EOF'\nprint('flag{from_heredoc}')\nEOF"
+	toolEnd(g, "h1", "bash", cmd, "flag{from_heredoc}\n")
+
+	if p := provOf(t, g, "flag{from_heredoc}"); p != ProvenanceFabricated {
+		t.Fatalf("heredoc 自造必须被判 fabricated，got %q", p)
+	}
+}
+
+// 洗白的第四条路径：**不经过形状标记**的写入。
+//
+// `echo 'hunter2xyz' > /tmp/f` 的命令文本里没有 `{`，所以 commandCarriesShape
+// 看不见它；这条路径只能靠物化匹配（候选的完整字面值出现在命令里）挡住。
+// 它必须单独钉一条，否则「只挡信封形态」的实现也能通过前面三条洗白测试。
+func TestLaunderingWithoutShapeMarkerIsCaught(t *testing.T) {
+	g := NewGateShape(answer.Shape{AllowRaw: true})
+	toolEnd(g, "w", "bash", "echo 'hunter2xyz' > /tmp/f", "")
+	toolEnd(g, "r", "bash", "cat /tmp/f", "hunter2xyz\n")
+
+	if p := provOf(t, g, "hunter2xyz"); p != ProvenanceFabricated {
+		t.Fatalf("无形状标记的自造（写入时就把候选物化进命令）必须判 fabricated，got %q", p)
+	}
+	if n := len(g.New()); n != 0 {
+		t.Errorf("洗白候选不得提交，got %d 条", n)
+	}
+}
+
+// 对称的反例：同一条命令文本、同样的输出，但命令里**没有**候选 —— 那是真观测。
+// 这两条必须同时过：只有前者的话，一个「凡输出命中就判自造」的实现也能过。
+func TestRawFormOutputWithoutMaterializationIsObserved(t *testing.T) {
+	g := NewGateShape(answer.Shape{AllowRaw: true})
+	toolEnd(g, "o", "bash", "curl -s http://10.0.0.1/login", "password=Admin@123\n")
+
+	if p := provOf(t, g, "password=Admin@123"); p != ProvenanceObserved {
+		t.Fatalf("靶标响应里的裸串凭证应为 observed，got %q", p)
+	}
+	if n := len(g.New()); n != 1 {
+		t.Errorf("观测族裸串凭证应可提交，got %d 条", n)
+	}
+}
+
+// 裸串候选的输出片段要裁剪：前身实测某题攒了 61 条垃圾凭证把真信号挤没，
+// 而裸串候选在真实数据里绝大多数是命令片段/URL，整段输出会被记进候选。
+// 信封候选是答案主体形态，一律完整保留。
+func TestRawCandidateOutputIsClipped(t *testing.T) {
+	g := NewGateShape(answer.Shape{AllowRaw: true})
+	long := "password=Admin@123 " + strings.Repeat("filler ", 100)
+	toolEnd(g, "c", "bash", "curl -s http://10.0.0.1/login", long)
+	for _, c := range g.Candidates() {
+		if c.Flag != "password=Admin@123" {
+			continue
+		}
+		if len(c.Output) > 200 {
+			t.Errorf("裸串候选的输出片段应被裁剪，got %d 字节", len(c.Output))
+		}
+	}
+	// 信封候选不裁剪
+	g2 := gateFor(t)
+	toolEnd(g2, "e", "bash", "curl -s http://t/", strings.Repeat("x", 400)+" flag{kept}\n")
+	for _, c := range g2.Candidates() {
+		if c.Flag == "flag{kept}" && !strings.Contains(c.Output, "flag{kept}") {
+			t.Errorf("信封候选的输出片段应完整保留，got %q", c.Output)
+		}
+	}
+}
+
+// 命令引号载荷里的**地址/路径**不得进账本：`nmap -sV '10.0.0.1'`、
+// `cat '/etc/passwd'` 的引号内容恰好通过形状真源的裸串判定（「宁可多认」是
+// 为了不漏答案），但把它们记成幻觉族候选就是前身 B14 那条老路 —— 而幻觉族
+// 的计数是要参与阈值判断的。
+func TestCommandPayloadAddressIsNotCandidate(t *testing.T) {
+	g := NewGateShape(answer.Shape{AllowRaw: true})
+	for _, cmd := range []string{"nmap -sV '10.0.0.1'", "cat '/etc/passwd'", "grep -rn 'password' /var/www"} {
+		toolEnd(g, cmd, "bash", cmd, "")
+	}
+	if n := len(g.Candidates()); n != 0 {
+		t.Errorf("地址/路径形态不应进候选账本，got %+v", g.Candidates())
+	}
+	if st := g.Stats(); st.Fabricated != 0 {
+		t.Errorf("不应产生幻觉族计数（它会参与阈值判断）: %+v", st)
+	}
+}
+
+// 编码物化：命令里没有 `flag{` 字面标记，但 base64 里就是答案。
+// 前身专门为它写过 _candidate_materializations —— 只按形状标记判定会漏掉。
+func TestMaterializedBase64InCommandIsCaught(t *testing.T) {
+	g := gateFor(t)
+	// 先让候选被账本认识（散文里出现），再让命令把它物化。
+	g.Observe(harness.Event{Kind: harness.EventText, Text: "I think the answer is flag{encoded_secret}"})
+	b64 := base64Std("flag{encoded_secret}")
+	toolEnd(g, "b1", "bash", "python3 -c \"print(__import__('base64').b64decode('"+b64+"'))\"", "")
+
+	if p := provOf(t, g, "flag{encoded_secret}"); p != ProvenanceFabricated {
+		t.Fatalf("编码物化的候选必须被判 fabricated，got %q", p)
+	}
+}
+
+// 反例：编码物化判定不能把「命令里恰好有很短的相同串」当自造。
+func TestMaterializationIgnoresShortVariants(t *testing.T) {
+	for _, v := range materializations("flag{x}") {
+		if len(v) < 8 {
+			t.Errorf("物化变体 %q 短于 8，会带来大量假阳性", v)
+		}
+	}
+}
+
+// 散文里出现的候选 ⇒ 只记账、不可提交（前身：LLM 幻觉被自己的文本 grounded 化）。
+func TestProseCandidateIsNotSubmittable(t *testing.T) {
+	g := gateFor(t)
+	g.Observe(harness.Event{Kind: harness.EventText, Text: "maybe the flag is flag{in_my_head}"})
+
+	if p := provOf(t, g, "flag{in_my_head}"); p != ProvenanceFabricated {
+		t.Fatalf("散文候选应为 fabricated，got %q", p)
+	}
+	if n := len(g.New()); n != 0 {
+		t.Errorf("散文候选不得进入 New()，got %d 条", n)
+	}
+}
+
+// 先猜后验（逆向/密码题的正解路径）：散文里先出现，之后靶标产物里真的出现。
+// 前身影子审计「29 条被拒候选里 19 条实为正确答案」几乎全在这条路径上，
+// 所以它必须能升族 —— 这是对推导族/幻觉族「永不干预」原则的落实。
+func TestProseGuessLaterGroundedIsObserved(t *testing.T) {
+	g := gateFor(t)
+	g.Observe(harness.Event{Kind: harness.EventText, Text: "I suspect the flag is flag{guessed_then_proven}"})
+	toolEnd(g, "g1", "bash", "cat output.bin", "decoded payload: flag{guessed_then_proven}\n")
+
+	if p := provOf(t, g, "flag{guessed_then_proven}"); p != ProvenanceObserved {
+		t.Fatalf("先猜后验应升为 observed，got %q", p)
+	}
+	if n := len(g.New()); n != 1 {
+		t.Errorf("升族后应进入 New()，got %d 条", n)
+	}
+}
+
+// 升族通道**不能**被洗白利用：散文猜测 → 自己写文件读回来，仍然是幻觉。
+// 这是上面那条的边界 —— 两条必须同时过，否则升族就是个漏洞。
+func TestProseGuessThenSelfReadbackStaysFabricated(t *testing.T) {
+	g := gateFor(t)
+	g.Observe(harness.Event{Kind: harness.EventText, Text: "I suspect flag{guessed_then_laundered}"})
+	toolEnd(g, "w2", "bash", "echo 'flag{guessed_then_laundered}' > /tmp/f", "")
+	toolEnd(g, "r2", "bash", "cat /tmp/f", "flag{guessed_then_laundered}\n")
+
+	if p := provOf(t, g, "flag{guessed_then_laundered}"); p != ProvenanceFabricated {
+		t.Fatalf("自读回不得升族，got %q", p)
+	}
+}
+
+// 首现优先的另一个方向：观测在前，之后 agent 在散文里重复它 ⇒ 仍是观测。
+func TestObservedThenProseStaysObserved(t *testing.T) {
+	g := gateFor(t)
+	toolEnd(g, "o1", "bash", "curl -s http://t/", "flag{first_observed}\n")
+	g.Observe(harness.Event{Kind: harness.EventText, Text: "great, flag{first_observed} works"})
+
+	if p := provOf(t, g, "flag{first_observed}"); p != ProvenanceObserved {
+		t.Fatalf("首现于观测的候选不得被散文降级，got %q", p)
+	}
+}
+
+// 同一 flag 只产出一个候选。
+func TestDedupSingleCandidate(t *testing.T) {
+	g := gateFor(t)
+	for i, id := range []string{"a", "b", "c"} {
+		toolEnd(g, id, "bash", "curl -s http://t/", "flag{only_once}\n")
+		_ = i
+	}
+	seen := 0
+	for _, c := range g.Candidates() {
+		if c.Flag == "flag{only_once}" {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("同一 flag 应只产出一个候选，got %d", seen)
+	}
+	if st := g.Stats(); st.Observed != 1 {
+		t.Errorf("重复观测不应重复计数，Observed=%d", st.Observed)
+	}
+}
+
+// 记录当前工具调用 id（诊断用）。
+func TestCandidateCarriesToolCallID(t *testing.T) {
+	g := gateFor(t)
+	g.SetIntent("intent-7", 3)
+	toolEnd(g, "call-42", "bash", "curl -s http://t/", "flag{with_anchor}\n")
+
+	for _, c := range g.Candidates() {
+		if c.Flag != "flag{with_anchor}" {
+			continue
+		}
+		if c.ToolCallID != "call-42" {
+			t.Errorf("ToolCallID 应为 call-42，got %q", c.ToolCallID)
+		}
+		if c.IntentID != "intent-7" || c.Round != 3 {
+			t.Errorf("意图/轮次未回填: %+v", c)
+		}
+	}
+}
+
+// 指纹不含明文 —— 前身 flag 明文泄漏进持久文件的事故。
+//
+// 格式已统一到 `answer.Fingerprint`（唯一真源）：`fp:<hex8>/len=N/<首>…<尾>`。
+// 统一之前 gate 与 dag 各有一份实现、格式还不同，跨包对照（判错账本 ↔ prompt
+// 回灌）**字符串永远不匹配**，报告层无法把两边对上。
+func TestFingerprintHidesPlaintext(t *testing.T) {
+	const flag = "flag{super_secret_value}"
+	fp := Fingerprint(flag)
+	if strings.Contains(fp, flag) || strings.Contains(fp, "super_secret_value") {
+		t.Fatalf("指纹泄漏明文: %q", fp)
+	}
+	// 指纹要能对上号：fp: + sha256[:8] + 长度 + 首尾
+	parts := strings.Split(fp, "/")
+	if len(parts) != 3 {
+		t.Fatalf("指纹格式应为 fp:<hex8>/len=N/<首>…<尾>，got %q", fp)
+	}
+	if !strings.HasPrefix(parts[0], "fp:") || len(parts[0]) != 11 {
+		t.Errorf("前缀应为 fp: + 8 位哈希，got %q", parts[0])
+	}
+	if parts[1] != "len=24" {
+		t.Errorf("长度应为 24（按字符数），got %q", parts[1])
+	}
+	if parts[2] != "f…}" {
+		t.Errorf("首尾应为 f…}，got %q", parts[2])
+	}
+	// 不同答案的指纹必须不同
+	if Fingerprint(flag) == Fingerprint("flag{other_value}") {
+		t.Error("不同答案的指纹不应相同")
+	}
+	// 与唯一真源一致：转发不应引入偏差
+	if fp != answer.Fingerprint(flag) {
+		t.Errorf("gate.Fingerprint 应等于 answer.Fingerprint，got %q vs %q", fp, answer.Fingerprint(flag))
+	}
+}
+
+// 长度按字符数而非字节数：非 ASCII 答案不能被切出半个字符。
+func TestFingerprintCountsRunes(t *testing.T) {
+	fp := Fingerprint("密码abc")
+	if !strings.HasSuffix(fp, "/len=5/密…c") {
+		t.Errorf("非 ASCII 答案的指纹应按字符数计，got %q", fp)
+	}
+}
+
+// 判错账本：Has / Record / Fingerprints，且指纹不含明文。
+func TestLedgerRecordsWithoutPlaintext(t *testing.T) {
+	l := NewLedger()
+	const flag = "flag{rejected_by_platform}"
+	l.Record(flag, "platform_rejected")
+
+	if !l.Has(flag) {
+		t.Error("Has 应报告已判错")
+	}
+	if l.Has("flag{never_seen}") {
+		t.Error("未判错的答案不应被 Has 命中")
+	}
+	fps := l.Fingerprints()
+	if len(fps) != 1 {
+		t.Fatalf("应有 1 条指纹，got %v", fps)
+	}
+	if strings.Contains(fps[0], flag) || strings.Contains(fps[0], "rejected_by_platform") {
+		t.Fatalf("账本指纹泄漏明文: %q", fps[0])
+	}
+	if l.Reasons()[fps[0]] != "platform_rejected" {
+		t.Errorf("原因未记录: %v", l.Reasons())
+	}
+	// 重复记录不产生重复指纹
+	l.Record(flag, "platform_rejected")
+	if len(l.Fingerprints()) != 1 {
+		t.Errorf("重复记录应去重，got %v", l.Fingerprints())
+	}
+}
+
+// Ledger 必须满足根包契约接口（编译期断言）。
+var _ harness.RejectedLedger = (*Ledger)(nil)
+
+// Gate 必须满足根包契约接口。
+var _ harness.Gate = (*Gate)(nil)
+
+// ── 前身洗白路径的完整回放（端到端，事件序与 pi 一致）──
+
+// 完整回放：agent 编一个 flag 写进文件、读回来、再当成参数回喂校验器。
+// 三种事件序混在一起，族别必须在**第一步**就钉死。
+func TestFullLaunderingReplay(t *testing.T) {
+	g := gateFor(t)
+	// 1) agent 在思考里编了一个
+	g.Observe(harness.Event{Kind: harness.EventThinking, Text: "let me try flag{my_guess}"})
+	// 2) 写进文件（无输出）
+	toolEnd(g, "s1", "bash", "printf 'flag{my_guess}' > /tmp/f", "")
+	// 3) 读回来（输出里有）
+	toolEnd(g, "s2", "bash", "cat /tmp/f", "flag{my_guess}\n")
+	// 4) 回喂给本地校验器
+	toolEnd(g, "s3", "bash", "python3 check.py 'flag{my_guess}'", "INVALID\n")
+	// 5) agent 在总结里又写了一遍
+	g.Observe(harness.Event{Kind: harness.EventText, Text: "so the flag is flag{my_guess}"})
+
+	if p := provOf(t, g, "flag{my_guess}"); p != ProvenanceFabricated {
+		t.Fatalf("整条洗白链走完仍必须是 fabricated，got %q", p)
+	}
+	if n := len(g.New()); n != 0 {
+		t.Errorf("洗白候选一次都不得提交，got %d 条", n)
+	}
+	if st := g.Stats(); st.Fabricated != 1 {
+		t.Errorf("应只记 1 条幻觉族（不得因重复出现重复计数）: %+v", st)
+	}
+}
+
+// 与上一条对称：真正的观测路径走完必须能提交。
+// 这两条必须同时过 —— 只测一条的话，一个「永远返回非观测」的实现也能过。
+func TestFullObservationReplay(t *testing.T) {
+	g := gateFor(t)
+	// 1) agent 探测服务
+	toolEnd(g, "s1", "bash", "nmap -sV 10.0.0.1", "80/tcp open http\n")
+	// 2) 打端点，靶标返回 flag
+	toolEnd(g, "s2", "bash", "curl -s http://10.0.0.1/admin/flag", "{\"flag\":\"flag{from_target}\"}\n")
+	// 3) agent 在总结里复述
+	g.Observe(harness.Event{Kind: harness.EventText, Text: "got flag{from_target}"})
+	// 4) 再打一次同样的端点
+	toolEnd(g, "s3", "bash", "curl -s http://10.0.0.1/admin/flag", "{\"flag\":\"flag{from_target}\"}\n")
+
+	if p := provOf(t, g, "flag{from_target}"); p != ProvenanceObserved {
+		t.Fatalf("真观测链必须是 observed，got %q", p)
+	}
+	if n := len(g.New()); n != 1 {
+		t.Fatalf("真观测应产出 1 条可提交候选，got %d", n)
+	}
+}

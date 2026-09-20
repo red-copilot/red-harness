@@ -1,0 +1,16 @@
+# 凭据——绝不入库
+.env
+*.env
+!.env.example
+
+# 运行产物（含候选明文与原始证据）
+runs/
+private/
+*.tmp
+
+# 工具与缓存
+.remember/
+node_modules/
+.pi-sessions/
+.pi-home/
+.claude/worktrees/

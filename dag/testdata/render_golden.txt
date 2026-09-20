@@ -1,0 +1,25 @@
+## 本题
+编号：web-01   类别：pentest   难度：medium   进度：flag 1/2 已确认
+目标地址：10.0.0.1:80, 10.0.0.1:8080
+题面：目标是一个 PHP 上传站，拿到 flag 后提交，格式 flag{...}。
+
+## 已知事实（有来源，可直接使用）
+- [credential] admin:Admin@123   ← bash: curl -s http://10.0.0.1/login（未验证）
+- [vuln] /upload 无类型校验   ← report_fact（agent 申报，confidence 0.7）
+- [service] nginx/1.18.0   ← bash: whatweb http://10.0.0.1
+- [target] 10.0.0.1:80   ← platform
+- [target] 10.0.0.1:8080   ← platform
+
+## 已证伪，不要再试
+- 22 端口 SSH 未开放（connection refused） （源自 intent:i5）
+
+## 本轮意图（只做这一件事）
+[exploit] 验证 /upload 的任意文件上传：尝试上传 webshell 并访问验证。
+预期产出：能推进本方向的新事实。
+若失败，请申报一条 negative 事实说明失败原因（这样下一轮不会再试同一条路）。
+
+## 交付
+找到答案立即 `printf '%s\n' '答案' >> FLAG`（追加，不要覆盖）。
+答案格式以题目描述为准——题目要求 `flag{...}` 就写 `flag{...}`，要求密码/hash/密钥就写原始值，不要自己加外壳。
+以下候选已被平台判错，不要再提交（只给指纹）：fp:deadbeef/len=12/f…x
+完成后用 report_fact 申报本轮事实（含失败原因）。
