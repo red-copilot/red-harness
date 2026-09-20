@@ -107,9 +107,27 @@ var stateFileRe = regexp.MustCompile(`(?:^|[/\\"' ])(?:` +
 	`MEMORY(?:\.md)?|MEMORY\.md|_?blackboard[\w.\-]*|todolist[\w.\-]*|` +
 	`tried_commands[\w.\-]*|_transcripts|notes[\w.\-]*` +
 	`)(?:[\s"'` + "`" + `,;)|&<>]|$)`)
+
+// stateFileReCI 是 stateFileRe 的**收窄后**大小写不敏感变体。
+//
+// ⚠️ 这里**只保留 `flag(?:\.(?:txt|md|json|log))` 一项**，其余名字回到
+// 大小写敏感（由 stateFileRe 负责）。原因是一类真实的损失：
+//
+//	原实现让裸小写 `notes` / `memory` / `todolist` / `_blackboard*` /
+//	`tried_commands*` / `_transcripts` 也 CI 匹配，于是靶标端点上恰好叫这些
+//	名字的路径被误判 —— `curl -s http://t/flag.txt`、
+//	`curl -s http://10.0.0.1/notes`、`grep -r memory /etc` 全被判成
+//	self_readback ⇒ locked=true ⇒ **该候选永久不可提交**。
+//
+// 这正是本文件记录的「29 条被拒里 19 条实为正确答案」那一类：误判的代价是
+// 把真观测掐掉，而掐掉之后**没有任何报错**。
+//
+// 为什么 `flag.txt` 这一项要留在 CI 里：前身的状态文件确实有小写的
+// `flag.txt` / `flag.md`，而靶标端点上的 `/flag.txt` 是另一回事 —— 两者在
+// **词法**上不可区分，靠的是 URL 已在调用方摘除。这是刻意的取舍：宁可在这
+// 一项上保守（认它），也不要在 notes/memory 这类常见靶标路径上误判。
 var stateFileReCI = regexp.MustCompile(`(?i)(?:^|[/\\"' ])(?:` +
-	`flag(?:\.(?:txt|md|json|log))|memory(?:\.md)?|_?blackboard[\w.\-]*|` +
-	`todolist[\w.\-]*|tried_commands[\w.\-]*|_transcripts|notes[\w.\-]*` +
+	`flag(?:\.(?:txt|md|json|log))` +
 	`)(?:[\s"'` + "`" + `,;)|&<>]|$)`)
 
 // readsOwnState 报告这条命令是否在读写 agent 自己的状态文件。
@@ -118,10 +136,17 @@ var stateFileReCI = regexp.MustCompile(`(?i)(?:^|[/\\"' ])(?:` +
 // 结论写进这些文件后再 cat，与 echo 自造同源」。这里做的是**词法**判定而不是
 // 前身那套 shell 分词 —— 因为首现优先已经覆盖了绝大多数洗白路径，这里只需
 // 挡住最直白的一类（文件名精确出现），多写的每一行解析器都会变成新的误判面。
+//
+// **先摘 URL，再判文件名。** 这一步是必须的，且和 materializedInCommand 里
+// 摘 URL 是同一个理由：靶标端点的路径与 agent 的状态文件名**同形**。
+// `curl -s http://t/flag.txt` 里的 `/flag.txt` 是靶标路径，不摘的话会被判成
+// self_readback ⇒ locked=true ⇒ 该候选永久不可提交。原实现只靠「CI 变体里
+// 不放裸 flag」躲过了 `/flag`，但躲不过 `/flag.txt`、`/notes`、`/memory`。
 func readsOwnState(cmd string) bool {
 	if cmd == "" {
 		return false
 	}
+	cmd = stripURLs(cmd)
 	if stateFileRe.MatchString(cmd) || stateFileReCI.MatchString(cmd) {
 		return true
 	}
@@ -559,26 +584,4 @@ func hasNonAlpha(s string) bool {
 		}
 	}
 	return false
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		b[i] = '-'
-	}
-	return string(b[i:])
 }

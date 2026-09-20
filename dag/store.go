@@ -1,8 +1,6 @@
 package dag
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,40 +149,24 @@ func (g *Graph) scrub(s string) string {
 	return s
 }
 
-// FlagFingerprint 返回一个答案的指纹：sha256[:8] + 长度 + 首尾字符。
+// FlagFingerprint 返回一个答案的指纹。**它只是 answer.Fingerprint 的转发。**
 //
-// **不给明文**是刻意的（前身 `_scrub_flag_plaintext`）：判错的 flag 要回灌进下一轮
-// prompt 告诉 agent「这个不要再试」，但把明文写回去等于把答案又塞进上下文——
-// 一旦上下文被压缩/落盘/上报，明文就泄漏了。指纹足够让 agent 判断「我是不是又想到
-// 同一个」，又不足以让它直接抄。
+// 唯一真源是 `answer.Fingerprint`（answer/fingerprint.go）。这里保留一个转发
+// 函数而不是让调用点直接改调 answer，是因为 dag 内部的调用点很多（schedule.go
+// 的渲染、store 的落盘、以及测试里对格式的断言），一次全改的 diff 会把
+// 「统一真源」这件事埋在一堆机械改动里。
 //
-// 应改为调用 answer.Fingerprint（唯一真源）；格式 fp:<hex8>/len=N/<首>…<尾>。
-// 现在这份实现与 answer.Fingerprint **逐字同构**（同一套格式、同一套 rune 处理），
-// 但它是**第二份实现**：核验发现 gate 侧的 Fingerprint 用了另一套格式
-// （`<hex8>:<字符数>:<首><尾>`），两套格式并存会让「gate 说平台判错的」与
-// 「dag 记下的死胡同」无法按指纹 join——同一份判错回灌在两条链路上各记一套。
-// 真源已落地在 answer 包（answer/fingerprint.go），这里**先不动**（仓库所有者
-// 要求统一改，且改签名会波及 gate 的调用点），届时本函数应直接转发：
+// **历史**：这里原本是 `answer.Fingerprint` 的**逐字节重复实现**。核验发现
+// gate 侧当时用了另一套格式（`<hex8>:<字符数>:<首><尾>`），两套格式并存会让
+// 「gate 说平台判错的」与「dag 记下的死胡同」无法按指纹 join——同一份判错回灌
+// 在两条链路上各记一套。现在两侧都转发到 answer，格式是
+// `fp:<hex8>/len=<rune数>/<首>…<尾>`。
 //
-//	func FlagFingerprint(flag string) string { return answer.Fingerprint(flag) }
-//
-// 或直接删除、让调用点改调 answer.Fingerprint（连同 extract_test.go 里对格式的
-// 断言一起改）。保留这段说明是因为：一个「看起来一样」的副本比一个明显不同的
-// 副本更危险——它会在某次单边修改后静默分叉。
-func FlagFingerprint(flag string) string {
-	flag = strings.TrimSpace(flag)
-	sum := sha256.Sum256([]byte(flag))
-	fp := hex.EncodeToString(sum[:])[:8]
-	if flag == "" {
-		return fmt.Sprintf("fp:%s/len=0", fp)
-	}
-	r := []rune(flag)
-	first, last := string(r[0]), string(r[len(r)-1])
-	if len(r) == 1 {
-		last = first
-	}
-	return fmt.Sprintf("fp:%s/len=%d/%s…%s", fp, len(r), first, last)
-}
+// **不给明文**是刻意的（前身 `_scrub_flag_plaintext`）：判错的 flag 要回灌进
+// 下一轮 prompt 告诉 agent「这个不要再试」，但把明文写回去等于把答案又塞进
+// 上下文——一旦上下文被压缩/落盘/上报，明文就泄漏了。指纹足够让 agent 判断
+// 「我是不是又想到同一个」，又不足以让它直接抄。
+func FlagFingerprint(flag string) string { return answer.Fingerprint(flag) }
 
 // Load 从磁盘载入图。文件不存在时返回 os.ErrNotExist 包装的错误。
 //
@@ -329,7 +311,38 @@ func migrate(doc *document) error {
 			return fmt.Errorf("没有从 schema %d 出发的迁移路径", doc.Schema)
 		}
 	}
+	// 迁移后的**收尾规范化**，对每个 schema 版本都生效。
+	//
+	// 为什么放在循环外而不是某个 case 里：`interrupted` 是 v0.3 新增的状态，
+	// 而**所有** schema 版本（含当前的 1）写出的图都可能带它——暂停一次就写一次。
+	// 老版本代码读到带 interrupted 的图时，executable 的 switch 会落到 default
+	// （不可执行），整条阶段链静默停住。这里把它降级成 pending：**这是保守方向**
+	// ——重跑一轮的代价是多花一次预算，而静默停住的代价是整道题卡死且不报错。
+	//
+	// 注意降级的是**读到新状态的旧程序**这个场景；新程序读到 interrupted 时
+	// Valid() 认它，不会被这里改掉。
+	normalizeStates(doc)
 	return nil
+}
+
+// normalizeStates 把未知的意图状态降级为 pending，并记录哪些节点被改过。
+//
+// 只动**未知**状态：已知状态（含 interrupted）原样保留，因为它们的语义是
+// 明确的，改动会破坏「暂停时中断的意图不被假定成功」这条设计约定。
+func normalizeStates(doc *document) {
+	for _, n := range doc.Nodes {
+		if n == nil || !n.IsIntent() {
+			continue
+		}
+		if n.State == "" {
+			n.State = IntentPending
+			continue
+		}
+		if !n.State.Valid() {
+			// 未知状态（未来版本写的、人工编辑的、被截断的）⇒ 降级为 pending。
+			n.State = IntentPending
+		}
+	}
 }
 
 // MarshalJSON 不导出内部索引（它们是派生数据，落盘没有意义且会不同步）。

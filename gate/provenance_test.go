@@ -126,6 +126,78 @@ func TestTargetPathFlagIsNotOwnStateFile(t *testing.T) {
 	}
 }
 
+// TestStateFileReCINarrowed 钉死 stateFileReCI 的收窄。
+//
+// 缺陷：CI 变体让裸小写 `notes` / `memory` / `todolist` / `_blackboard*` /
+// `tried_commands*` / `_transcripts` 也大小写不敏感匹配，于是靶标端点上**恰好
+// 叫这些名字的路径**（`/notes`、`/memory`、`/flag.txt`）被误判成「agent 在读
+// 自己的状态文件」⇒ provenance 记 self_readback ⇒ gate 置 locked=true ⇒
+// **该候选永久不可提交**。
+//
+// 这正是 provenance.go 自己记录的「29 条被拒里 19 条实为正确答案」那一类：
+// 误判的代价是把真观测掐掉，而掐掉之后没有任何报错。
+//
+// 收窄方式：CI 变体只保留 `flag(?:\.(?:txt|md|json|log))`（小写 `flag.txt`
+// 确实是前身状态文件的实际名字），其余名字回到大小写敏感。
+func TestStateFileReCINarrowed(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want bool // true = 判为读写自己的状态文件
+		why  string
+	}{
+		// ── 必须仍然命中：真状态文件 ──
+		{"cat FLAG", true, "大写 FLAG 是前身状态文件"},
+		{"cat FLAG.txt", true, "带扩展名的大写 FLAG"},
+		{"cat flag.txt", true, "小写 flag.txt 也是状态文件名（CI 变体保留这一项）"},
+		{"cat flag.json", true, "同上，带 json 扩展名"},
+		{"cat MEMORY.md", true, "大写 MEMORY.md 是前身状态文件"},
+		{"cat notes.txt", true, "notes 前缀"},
+		{"cat _blackboard.json", true, "前身黑板书"},
+		{"cat tried_commands.md", true, "前身已试命令账本"},
+		{"cat _transcripts", true, "前身 transcript"},
+		{"cat todolist.md", true, "前身待办"},
+		{"cat /tmp/work/SOURCE.md", true, "大写 SOURCE.md 是前身状态文件"},
+
+		// ── 收窄后**不再**命中：小写变体 ──
+		// 这是收窄的代价，也是刻意的取舍：这些名字在靶标端点上太常见
+		// （`/notes`、`/memory`、`/todolist` 都是常见的题目路径），
+		// 误判的后果是永久不可提交，而漏判的后果只是多走一遍首现优先。
+		{"cat memory.md", false,
+			"小写 memory.md 不再命中：靶标端点 /memory 太常见，误判代价高于漏判"},
+		{"cat source.md", false, "小写 source.md 同理"},
+		{"cat TODO.md", false, "TODO 不在名单里"},
+
+		// ── 必须不再命中：靶标端点上恰好同名的路径 ──
+		{"curl -s http://t/flag.txt", false,
+			"靶标端点 /flag.txt 是真观测；判 self_readback 会让该候选永久不可提交"},
+		{"curl -s http://10.0.0.1/notes", false,
+			"靶标端点 /notes 是常见的题目路径"},
+		{"curl -s http://10.0.0.1/memory", false,
+			"靶标端点 /memory 同理"},
+		{"grep -r memory /etc", false,
+			"在系统目录里搜 memory 是正常侦察，不是读自己的状态文件"},
+		{"curl -s http://10.0.0.1/FLAG", false,
+			"靶标端点上的 /FLAG 是大写路径，不是 agent 的文件"},
+		{"curl -s http://10.0.0.1/TODO", false,
+			"靶标端点上的普通词"},
+		{"curl -s http://t/api/blackboard", false,
+			"URL 路径里的 blackboard 段不是状态文件名（前面有 /api/ 而非路径起点）"},
+
+		// ── 边界：URL 已由调用方摘除的场景 ──
+		{"curl -s http://10.0.0.1/flag", false,
+			"裸 /flag 是靶标端点（已有的 TestTargetPathFlagIsNotOwnStateFile 覆盖）"},
+	}
+	for _, c := range cases {
+		if got := readsOwnState(c.cmd); got != c.want {
+			verdict := "应判为状态文件"
+			if !c.want {
+				verdict = "不应判为状态文件"
+			}
+			t.Errorf("%q %s（%s）—— 收窄后 got=%v", c.cmd, verdict, c.why, got)
+		}
+	}
+}
+
 // 情形 4：`python3 solve.py` 输出含 flag ⇒ **观测**。
 //
 // 与情形 1 的唯一区别是命令文本 —— 所以这两条必须一起过。
@@ -452,7 +524,7 @@ func TestLedgerRecordsWithoutPlaintext(t *testing.T) {
 var _ harness.RejectedLedger = (*Ledger)(nil)
 
 // Gate 必须满足根包契约接口。
-var _ harness.Gate = (*Gate)(nil)
+var _ harness.CandidateGate = (*Gate)(nil)
 
 // ── 前身洗白路径的完整回放（端到端，事件序与 pi 一致）──
 

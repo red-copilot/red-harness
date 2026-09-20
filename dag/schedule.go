@@ -8,7 +8,7 @@ import (
 	harness "github.com/red-copilot/red-harness"
 )
 
-// ── Scheduler：harness.Scheduler 的实现 ──
+// ── Scheduler：harness.Planner 的实现 ──
 //
 // 它把图接到根包的轮循环上。**注意它的定位**：调度主干仍是目标链
 // （`seedChain` 按类别铺一条阶段链，阶段序即优先级），图在这里挣的是
@@ -22,7 +22,7 @@ type Scheduler struct {
 	// 在这里做，不能让 agent 传。
 	activeID string
 	// known 是 Activate 时图上已有的事实 id 集合。Settle 靠它算出「本轮产出了
-	// 什么」——harness.Scheduler 的 Settle 签名只给 RoundResult，没有 produced 列表。
+	// 什么」——harness.Planner 的 Settle 签名只给 RoundResult，没有 produced 列表。
 	known map[string]bool
 
 	// LastErr 记录 Activate/Settle 的内部错误。接口没有 error 返回值，所以
@@ -34,7 +34,7 @@ type Scheduler struct {
 func NewScheduler(g *Graph) *Scheduler { return &Scheduler{G: g} }
 
 // 编译期断言：Scheduler 满足根包契约。
-var _ harness.Scheduler = (*Scheduler)(nil)
+var _ harness.Planner = (*Scheduler)(nil)
 
 // Next 返回下一个可执行的意图；前沿耗尽时返回 nil。
 //
@@ -42,14 +42,19 @@ var _ harness.Scheduler = (*Scheduler)(nil)
 // New/NewScheduler：断点续跑的图里已经有意图了，重新铺一条链会让阶段重复执行
 // （前身「每次 prompt 都被告知仍在做 recon」的另一面）。
 //
-// ch 只用来补图的身份字段（类别/编号）：图的 Category 决定铺哪条阶段链，而
-// `New(harness.Challenge{})` 建出来的图没有类别，会静默走默认链——crypto 题
+// in.Challenge 只用来补图的身份字段（类别/编号）：图的 Category 决定铺哪条阶段链，
+// 而 `New(harness.Challenge{})` 建出来的图没有类别，会静默走默认链——crypto 题
 // 于是从端口扫描开始（前身 goals_for_category 的全部意义就是避免这件事）。
-// out 刻意不用：见下方「平台判错的答案为什么不转成 negative」。
-func (s *Scheduler) Next(_ context.Context, ch harness.Challenge, _ *harness.Outcome) *harness.IntentRef {
+// in.Outcome 刻意不用：见下方「平台判错的答案为什么不转成 negative」。
+//
+// 错误返回：只有「图本身不可用」才算错误。前沿耗尽不是错误——它是正常的终局，
+// 用 (nil, nil) 表达。把两者混成一个 error 会让轮循环无法区分「做完了」与
+// 「图坏了」。
+func (s *Scheduler) Next(_ context.Context, in harness.PlannerInput) (*harness.IntentRef, error) {
 	if s.G == nil {
-		return nil
+		return nil, nil
 	}
+	ch := in.Challenge
 	if s.G.Category == "" {
 		s.G.Category = ch.Category
 	}
@@ -59,9 +64,9 @@ func (s *Scheduler) Next(_ context.Context, ch harness.Challenge, _ *harness.Out
 	s.seedChain()
 	n := s.G.NextIntent()
 	if n == nil {
-		return nil
+		return nil, nil
 	}
-	return &harness.IntentRef{ID: n.ID, Kind: string(n.IntentKind), Goal: n.Goal, Round: n.Round}
+	return &harness.IntentRef{ID: n.ID, Kind: string(n.IntentKind), Goal: n.Goal, Round: n.Round}, nil
 }
 
 // Activate 标记意图进入执行中，并记下「此刻图上有什么」作为产出判定的水位线。
@@ -126,6 +131,23 @@ type IngestResult struct {
 	// Enabled 是 agent 的 `next` 建议派生出的意图 id。它只是**候选**：进了前沿
 	// 也要按阶段序/轮次/序号排队，不保证下一轮就被执行（agent 建议不等于调度）。
 	Enabled []string
+}
+
+// ObserveEvent 实现 harness.Planner。
+//
+// **为什么是薄包装而不是把 Ingest 改名**：Ingest 返回 IngestResult，而
+// harness.Planner 的方法集里 ObserveEvent 没有返回值。Go 不允许同名方法只因
+// 返回值不同而共存，所以保留 Ingest（既有测试读它的返回值），再加这一层。
+//
+// **为什么必须收进接口**（v0.2 的教训）：v0.2 靠 `Session.Ingest func(Event,int)`
+// 接线，漏接是**静默**的——DAG 零事实、7 个阶段只有前 4 个可达，而所有包自测
+// 全绿（`wiring_test.go:85` 就是为这个写的）。收进接口后漏接变成编译错误。
+//
+// 返回值被丢弃是**有意的**：AnswerShaped 是给 gate 的路由提示，而 gate 在同一
+// 条事件路径上自己也会看到这个事件（engine 的 runLoop 会调 Gate.Observe）。
+// 两个账本各自记账，图不替 gate 转交。
+func (s *Scheduler) ObserveEvent(ev harness.Event, round int) {
+	_ = s.Ingest(ev, round)
 }
 
 func (s *Scheduler) Ingest(ev harness.Event, round int) IngestResult {
@@ -406,7 +428,10 @@ type Renderer struct {
 var _ harness.Renderer = (*Renderer)(nil)
 
 // Render 实现 harness.Renderer。
-func (r *Renderer) Render(_ context.Context, ch harness.Challenge, it *harness.IntentRef, out *harness.Outcome) string {
+//
+// 签名用 *OutcomeView（v0.2 是 *Outcome）：`Flags` 与 `Candidates` 两个字段的
+// 语义完全没变，所以函数体只有类型名的差异。
+func (r *Renderer) Render(_ context.Context, ch harness.Challenge, it *harness.IntentRef, out *harness.OutcomeView) string {
 	if r.G == nil {
 		return ""
 	}

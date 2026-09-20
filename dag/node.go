@@ -100,7 +100,33 @@ const (
 	IntentBlocked IntentState = "blocked"
 	// IntentAbandoned 预算耗尽 / 被 negative 事实证伪。
 	IntentAbandoned IntentState = "abandoned"
+	// IntentInterrupted 本轮被**暂停**打断，动作是否生效未知。
+	//
+	// 为什么单列一个状态而不是复用 failed：暂停时 agent 可能已经把命令发出去了
+	// （写操作可能已生效），但本轮没有等到结果。恢复时**不能假定它成功**，也不能
+	// 假定它失败——所以它既不是 done 也不是 failed，而是一个需要重新对账的
+	// 中间态。恢复后由 Scenario.Reconcile 对账决定它最终落到 done 还是 failed。
+	//
+	// 为什么必须落盘：进程被杀时内存里的状态没了，图是唯一能告诉恢复路径
+	// 「这一轮被打断过」的地方。不落盘的话恢复后会把它当成 pending 重跑一遍，
+	// 而重跑一个可能已生效的写操作正是设计文档里点名的第 3 类真实损失。
+	IntentInterrupted IntentState = "interrupted"
 )
+
+// Valid 报告这个状态是否是已知状态。
+//
+// 为什么需要它：IntentState 是从 JSON 反序列化来的，旧文档、人工编辑过的文档、
+// 或未来版本写的新状态都可能出现。未知状态在 `executable` 的 switch 里会落到
+// default 分支（不可执行），看起来像「意图做完了」——一个拼错的状态会让整条
+// 阶段链静默停住。所以读取路径上要显式校验。
+func (s IntentState) Valid() bool {
+	switch s {
+	case IntentPending, IntentActive, IntentDone, IntentFailed, IntentBlocked,
+		IntentAbandoned, IntentInterrupted:
+		return true
+	}
+	return false
+}
 
 // 三层信任（见 extract.go 与设计文档 §一）。
 //

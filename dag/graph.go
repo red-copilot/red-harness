@@ -805,6 +805,30 @@ func (g *Graph) Activate(id string) error {
 	return nil
 }
 
+// SetState 直接设置一个意图的状态，并把 UpdatedAt 推到当前轮。
+//
+// **只给「外部事件驱动的状态迁移」用**：暂停打断时把 active 标成 interrupted
+// 是引擎（或宿主）知道的、图自己算不出来的事实。常规的 done/failed 判定一律走
+// Settle，被证伪一律走 refutes 边——**不要用这个方法绕过那些不变量**。
+//
+// 已知状态才允许写入：写一个拼错的状态会让意图在 executable 的 switch 里落到
+// default（不可执行），表现与「已做完」一样，整条阶段链静默停住。
+func (g *Graph) SetState(id string, st IntentState) error {
+	n := g.nodes[id]
+	if n == nil {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	if !n.IsIntent() {
+		return fmt.Errorf("%w: %s 不是意图", ErrEdgeKind, id)
+	}
+	if !st.Valid() {
+		return fmt.Errorf("%w: %s 未知意图状态 %q", ErrBadState, id, st)
+	}
+	n.State = st
+	n.UpdatedAt = g.now()
+	return nil
+}
+
 // Settle 结算一轮：按「实际产出了什么」决定 done / failed，并把 produces 边
 // 连上（这条边同时是 vuln/foothold 的证据引用目标）。
 //
@@ -995,8 +1019,13 @@ func (g *Graph) executable(n *Node) bool {
 		return false
 	}
 	switch n.State {
-	case IntentPending, IntentFailed:
+	case IntentPending, IntentFailed, IntentInterrupted:
 		// failed 可以重试（还有尝试余额）；done / abandoned 是终态。
+		//
+		// interrupted 也可重试：暂停打断的那一轮动作是否生效未知，恢复后由
+		// Scenario.Reconcile 对账决定。**不能假定它成功**（会漏掉一次真实的
+		// 平台写操作），也不能假定它失败（会重复一次可能已生效的写操作）——
+		// 所以先让它回到可执行，把判断交给对账。
 	default:
 		return false
 	}
@@ -1073,6 +1102,12 @@ func (g *Graph) Validate() []error {
 			}
 			if !n.IntentKind.Valid() {
 				errs = append(errs, fmt.Errorf("节点 %s: 未知意图类别 %q", id, n.IntentKind))
+			}
+			// 状态是**从 JSON 反序列化来的**，所以必须显式校验：未知状态在
+			// executable 的 switch 里落到 default（不可执行），表现与「已做完」
+			// 完全一样——一个拼错的状态会让整条阶段链静默停住，没有任何报错。
+			if !n.State.Valid() {
+				errs = append(errs, fmt.Errorf("节点 %s: 未知意图状态 %q", id, n.State))
 			}
 			continue
 		}

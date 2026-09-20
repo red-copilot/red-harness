@@ -196,6 +196,156 @@ func TestMigrateFromV0(t *testing.T) {
 	}
 }
 
+// TestLoadV0_2GraphJSON 钉住 v0.2 写出的 graph.json 仍可载入。
+//
+// 这是最容易静默失败的一处：`document.Shape` 是 `answer.Shape` 的**无 json tag
+// 嵌入**，所以持久化键是 Go 字段名原样（`Envelopes`/`AllowRaw`/`RawMinLen`/
+// `RawMaxLen`）。任何人给 answer.Shape 加 json tag 或改字段名，都会让所有现存
+// graph.json 的 shape 读成零值——而零值 shape 的表现是「答案形状拒入图」彻底
+// 失效，图开始把 flag 当普通事实收进来（前身那条硬规矩的反面），且**没有任何
+// 报错**。
+//
+// 这份字面量是从 v0.2 的真实落盘格式抄下来的（schema 1，answer.Shape 无 tag）。
+func TestLoadV0_2GraphJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "graph.json")
+	v02 := `{
+	  "schema": 1,
+	  "harnessVersion": "0.2.0",
+	  "savedAt": "2026-09-20T12:00:00Z",
+	  "code": "web-01",
+	  "category": "pentest",
+	  "shape": {
+	    "Envelopes": [{"Prefix": "flag{", "Suffix": "}"}],
+	    "AllowRaw": false,
+	    "RawMinLen": 6,
+	    "RawMaxLen": 200
+	  },
+	  "round": 3,
+	  "seq": 7,
+	  "nodes": [
+	    {"id":"f1","kind":"fact","factKind":"target","content":"10.0.0.1:80","source":"platform","trust":"host-verified"},
+	    {"id":"f2","kind":"fact","factKind":"service","content":"nginx/1.18.0","source":"bash: nmap","trust":"host-verified"},
+	    {"id":"i1","kind":"intent","intentKind":"recon","goal":"扫端口","state":"done","attempts":1,"round":1},
+	    {"id":"i2","kind":"intent","intentKind":"lateral","goal":"横向","state":"pending","round":1}
+	  ],
+	  "edges": [
+	    {"from":"i1","to":"f1","kind":"requires","round":1},
+	    {"from":"i1","to":"f2","kind":"produces","round":1}
+	  ]
+	}`
+	if err := os.WriteFile(path, []byte(v02), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g, err := Load(path)
+	if err != nil {
+		t.Fatalf("v0.2 的 graph.json 必须能载入（schema 1 是当前版本）: %v", err)
+	}
+
+	// shape 必须逐字段读对——这是本测试存在的全部理由。
+	if g.Shape.Empty() {
+		t.Fatal("shape 读成了零值：answer.Shape 的字段名或 json tag 被改过了")
+	}
+	if len(g.Shape.Envelopes) != 1 {
+		t.Fatalf("Envelopes 应读出 1 条，实际 %d（%+v）", len(g.Shape.Envelopes), g.Shape.Envelopes)
+	}
+	if g.Shape.Envelopes[0].Prefix != "flag{" || g.Shape.Envelopes[0].Suffix != "}" {
+		t.Errorf("Envelope 读错：%+v", g.Shape.Envelopes[0])
+	}
+	if g.Shape.AllowRaw {
+		t.Error("AllowRaw 应为 false（v0.2 落盘的值）")
+	}
+	if g.Shape.RawMinLen != 6 || g.Shape.RawMaxLen != 200 {
+		t.Errorf("RawMinLen/RawMaxLen 读错：%d/%d", g.Shape.RawMinLen, g.Shape.RawMaxLen)
+	}
+
+	// 形状判定必须真的生效——零值 shape 的表现就是这里失效。
+	if _, err := g.AddFact(Node{Kind: NodeFact, FactKind: FactArtifact,
+		Content: "flag{from_v0_2_graph}", Source: "bash: cat f"}); !errors.Is(err, ErrAnswerShaped) {
+		t.Errorf("载入 v0.2 图后答案形状判定必须生效，got %v", err)
+	}
+
+	// 身份字段与图结构。
+	if g.Code != "web-01" || g.Category != "pentest" {
+		t.Errorf("身份字段读错：code=%q category=%q", g.Code, g.Category)
+	}
+	if g.Round != 3 {
+		t.Errorf("round 读错：%d", g.Round)
+	}
+	if n := g.Node("i1"); n == nil || n.State != IntentDone {
+		t.Errorf("i1 状态读错：%+v", n)
+	}
+	if len(g.Validate()) != 0 {
+		t.Errorf("载入的 v0.2 图应当通过不变量复查：%v", g.Validate())
+	}
+}
+
+// TestMigrateUnknownIntentStateBecomesPending 钉住「未知意图状态降级为 pending」。
+//
+// 未知状态在 executable 的 switch 里落到 default（不可执行），表现与「已做完」
+// 完全一样——一个拼错的状态会让整条阶段链静默停住。降级方向是保守的：重跑一轮
+// 只多花一次预算，静默停住会让整道题卡死且不报错。
+func TestMigrateUnknownIntentStateBecomesPending(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dag.json")
+	doc := `{
+	  "schema": 1, "code": "x", "category": "pentest",
+	  "shape": {"Envelopes":[{"Prefix":"flag{","Suffix":"}"}],"AllowRaw":false,"RawMinLen":6,"RawMaxLen":200},
+	  "nodes": [
+	    {"id":"i1","kind":"intent","intentKind":"recon","goal":"扫端口","state":"bogus_future_state"},
+	    {"id":"i2","kind":"intent","intentKind":"recon","goal":"扫端口2","state":"interrupted"}
+	  ],
+	  "edges": []
+	}`
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g, err := Load(path)
+	if err != nil {
+		t.Fatalf("载入: %v", err)
+	}
+	if n := g.Node("i1"); n == nil || n.State != IntentPending {
+		t.Errorf("未知状态应降级为 pending，got %+v", n)
+	}
+	// interrupted 是**已知**状态，必须原样保留——它的语义是「暂停打断，动作
+	// 是否生效未知」，改掉它就破坏了「不假定中断成功」这条约定。
+	if n := g.Node("i2"); n == nil || n.State != IntentInterrupted {
+		t.Errorf("interrupted 必须原样保留，got %+v", n)
+	}
+}
+
+// TestInterruptedIntentIsExecutable 钉住 interrupted 意图仍在前沿里。
+//
+// 暂停打断的那一轮动作是否生效未知，恢复后要由 Reconcile 对账决定。若它被
+// 当作终态移出前沿，那一轮就永远不会被重新考虑——一次真实的平台写操作可能
+// 已经生效却被忽略。
+func TestInterruptedIntentIsExecutable(t *testing.T) {
+	g := newTestGraph(t, "10.0.0.1:80")
+	id, err := g.AddIntent(Node{Kind: NodeIntent, IntentKind: IntentRecon, Goal: "扫端口"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Activate(id); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟暂停：把 active 标记成 interrupted。
+	if err := g.SetState(id, IntentInterrupted); err != nil {
+		t.Fatalf("SetState: %v", err)
+	}
+	if n := g.Node(id); n.State != IntentInterrupted {
+		t.Fatalf("状态未落：%+v", n)
+	}
+	found := false
+	for _, n := range g.Frontier() {
+		if n.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("interrupted 意图必须留在前沿——恢复后要靠对账决定它的结局")
+	}
+}
+
 // 未来版本必须**拒绝**载入，而不是猜着读（猜着读会静默丢字段）。
 func TestLoadRejectsNewerSchema(t *testing.T) {
 	dir := t.TempDir()

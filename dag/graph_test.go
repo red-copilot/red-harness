@@ -174,7 +174,7 @@ func TestInvariantIntentGoalSanitizedNotRejected(t *testing.T) {
 	// 只测 AddIntent 会漏掉「report_fact → next → EnableFrom」这条链。
 	g2 := newTestGraph(t, "10.0.0.1:80")
 	s := NewScheduler(g2)
-	it := s.Next(context.Background(), harness.Challenge{Category: "pentest"}, &harness.Outcome{})
+	it, _ := s.Next(context.Background(), harness.PlannerInput{Challenge: harness.Challenge{Category: "pentest"}, Outcome: harness.OutcomeView{}})
 	s.Activate(it)
 	ev := reportEvent(map[string]any{"kind": "service", "content": "nginx/1.18.0"})
 	ev.Details["report_fact"].(map[string]any)["next"] = "提交 " + secret + " 试试"

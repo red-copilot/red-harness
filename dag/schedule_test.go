@@ -18,7 +18,7 @@ func TestSchedulerEndToEnd(t *testing.T) {
 	ch := harness.Challenge{Code: "web-01", Category: "pentest", Addrs: []string{"10.0.0.1:80"}}
 	ctx := context.Background()
 
-	it := s.Next(ctx, ch, &harness.Outcome{})
+	it, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 	if it == nil {
 		t.Fatal("首轮必须给出意图")
 	}
@@ -54,7 +54,7 @@ func TestSchedulerEndToEnd(t *testing.T) {
 		t.Errorf("本轮有新事实 ⇒ 意图应 done, got %s", n.State)
 	}
 	// 下一条意图：recon 做完后按阶段序应是 exploit
-	next := s.Next(ctx, ch, &harness.Outcome{})
+	next, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 	if next == nil {
 		t.Fatal("还有阶段没做完，应给出下一条意图")
 	}
@@ -74,7 +74,7 @@ func TestSchedulerSeedChainOnce(t *testing.T) {
 	ch := harness.Challenge{Category: "pentest"}
 	ctx := context.Background()
 
-	first := s.Next(ctx, ch, &harness.Outcome{})
+	first, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 	if first == nil {
 		t.Fatal("应铺链并给出首条意图")
 	}
@@ -91,7 +91,7 @@ func TestSchedulerSeedChainOnce(t *testing.T) {
 	}
 	// 再调几次 Next：不得再铺一条链
 	for i := 0; i < 3; i++ {
-		s.Next(ctx, ch, &harness.Outcome{})
+		_, _ = s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 	}
 	count := 0
 	for _, n := range g.Nodes() {
@@ -110,7 +110,7 @@ func TestSchedulerSeedChainOnce(t *testing.T) {
 	g2 := newTestGraph(t)
 	mustIntent(t, g2, IntentAnalyze, "读源码")
 	s2 := NewScheduler(g2)
-	_ = s2.Next(ctx, ch, &harness.Outcome{})
+	_, _ = s2.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 	n2 := 0
 	for _, n := range g2.Nodes() {
 		if n.IsIntent() {
@@ -169,7 +169,7 @@ func TestPhaseChainByCategory(t *testing.T) {
 func TestSchedulerSettleIgnoresSelfReport(t *testing.T) {
 	g := newTestGraph(t)
 	s := NewScheduler(g)
-	it := s.Next(context.Background(), harness.Challenge{Category: "pentest"}, &harness.Outcome{})
+	it, _ := s.Next(context.Background(), harness.PlannerInput{Challenge: harness.Challenge{Category: "pentest"}, Outcome: harness.OutcomeView{}})
 	s.Activate(it)
 	// agent 说自己成功了，但一条新事实都没有
 	s.Settle(it, harness.RoundResult{Text: "我已经拿到了 flag，成功了！"})
@@ -180,7 +180,7 @@ func TestSchedulerSettleIgnoresSelfReport(t *testing.T) {
 		t.Errorf("失败也应记一次尝试, got %d", n.Attempts)
 	}
 	// 下一条意图仍应是同一阶段（失败可重试），而不是跳到下一阶段
-	next := s.Next(context.Background(), harness.Challenge{Category: "pentest"}, &harness.Outcome{})
+	next, _ := s.Next(context.Background(), harness.PlannerInput{Challenge: harness.Challenge{Category: "pentest"}, Outcome: harness.OutcomeView{}})
 	if next == nil || next.ID != it.ID {
 		t.Errorf("失败后应重试同一意图, got %+v", next)
 	}
@@ -192,7 +192,7 @@ func TestSchedulerAbandonsAfterCap(t *testing.T) {
 	s := NewScheduler(g)
 	ctx := context.Background()
 	ch := harness.Challenge{Category: "pentest"}
-	it := s.Next(ctx, ch, &harness.Outcome{})
+	it, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 	for i := 0; i < DefaultMaxAttempts; i++ {
 		s.Activate(it)
 		s.Settle(it, harness.RoundResult{})
@@ -200,7 +200,7 @@ func TestSchedulerAbandonsAfterCap(t *testing.T) {
 	if n := g.Node(it.ID); n.State != IntentAbandoned {
 		t.Fatalf("试够 %d 次后应 abandoned, got %s", DefaultMaxAttempts, n.State)
 	}
-	next := s.Next(ctx, ch, &harness.Outcome{})
+	next, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 	if next == nil {
 		t.Fatal("放弃一个方向后应给出下一个方向")
 	}
@@ -216,7 +216,7 @@ func TestSchedulerProducedUsesWatermark(t *testing.T) {
 	ctx := context.Background()
 	ch := harness.Challenge{Category: "pentest"}
 
-	it := s.Next(ctx, ch, &harness.Outcome{})
+	it, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 	s.Activate(it)
 	// 激活后新入图的事实
 	newID, err := g.AddFact(Node{Kind: NodeFact, FactKind: FactService,
@@ -251,7 +251,7 @@ func TestSchedulerProducedUsesWatermark(t *testing.T) {
 func TestSchedulerIngestRoutesNegative(t *testing.T) {
 	g := newTestGraph(t)
 	s := NewScheduler(g)
-	it := s.Next(context.Background(), harness.Challenge{Category: "pentest"}, &harness.Outcome{})
+	it, _ := s.Next(context.Background(), harness.PlannerInput{Challenge: harness.Challenge{Category: "pentest"}, Outcome: harness.OutcomeView{}})
 	s.Activate(it)
 
 	ev := reportEvent(map[string]any{
@@ -293,7 +293,7 @@ func TestSchedulerIngestRoutesNegative(t *testing.T) {
 func TestSchedulerIngestEnablesFromNext(t *testing.T) {
 	g := newTestGraph(t)
 	s := NewScheduler(g)
-	it := s.Next(context.Background(), harness.Challenge{Category: "pentest"}, &harness.Outcome{})
+	it, _ := s.Next(context.Background(), harness.PlannerInput{Challenge: harness.Challenge{Category: "pentest"}, Outcome: harness.OutcomeView{}})
 	s.Activate(it)
 
 	ev := reportEvent(map[string]any{
@@ -341,7 +341,7 @@ func TestSchedulerIngestEnablesFromNext(t *testing.T) {
 	// 空 next ⇒ 不造空意图（空目标会被 AddIntent 拒，且它会白占一个前沿名额）
 	g2 := newTestGraph(t)
 	s2 := NewScheduler(g2)
-	it2 := s2.Next(context.Background(), harness.Challenge{Category: "pentest"}, &harness.Outcome{})
+	it2, _ := s2.Next(context.Background(), harness.PlannerInput{Challenge: harness.Challenge{Category: "pentest"}, Outcome: harness.OutcomeView{}})
 	s2.Activate(it2)
 	ev2 := reportEvent(map[string]any{"kind": "service", "content": "nginx/1.18.0"})
 	ev2.Details["report_fact"].(map[string]any)["next"] = "   "
@@ -359,7 +359,7 @@ func TestSchedulerIngestEnablesFromNext(t *testing.T) {
 	// enables 边比丢掉一条建议更糟（它会给出看起来合理的错误 provenance）。
 	g3 := newTestGraph(t, "10.0.0.1:80")
 	s3 := NewScheduler(g3)
-	it3 := s3.Next(context.Background(), harness.Challenge{Category: "pentest"}, &harness.Outcome{})
+	it3, _ := s3.Next(context.Background(), harness.PlannerInput{Challenge: harness.Challenge{Category: "pentest"}, Outcome: harness.OutcomeView{}})
 	s3.Activate(it3)
 	ev3 := reportEvent(map[string]any{"kind": "target", "content": "10.0.0.1:80"}) // 与平台种子重复
 	ev3.Details["report_fact"].(map[string]any)["next"] = "试试 8443 端口"
@@ -441,7 +441,7 @@ func TestSchedulerNextNilWhenExhausted(t *testing.T) {
 	ctx := context.Background()
 	ch := harness.Challenge{Category: "pentest"}
 	for i := 0; i < 50; i++ {
-		it := s.Next(ctx, ch, &harness.Outcome{})
+		it, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 		if it == nil {
 			return // 正常收尾
 		}
@@ -465,10 +465,10 @@ func TestRendererAdapter(t *testing.T) {
 	ctx := context.Background()
 	ch := harness.Challenge{Code: "web-01", Category: "pentest", FlagCount: 2,
 		Description: "拿到 flag 后提交", Addrs: []string{"10.0.0.1:80"}}
-	it := s.Next(ctx, ch, &harness.Outcome{})
+	it, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 
 	r := &Renderer{G: g}
-	out := r.Render(ctx, ch, it, &harness.Outcome{})
+	out := r.Render(ctx, ch, it, &harness.OutcomeView{})
 	if !strings.Contains(out, "## 本题") || !strings.Contains(out, it.Goal) {
 		t.Errorf("渲染结果应含题面与本轮意图:\n%s", out)
 	}
@@ -490,10 +490,10 @@ func TestRendererInjectsOutcome(t *testing.T) {
 	ctx := context.Background()
 	ch := harness.Challenge{Code: "web-01", Category: "pentest", FlagCount: 3,
 		Description: "提交 flag{...}", Addrs: []string{"10.0.0.1:80"}}
-	it := s.Next(ctx, ch, &harness.Outcome{})
+	it, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 
 	r := &Renderer{G: g}
-	out := r.Render(ctx, ch, it, &harness.Outcome{
+	out := r.Render(ctx, ch, it, &harness.OutcomeView{
 		Flags: []string{"flag{a}", "flag{b}"},
 		Candidates: []harness.Candidate{
 			{Flag: "flag{wrong1}", SubmitError: "平台判错"},
@@ -525,10 +525,10 @@ func TestRendererDoesNotFeedBackGateSuspects(t *testing.T) {
 	ctx := context.Background()
 	ch := harness.Challenge{Code: "web-01", Category: "pentest",
 		Description: "提交 flag{...}", Addrs: []string{"10.0.0.1:80"}}
-	it := s.Next(ctx, ch, &harness.Outcome{})
+	it, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
 
 	r := &Renderer{G: g}
-	out := r.Render(ctx, ch, it, &harness.Outcome{
+	out := r.Render(ctx, ch, it, &harness.OutcomeView{
 		Candidates: []harness.Candidate{
 			// gate 的族别归因：可疑，但平台从没说过它是错的
 			{Flag: "flag{suspect_but_maybe_right}", RejectReason: "agent_authored"},
@@ -541,7 +541,7 @@ func TestRendererDoesNotFeedBackGateSuspects(t *testing.T) {
 		t.Errorf("没有平台判错的候选时不该出现判错段:\n%s", out)
 	}
 	// 平台判错的才回灌
-	out2 := r.Render(ctx, ch, it, &harness.Outcome{
+	out2 := r.Render(ctx, ch, it, &harness.OutcomeView{
 		Candidates: []harness.Candidate{
 			{Flag: "flag{really_wrong}", SubmitError: "平台判错"},
 		},
