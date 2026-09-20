@@ -36,6 +36,10 @@ type Options struct {
 	// Scenarios 以名为键。RunSpec.Scenario 必须命中其中一个。
 	Scenarios map[string]Scenario
 
+	// Graph 是 DAG 落盘的旁路端口（见 GraphStore 的注释）。为 nil 表示不落盘。
+	// 生产实现在装配层接 `dag.Graph.Save`/`Load`——engine 不导入 dag。
+	Graph GraphStore
+
 	// Policy 为 nil 时引擎用默认策略：MaxAttemptsPerIntent=3、
 	// DryRoundsBeforeHint=3（沿用 dag.DefaultMaxAttempts 与 HintAuto 的阈值）。
 	Policy RunPolicy

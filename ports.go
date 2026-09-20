@@ -312,6 +312,29 @@ type RunPolicy interface {
 
 // ── 存储 ──
 
+// GraphBlob 是 DAG 的序列化字节。**它是一个不透明的载荷**：store 只负责路径与
+// 原子性，不理解它的内容。
+//
+// 为什么用 []byte 而不是让 store 认识 dag 的类型：`dag/store.go` 的 schema 1 +
+// migrate 是前向兼容的**唯一**实现，store 再写一份 DAG 序列化就会有第二份实现
+// （v0.2 的 `dag.FlagFingerprint` 就是被这样分叉出来的）。而且 store 一旦导入
+// dag，两者就不能并行开发了——而它们本来就是不同波次的独立子系统。
+type GraphBlob = []byte
+
+// GraphStore 是 DAG 落盘的旁路端口。
+//
+// **为什么 DAG 不走 Store.Append**：领域事件流是「引擎状态」的日志，而 DAG 是
+// 一个独立的、由 Planner 拥有的数据结构——它自己决定何时落盘（v0.2 是每轮末，
+// 由轮循环驱动而不是由事件回调驱动：Observe 每个事件都被调用，在那里落盘等于
+// 每轮写几十次完整图，而且发生在 reader 协程里会阻塞事件消费、进而把 pi 的
+// stdout 管道填满）。
+//
+// 引擎每轮末调它一次。为 nil 表示不落盘（干跑与离线测试）。
+type GraphStore interface {
+	PutGraph(blob GraphBlob) error
+	GetGraph() (GraphBlob, error)
+}
+
 // Store 是运行的持久化端口。
 //
 // **Append 的顺序不可颠倒**：先写事件日志，再原子写快照。先快照后事件会在
