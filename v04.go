@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"sync"
 	"time"
 )
@@ -17,9 +16,20 @@ import (
 // Version remains 0.3.0 for readers of the legacy graph schema.
 const ResearchVersion = "0.4.0-research"
 
-// SandboxSpec is the resolved, per-target sandbox configuration. Credentials
-// must not be placed in Env; provider credentials are injected by the trusted
-// host-side adapter into the sandbox process environment.
+// SandboxSpec is the resolved, per-target sandbox configuration.
+//
+// Credentials must not be placed in Env: provider credentials are injected by
+// the trusted host-side adapter into the sandbox process environment. Env is
+// only for non-secret settings that the sandbox needs at creation time.
+//
+// **AllowHosts is deliberately absent.** The target allowlist is derived by the
+// harness from Scenario.Prepare's Target.Addrs — the authorized platform is the
+// only source of reachable endpoints. A caller-supplied list would be a way to
+// widen scope, so the field does not exist to be filled in.
+//
+// **ReadOnly is deliberately absent.** A writable rootfs is not a configurable
+// option of a research sandbox; the 307 GB incident is the reason. The sandbox
+// implementation always renders --read-only.
 type SandboxSpec struct {
 	RunID      RunID
 	Target     Target
@@ -28,8 +38,6 @@ type SandboxSpec struct {
 	CPUs       float64
 	MemoryMB   int
 	PidsLimit  int
-	ReadOnly   bool
-	AllowHosts []string
 	ProfileDir string
 	Env        map[string]string
 }
@@ -303,9 +311,6 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	if sb.PidsLimit == 0 {
 		sb.PidsLimit = spec.Executor.PidsLimit
 	}
-	if len(sb.AllowHosts) == 0 {
-		sb.AllowHosts = append([]string(nil), target.Addrs...)
-	}
 	sb.RunID, sb.Target = runID, target
 	if sb.ProfileDir == "" {
 		sb.ProfileDir = spec.Profile.ExtensionBundle
@@ -464,6 +469,8 @@ func (s *eventSink) Emit(e Event) {
 }
 func (s *eventSink) setRound(round int) { s.mu.Lock(); s.round = round; s.mu.Unlock() }
 
+// contains 报告 xs 里是否有 want。刻意不引 slices：根包是纯契约层，工具函数
+// 越少越好，而这里只有一处调用。
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if x == want {
@@ -472,12 +479,18 @@ func contains(xs []string, want string) bool {
 	}
 	return false
 }
+
+// safeError 把错误折成一个**可进公开结果**的分类串。
+//
+// 为什么只留类型名：err.Error() 可能带平台响应体、路径甚至凭据，而 RunResult.Err
+// 会写进公开的 results/<runID>.json。真正的诊断信息留在调用方手里的 error 里。
 func safeError(err error) string {
 	if err == nil {
 		return ""
 	}
 	return fmt.Sprintf("%T", err)
 }
+
 func digestJSON(v any) string {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -485,11 +498,4 @@ func digestJSON(v any) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
-}
-func absResultDir(dir string) string {
-	if dir == "" {
-		return ""
-	}
-	p, _ := filepath.Abs(dir)
-	return p
 }

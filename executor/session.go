@@ -38,7 +38,9 @@ func (d *Docker) NewSession(ctx context.Context, spec harness.SandboxSpec) (harn
 		Executor: harness.ExecutorSpec{
 			Image: spec.Image, Workdir: "/work", CPUs: spec.CPUs,
 			MemoryMB: spec.MemoryMB, PidsLimit: spec.PidsLimit,
-			ReadOnly: true, AllowHosts: append([]string(nil), spec.AllowHosts...), Env: cloneEnv(spec.Env),
+			// The allowlist comes from the authorized platform's Target.Addrs
+			// (resolved by the harness in Run), never from the caller.
+			ReadOnly: true, AllowHosts: append([]string(nil), spec.Target.Addrs...), Env: cloneEnv(spec.Env),
 		},
 		Workdir: spec.Workdir,
 	}
