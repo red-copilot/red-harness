@@ -198,8 +198,16 @@ func (a *app) run(args []string) error {
 
 	// NotifyContext 在收到第一个信号时取消 ctx；stop 必须调（defer），否则
 	// 信号处理器会一直挂着，第二次 Ctrl-C 不会回到默认处置（用户按下去没有反应）。
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	//
+	// ⚠️ **外面还要再套一层 WithCancel**：`stop()` 只做「注销信号处理器」，
+	// **它并不取消 ctx**。少了这层 cancel，一次正常返回之后 ctx 仍然是活的，
+	// 引擎里任何按 ctx 退出但还挂着的东西（reader 协程、看门狗）会一直等到
+	// 进程结束——表现为「run 已经打完了摘要，进程却迟迟不退」。defer 顺序是
+	// 「先 stop 再 cancel」，两者都跑。
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := context.WithCancel(sigCtx)
+	defer cancel()
 
 	res, runErr := ports.Harness.Run(ctx, spec)
 	// 先打结果再判退出码：**失败路径也要打**，否则一次「跑了 30 轮然后超时」的
