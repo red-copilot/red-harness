@@ -9,6 +9,7 @@ private/
 *.tmp
 
 # 工具与缓存
+.gocache/
 .remember/
 node_modules/
 .pi-sessions/
