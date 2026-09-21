@@ -16,6 +16,11 @@ import (
 // Version remains 0.3.0 for readers of the legacy graph schema.
 const ResearchVersion = "0.4.0-research"
 
+// defaultSandboxWorkdir 是容器内工作目录的缺省值，与 executor 的 defaultWorkdir
+// 和 runner 镜像里的 /work 一致。它必须由 SandboxSpec 或 Sandbox 实现决定，不能
+// 从 ExecutorSpec.Workdir（宿主路径）推导——见 runChallenge 里的说明。
+const defaultSandboxWorkdir = "/work"
+
 // SandboxSpec is the resolved, per-target sandbox configuration.
 //
 // Credentials must not be placed in Env: provider credentials are injected by
@@ -52,11 +57,18 @@ type ProcessSpec struct {
 }
 
 // ProbeResult is deliberately small and safe to print in doctor output.
+//
+// PiVersion 是**镜像内**的 pi 版本，由 Probe 在同一镜像里核验。为什么必须在这里
+// 而不是靠宿主侧的 checkVersion：v0.4 禁止宿主 exec pi，宿主上那份 pi 与容器里
+// 那份可能完全是两个版本——「runner 里的 pi 是哪个版本」是排查 agent 行为差异的
+// 第一手信息（前身被 0.74.2 静默烧题库咬过）。空串表示未能核验，调用方必须把
+// 它读成「未核验」而不是「版本未知但大概没问题」。
 type ProbeResult struct {
 	ContainerID string
 	PID         int
 	Image       string
 	Workdir     string
+	PiVersion   string
 }
 
 // ManagedProcess is the attached stdio of the sandbox's main process.
@@ -146,18 +158,24 @@ type StatsQuery struct {
 	Until         time.Time
 }
 
+// StatsReport 是按维度聚合的公开指标。
+//
+// ⚠️ **口径（v0.4 变更）**：ConfirmedFlags 是**本次新增确认**数，不是最终累计
+// 进度；RemainingAtStart 是起跑时剩余量之和。召回率 = ConfirmedFlags /
+// RemainingAtStart，**分母为 0 表示有挑战的分母未知**（FlagCount 未知），此时
+// 不得宣称召回率——两个计数器都会把该挑战排除在外。
 type StatsReport struct {
-	Runs              int     `json:"runs"`
-	Completed         int     `json:"completed"`
-	CompletionRate    float64 `json:"completionRate"`
-	ConfirmedFlags    int     `json:"confirmedFlags"`
-	RemainingAtStart  int     `json:"remainingAtStart"`
-	Score             int     `json:"score"`
-	CostUSD           float64 `json:"costUSD"`
-	DurationSeconds   float64 `json:"durationSeconds"`
-	HintedRuns        int     `json:"hintedRuns"`
-	ProviderFailures  int     `json:"providerFailures"`
-	ExecutionFailures int     `json:"executionFailures"`
+	Runs             int     `json:"runs"`
+	Completed        int     `json:"completed"`
+	CompletionRate   float64 `json:"completionRate"`
+	ConfirmedFlags   int     `json:"confirmedFlags"`
+	RemainingAtStart int     `json:"remainingAtStart"`
+	RecallRate       float64 `json:"recallRate"`
+	Score            int     `json:"score"`
+	CostUSD          float64 `json:"costUSD"`
+	DurationSeconds  float64 `json:"durationSeconds"`
+	HintedRuns       int     `json:"hintedRuns"`
+	ProviderFailures int     `json:"providerFailures"`
 }
 
 // ChallengeResult is the return-only view for one target. A result store must
@@ -248,7 +266,10 @@ func (h *Harness) Doctor(ctx context.Context) DoctorReport {
 	r := DoctorReport{OK: true}
 	checks := []DoctorCheck{{Name: "scenario", OK: h != nil && h.scenario != nil, Fatal: true},
 		{Name: "sandbox", OK: h != nil && h.sandbox != nil, Fatal: true},
-		{Name: "agent_factory", OK: h != nil && h.agents != nil, Fatal: true}}
+		{Name: "agent_factory", OK: h != nil && h.agents != nil, Fatal: true},
+		{Name: "planner", OK: h != nil && h.planner != nil, Fatal: true},
+		{Name: "renderer", OK: h != nil && h.renderer != nil, Fatal: true},
+		{Name: "gate", OK: h != nil && h.gate != nil, Fatal: true}}
 	if h != nil && h.sandbox != nil {
 		// Reclaim is deliberately not called here: doctor must not mutate runtime
 		// state. Presence checks are enough at this layer.
@@ -383,11 +404,16 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	if sb.Image == "" {
 		sb.Image = spec.Executor.Image
 	}
+	// Workdir 是**容器内**的工作目录。
+	//
+	// ⚠️ 这里刻意不再回落到 `spec.Executor.Workdir`：那个字段的历史含义是「唯一
+	// 允许挂进容器的宿主目录」（见 CLI 的 --workdir 说明与 model.go 的 ExecSpec），
+	// 而 SandboxSpec.Workdir 是容器内路径。两者混用会把宿主路径塞进容器里的
+	// `--workdir`，pi 的会话目录随之落到一个不存在的位置，而失败是**静默**的
+	// （pi 自己找地方落盘，get_entries 游标指向别处）。v0.4 不再挂载可写宿主目录，
+	// 所以这个字段现在只有一个来源：SandboxSpec.Workdir，缺省 /work。
 	if sb.Workdir == "" {
-		sb.Workdir = spec.Executor.Workdir
-		if sb.Workdir == "" {
-			sb.Workdir = "/work"
-		}
+		sb.Workdir = defaultSandboxWorkdir
 	}
 	if sb.CPUs == 0 {
 		sb.CPUs = spec.Executor.CPUs
@@ -430,7 +456,7 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		return cr, err
 	}
 	defer func() { _ = ag.Close(context.Background()) }()
-	if err := ag.Start(ctx, AgentStart{Workdir: spec.Executor.Workdir, Provider: spec.Agent.Provider,
+	if err := ag.Start(ctx, AgentStart{Workdir: sb.Workdir, Provider: spec.Agent.Provider,
 		Model: spec.Agent.Model, Thinking: spec.Agent.Thinking, Extensions: spec.Agent.Extensions,
 		Approve: spec.Agent.Approve, SessionDir: spec.Agent.SessionDir, HomeDir: spec.Agent.HomeDir}); err != nil {
 		cr.EndedAt = h.now()
