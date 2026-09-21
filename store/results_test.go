@@ -253,8 +253,8 @@ func TestStatsRecallUsesRemainingAtStart(t *testing.T) {
 	if rep.RemainingAtStart != 5 {
 		t.Fatalf("RemainingAtStart = %d，期望 5", rep.RemainingAtStart)
 	}
-	if ratio := float64(rep.ConfirmedFlags) / float64(rep.RemainingAtStart); math.Abs(ratio-0.4) > 1e-9 {
-		t.Fatalf("召回率 = %v，期望 0.4", ratio)
+	if math.Abs(rep.RecallRate-0.4) > 1e-9 {
+		t.Fatalf("RecallRate = %v，期望 0.4", rep.RecallRate)
 	}
 }
 
@@ -272,6 +272,9 @@ func TestStatsUnknownDenominatorKeepsCountersAtZero(t *testing.T) {
 	if rep.RemainingAtStart != 0 || rep.ConfirmedFlags != 0 {
 		t.Fatalf("分母未知时 counters = %d/%d，期望 0/0",
 			rep.ConfirmedFlags, rep.RemainingAtStart)
+	}
+	if rep.RecallRate != 0 {
+		t.Fatalf("RecallRate = %v，期望 0（0/0 不得是 NaN）", rep.RecallRate)
 	}
 	// 分母为 0 ⇒ 召回率按定义是 0（0/0 不是 0，NaN 会顺着 JSON 变成 null）。
 	b, err := json.Marshal(rep)
@@ -422,12 +425,6 @@ func TestStatsProviderFailuresUsesReasonConstant(t *testing.T) {
 	rep := mustStats(t, rs, harness.StatsQuery{})
 	if rep.ProviderFailures != 1 {
 		t.Fatalf("ProviderFailures = %d，期望 1", rep.ProviderFailures)
-	}
-	// ExecutionFailures 目前没有数据来源（见 Stats 的注释）：它必须是 0，
-	// 而不是被别的故障类别填上。
-	if rep.ExecutionFailures != 0 {
-		t.Fatalf("ExecutionFailures = %d，期望 0（公开结果里没有可区分执行器故障的数据）",
-			rep.ExecutionFailures)
 	}
 }
 

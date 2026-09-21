@@ -316,10 +316,8 @@ func (s *ResultFileStore) List(ctx context.Context) ([]harness.RunResult, error)
 // 被排除的那些挑战不会因此丢数据：起跑剩余量、平台累计进度与得分都逐题落在
 // 公开结果里，调用方可以自己重算、也可以单独统计它们。
 //
-// ⚠️ **聚合出的召回率本身没有落点**：根包 `harness.StatsReport` 目前只有
-// `ConfirmedFlags` 与 `RemainingAtStart` 两个计数器，没有 RecallRate 字段。
-// 所以这里只填这两个计数器（口径如上），比率由调用方相除得出。加字段属于根包
-// 契约改动，不在本文件权限内（见实施报告）。
+// ⚠️ **聚合出的召回率**：`RecallRate` 由 ConfirmedFlags / RemainingAtStart 得出，
+// 分母为 0 时保持 0（不是 NaN）。两个计数器与比率的排除口径一致——见 recallDelta。
 //
 // 各字段的口径：
 //
@@ -335,10 +333,7 @@ func (s *ResultFileStore) List(ctx context.Context) ([]harness.RunResult, error)
 //   - HintedRuns：**run 级**——至少有 1 道命中的题用过提示的 run 数
 //     （v0.4 之前这里累加的是挑战数，与字段名不符）。
 //   - ProviderFailures：run 级。判据是 Reason == harness.ReasonProviderFailure
-//     （run 级或命中题的题级）。它是契约常量，不是错误文本匹配。**当前恒为 0**：
-//     写入这个 Reason 的引擎路径在 M2 才接通，所以读到 0 表示「没有记录到」，
-//     不能读成「没有发生过」。
-//   - ExecutionFailures：**没有数据来源，恒为 0**，见下。
+//     （run 级或命中题的题级）。它是契约常量，不是错误文本匹配。
 func (s *ResultFileStore) Stats(ctx context.Context, q harness.StatsQuery) (harness.StatsReport, error) {
 	runs, err := s.List(ctx)
 	if err != nil {
@@ -390,11 +385,11 @@ func (s *ResultFileStore) Stats(ctx context.Context, q harness.StatsQuery) (harn
 	if out.Runs > 0 {
 		out.CompletionRate = float64(out.Completed) / float64(out.Runs)
 	}
-	// ExecutionFailures 保持 0：公开结果里**没有任何字段**能区分「执行器故障」
-	// 与「别的故障」——RunResult.Err 是 %T 折出来的类型名（见 safeError），
-	// harness.Error.Kind 在落盘前就丢了，而按错误文本猜分类正是 errors.go 明令
-	// 禁止的做法。这个字段目前是**死字段**，已作为「应从根包 StatsReport 删除」
-	// 提出（本文件无权改根包契约），在删除之前它只会读到 0。
+	// 召回率的除法只在这里发生，且只在分母已确认 > 0 之后——0/0 在 Go 里是 NaN，
+	// NaN 顺着 JSON 会变成 null，再进聚合就是静默污染。分母为 0 时保持 0。
+	if out.RemainingAtStart > 0 {
+		out.RecallRate = float64(out.ConfirmedFlags) / float64(out.RemainingAtStart)
+	}
 	return out, nil
 }
 
