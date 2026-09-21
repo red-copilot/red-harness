@@ -413,8 +413,10 @@ func TestTSecBenchEvaluatePropagatesSubmitError(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Submit 错误必须上抛，got %v", err)
 	}
-	if !harness.IsKind(err, harness.KindPlatform) && harness.IsKind(err, harness.KindCancelled) {
-		t.Error("未分类的传输错误不应被误标成取消")
+	// 未被分类的传输错误不得被**误标**成取消：取消是一个独立的终止原因，
+	// 标错会让报告把平台故障写成「用户按了 Ctrl-C」。
+	if harness.IsKind(err, harness.KindCancelled) {
+		t.Errorf("未分类的传输错误不应被误标成 KindCancelled，got %v", err)
 	}
 }
 
