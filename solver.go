@@ -72,6 +72,13 @@ const (
 	// ReasonProviderFailure 表示 provider 故障——pi 把 provider 错误呈现为
 	// 一次静默的空会话。这是前身「280 run / 0 flag / 63 题」事故的护栏。
 	ReasonProviderFailure = "provider_failure"
+	// ReasonNoProgress 是 v0.4 新增：一次运行**正常跑完**，但没有任何一道题
+	// 达成目标。
+	//
+	// 为什么必须与 ReasonCompleted 分开：v0.2/v0.3 把「没有错误」当成成功，
+	// 于是「280 run / 0 flag」在报告里是一片绿。运行层面的成功与题目层面的
+	// 成功是两个问题，报告要能分别回答。
+	ReasonNoProgress = "no_progress"
 )
 
 // AgentStart 是启动一个持久 agent 会话所需的全部信息。

@@ -76,11 +76,20 @@ type SandboxSession interface {
 	Close(context.Context) error
 }
 
-// Sandbox is the v0.4 execution port. Reclaim is used before starting a new
-// run to remove labelled leftovers from an earlier crash.
+// Sandbox is the v0.4 execution port.
 type Sandbox interface {
 	NewSession(context.Context, SandboxSpec) (SandboxSession, error)
+	// Reclaim removes the labelled leftovers of one specific run.
 	Reclaim(context.Context, RunID) error
+	// ReclaimStale removes every labelled container/network/rule whose run is
+	// **not** in live, and returns what it reclaimed.
+	//
+	// 为什么不能只用 Reclaim(新 runID)：新 run 的 ID 是刚生成的，宿主上不可能
+	// 有它的遗留——那次调用是空转，而**上次崩溃留下的**容器与网络会一直攒着。
+	// 每个孤儿 bridge 占一个网段，攒够之后新 run 连网络都建不出来（表现为
+	// 「起题失败」，而真因在几天前的崩溃现场）。所以启动前必须按 label 扫一遍，
+	// 只保留 live 里的。
+	ReclaimStale(ctx context.Context, live map[RunID]bool) ([]RunID, error)
 }
 
 // SolverProfile is immutable run input. The bundle is mounted read-only by a
@@ -110,6 +119,21 @@ type ResultStore interface {
 	Get(context.Context, RunID) (RunResult, error)
 	List(context.Context) ([]RunResult, error)
 	Stats(context.Context, StatsQuery) (StatsReport, error)
+}
+
+// RunLocker 是**跨进程**的单运行锁。
+//
+// 为什么必须有它，而进程内的 Mutex 不够：同一台宿主上两个 red-harness 进程
+// 同时跑，会在平台侧互相踩（重复起题、重复提交、把同一道题的额度打光），
+// 而且两边都按 run label 回收容器与网络时，会**互相删掉对方正在用的资源**——
+// 后者比平台侧的问题更隐蔽：表现为「容器莫名其妙没了」。
+//
+// Lock 必须是**阻塞但可取消**的：拿不到锁时等待并在 ctx 到期时返回错误，
+// 而不是立刻失败（否则并发调用方要靠重试轮询，那是更差的接口）。
+type RunLocker interface {
+	Lock(ctx context.Context) error
+	// Unlock 释放锁。必须幂等——defer 路径与显式路径都会调它。
+	Unlock() error
 }
 
 type StatsQuery struct {
@@ -165,13 +189,15 @@ type Harness struct {
 	sandbox  Sandbox
 	agents   AgentFactory
 	results  ResultStore
+	locker   RunLocker
 	gate     func(Challenge) CandidateGate
 	planner  func(Challenge) Planner
 	renderer func(Challenge) Renderer
 	profile  SolverProfile
 	now      func() time.Time
-	mu       sync.Mutex
-	running  bool
+	// mu guards running only. It is **not** the cross-process lock: see RunLocker.
+	mu      sync.Mutex
+	running bool
 }
 
 type HarnessOptions struct {
@@ -179,6 +205,9 @@ type HarnessOptions struct {
 	Sandbox  Sandbox
 	Agents   AgentFactory
 	Results  ResultStore
+	// Locker is optional; nil means no cross-process mutual exclusion. Callers
+	// that run unattended should provide one.
+	Locker   RunLocker
 	Gate     func(Challenge) CandidateGate
 	Planner  func(Challenge) Planner
 	Renderer func(Challenge) Renderer
@@ -211,7 +240,7 @@ func NewHarness(opts HarnessOptions) (*Harness, error) {
 		now = time.Now
 	}
 	return &Harness{scenario: opts.Scenario, sandbox: opts.Sandbox, agents: opts.Agents,
-		results: opts.Results, gate: opts.Gate, planner: opts.Planner,
+		results: opts.Results, locker: opts.Locker, gate: opts.Gate, planner: opts.Planner,
 		renderer: opts.Renderer, profile: opts.Profile, now: now}, nil
 }
 
@@ -247,17 +276,39 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	h.mu.Unlock()
 	defer func() { h.mu.Lock(); h.running = false; h.mu.Unlock() }()
 
+	// 跨进程单运行锁在**一切副作用之前**取。放到 Discover 之后等于已经起过题
+	// 了再发现别人在跑，那时平台侧已经被踩过。
+	if h.locker != nil {
+		if err := h.locker.Lock(ctx); err != nil {
+			return RunResult{}, Ef(KindConfig, "harness.lock", "获取单运行锁失败", err)
+		}
+		defer func() { _ = h.locker.Unlock() }()
+	}
+
 	started := h.now()
 	runID := RunID(fmt.Sprintf("run-%d", started.UnixNano()))
 	result := RunResult{RunID: runID, Scenario: spec.Scenario, ProfileDigest: h.profile.Digest(), Model: spec.Agent.Model, StartedAt: started}
-	if err := h.sandbox.Reclaim(ctx, runID); err != nil && !errors.Is(err, context.Canceled) {
-		return result, Ef(KindExecutor, "harness.reclaim", "回收遗留 sandbox 失败", err)
+
+	// 先按 label 扫掉**上次崩溃**留下的容器/网络/规则，再建本题的资源。
+	//
+	// 为什么不是 Reclaim(ctx, runID)：runID 是上面刚生成的，宿主上不可能有它的
+	// 遗留——那次调用是空转，而孤儿会一直攒着（每个 bridge 占一个网段，攒够
+	// 之后新 run 连网络都建不出来）。live 集合里只有本次 run，所以本次自己的
+	// 资源不会被误删。
+	if err := h.reclaimStale(ctx, runID); err != nil {
+		return result, err
 	}
 	challenges, err := h.scenario.Discover(ctx, spec)
 	if err != nil {
 		return result, err
 	}
 	for _, ch := range challenges {
+		// ctx 取消优先于一切：一次 Ctrl-C 之后继续把剩下的题跑完，会让用户
+		// 以为取消没生效，而平台侧已经在起题了。
+		if err := ctx.Err(); err != nil {
+			result.Err = safeError(Ef(KindCancelled, "harness.run", "运行被取消", err))
+			break
+		}
 		if len(spec.Targets) > 0 && !contains(spec.Targets, ch.Code) {
 			continue
 		}
@@ -268,11 +319,17 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 		}
 	}
 	result.EndedAt = h.now()
-	result.Completed = result.Err == "" && len(result.Challenges) > 0
-	if result.Completed {
-		result.Reason = ReasonCompleted
-	} else if result.Err != "" {
+	result.Completed = runCompleted(result)
+	switch {
+	case result.Err != "":
 		result.Reason = ReasonError
+	case result.Completed:
+		result.Reason = ReasonCompleted
+	default:
+		// 跑到这里说明没有任何错误、也没有任何一道题达成目标。v0.4 要求
+		// 「运行无错误」不等于「解题成功」——把这个区别显式写进 Reason，
+		// 而不是让调用方从 Completed 反推。
+		result.Reason = ReasonNoProgress
 	}
 	if h.results != nil {
 		if err := h.results.Save(ctx, result); err != nil {
@@ -283,6 +340,36 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 		return result, errors.New(result.Err)
 	}
 	return result, nil
+}
+
+// reclaimStale 回收上一次运行留下的、本次不用的沙箱资源。
+func (h *Harness) reclaimStale(ctx context.Context, keep RunID) error {
+	live := map[RunID]bool{keep: true}
+	_, err := h.sandbox.ReclaimStale(ctx, live)
+	if err == nil || errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return Ef(KindExecutor, "harness.reclaim", "回收遗留 sandbox 失败", err)
+}
+
+// runCompleted 判定一次运行是否「成功」。
+//
+// 语义刻意区分两件事：
+//   - RunFinished：所有题目都跑完了（没有异常收场）；
+//   - ChallengeSolved：某道题的目标真的达成了（平台权威的 Objective.Completed）。
+//
+// 只有后者能让 Completed 为真。把「没报错」当成「解出来了」，正是前身
+// 「280 run / 0 flag」那种数字的来源。
+func runCompleted(r RunResult) bool {
+	if r.Err != "" || len(r.Challenges) == 0 {
+		return false
+	}
+	for _, c := range r.Challenges {
+		if c.Outcome.Reason == ReasonSolved {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, ch Challenge) (ChallengeResult, error) {
@@ -315,6 +402,9 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	if sb.ProfileDir == "" {
 		sb.ProfileDir = spec.Profile.ExtensionBundle
 	}
+	// RemainingAtStart 必须在**任何提交之前**记下：它就是「起跑时还差几个」，
+	// 也就是增量召回率的分母。放到轮循环之后记等于把本次成绩算进基线。
+	cr.Outcome.RemainingAtStart = ch.Remaining()
 	ss, err := h.sandbox.NewSession(ctx, sb)
 	if err != nil {
 		cr.EndedAt = h.now()
@@ -347,8 +437,12 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		return cr, err
 	}
 	if planner == nil || renderer == nil || gate == nil {
+		// 缺 Planner/Renderer/Gate 时**不能静默返回一道「没解出来」的题**：
+		// 那会让报告把装配错误读成「模型不行」。明确记成配置错误。
+		cr.Outcome.Reason = ReasonError
+		cr.Outcome.Err = "缺少 Planner/Renderer/Gate：本题未执行任何轮次"
 		cr.EndedAt = h.now()
-		return cr, nil
+		return cr, Ef(KindConfig, "harness.challenge", cr.Outcome.Err, nil)
 	}
 	var used Budget
 	dryRounds, hintUsed, lastProgress := 0, 0, ch.Solved
@@ -357,6 +451,16 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		hintPolicy = HintAuto
 	}
 	for round := 1; ; round++ {
+		// ctx 判定必须先于预算与 provider 护栏：一次零回合的墙钟超时如果被
+		// 记成「模型服务挂了」，报告会把用户自己按的 Ctrl-C 读成 provider 故障。
+		if err := ctx.Err(); err != nil {
+			cr.Outcome.Reason = ReasonStopped
+			cr.Outcome.Err = "运行被取消"
+			break
+		}
+		// 墙钟要**真的累加进 used**：v0.2 的 used.MaxWall 永远是 0，于是
+		// MaxWall 那条分支不可达，墙钟预算实际上是死代码。
+		used.MaxWall = h.now().Sub(cr.StartedAt)
 		if exhausted, reason := spec.Budget.Exhausted(used); exhausted {
 			cr.Outcome.Reason = reason
 			break
@@ -381,6 +485,13 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 			cr.EndedAt = h.now()
 			return cr, err
 		}
+		// 轮级错误必须先被识别再谈进展：0 回合 + 有错误的「跑完了」正是前身
+		// 280 run / 0 flag 的呈现方式，不能让它继续走提交与对账。
+		if res.Err != "" {
+			cr.Outcome.Reason = ReasonError
+			cr.Outcome.Err = res.Err
+			break
+		}
 		planner.Settle(it, res)
 		progressed := false
 		candidates := gate.New()
@@ -394,11 +505,12 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 			eval, evalErr := h.scenario.Evaluate(ctx, ch, c.Flag)
 			gate.Mark(c.Flag, SubmitResult{Correct: eval.Accepted, Awarded: eval.Score, Duplicate: eval.Accepted && !eval.Progress, Message: eval.Message}, evalErr)
 			if evalErr != nil {
-				// A timed-out platform write is ambiguous. Reconcile once before
-				// surfacing the error; never blindly submit the same candidate again.
+				// 平台写超时是**不确定**的：先对账一次，能确认状态前绝不重发同一
+				// 候选（重发会打光平台配额，或把已确认的记成判错）。
 				if _, reconcileErr := h.scenario.Reconcile(ctx, ch); reconcileErr == nil {
 					continue
 				}
+				cr.EndedAt = h.now()
 				return cr, evalErr
 			}
 			if eval.Progress {
@@ -407,6 +519,9 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 			if eval.Accepted {
 				cr.Outcome.Flags = append(cr.Outcome.Flags, c.Flag)
 				cr.Outcome.Submitted++
+				if eval.Score > cr.Outcome.Score {
+					cr.Outcome.Score = eval.Score
+				}
 			}
 		}
 		if obj, e := h.scenario.Reconcile(ctx, ch); e == nil {
@@ -429,24 +544,27 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		if threshold <= 0 {
 			threshold = 2
 		}
-		shouldHint := hintPolicy == HintAlways && hintUsed == 0
-		if hintPolicy == HintAuto && hintUsed == 0 && dryRounds >= threshold {
-			shouldHint = true
-		}
+		// 提示**每题最多一次**。HintAlways 也受这条守卫——v0.2 的文档写着
+		// 「每轮都提示」而代码里没有守卫，那会让提示额度被瞬间打光。
+		shouldHint := hintUsed == 0 && (hintPolicy == HintAlways ||
+			(hintPolicy == HintAuto && dryRounds >= threshold))
 		if shouldHint {
-			if hint, hintErr := h.scenario.Hint(ctx, ch); hintErr != nil {
+			hint, hintErr := h.scenario.Hint(ctx, ch)
+			if hintErr != nil {
+				cr.EndedAt = h.now()
 				return cr, hintErr
-			} else {
-				hintUsed++
-				cr.Outcome.HintUsed = hintUsed
-				if hint != "" {
-					if err := ag.Steer(ctx, hint); err != nil {
-						return cr, err
-					}
+			}
+			hintUsed++
+			cr.Outcome.HintUsed = hintUsed
+			if hint != "" {
+				if err := ag.Steer(ctx, hint); err != nil {
+					cr.EndedAt = h.now()
+					return cr, err
 				}
 			}
 		}
 	}
+	cr.Outcome.Code = ch.Code
 	cr.EndedAt = h.now()
 	return cr, nil
 }
