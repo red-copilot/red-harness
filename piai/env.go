@@ -104,29 +104,71 @@ func childEnv(envMap map[string]string, binDir string) []string {
 	return out
 }
 
-// sandboxEnv intentionally does not inherit os.Environ. The sandbox receives
-// only the provider credential and a minimal runtime environment; platform
-// tokens and host control variables must remain on the trusted side.
+// sandboxEnv 构造 sandbox 主进程的环境。它**刻意不继承 os.Environ**：容器里
+// 只需要 provider 凭据与最小运行环境，平台 token 与宿主控制变量必须留在可信
+// 一侧（PLAN v0.4：模型凭据仅注入 sandbox 主进程环境）。
+//
+// 三条纪律：
+//
+//  1. PATH 固定成镜像里 pi 实际所在的目录集合。它不能从宿主继承：宿主 PATH 在
+//     容器里指向一堆不存在的路径，而 pi 是 `#!/usr/bin/env node` 脚本，PATH 错
+//     了就找不到 node（runner 镜像里 node 与 pi 都在 /usr/local/bin）。
+//  2. 凭据只经**进程环境**传递，绝不进命令行（argv 在宿主上 `ps` 可见）。这里
+//     只往 env 里写，argv 由 buildArgs 构造，两者不交叉。
+//  3. HOME 必须落在容器内**可写**的位置（见 sandboxHome）。
+//
+// home 为空时用 /work/.home：与 executor 的缺省 HOME（<workdir>/.home）一致。
+// 调用方（Agent.Start）在 sandbox 路径下总是传入 a.sandboxHome()，这里的兜底只
+// 针对直接调用 sandboxEnv 的场景。
 func sandboxEnv(envMap map[string]string, provider, home string) []string {
 	merged := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin"}
 	for k, v := range envMap {
 		merged[k] = v
 	}
-	for _, name := range []string{providerKeyName(provider), "OPENCODE_API_KEY", "OPENCODE_GO_API_KEY"} {
-		if name != "_API_KEY" && strings.TrimSpace(os.Getenv(name)) != "" {
-			merged[name] = os.Getenv(name)
+	// 进程环境**补位**：.env 里有的以 .env 为准（显式配置优先），进程环境只补
+	// .env 没有的。注入的名字只限 provider 凭据族——不是「把宿主环境搬进去」。
+	for _, name := range providerCredentialNames(provider) {
+		if merged[name] != "" {
+			continue
+		}
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			merged[name] = v
 		}
 	}
 	if home != "" {
 		merged["HOME"] = home
 	} else if merged["HOME"] == "" {
-		merged["HOME"] = "/work/.home"
+		merged["HOME"] = defaultContainerWorkdir + "/" + containerHomeName
 	}
 	out := make([]string, 0, len(merged))
 	for k, v := range merged {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// providerCredentialNames 返回某个 provider 可能使用的凭据环境变量名。
+//
+// 已知别名（opencode-go 走 OPENCODE_API_KEY）与惯例名一起给出，顺序固定
+// （惯例名在前）。这里返回的**只有名字，没有值**，可以安全地进日志/错误消息。
+//
+// provider 为空时只给别名族：惯例名会退化成 "_API_KEY" 这个荒谬的名字。
+// 曾经的写法是 `if name != "_API_KEY"` 这样一个字符串比较守卫——它把「空
+// provider 推导出 _API_KEY」这个真实缺陷藏起来了：守卫与缺陷同源，一旦将来
+// 有人把守卫删掉（或把别名列表改掉），空 provider 就会去读宿主的 "_API_KEY"
+// 环境变量并注入容器。修法是不让这个名字被生成出来，而不是把它过滤掉。
+func providerCredentialNames(provider string) []string {
+	var names []string
+	if strings.TrimSpace(provider) != "" {
+		names = append(names, providerKeyName(provider))
+	}
+	switch provider {
+	case "opencode-go", "opencode":
+		names = append(names, "OPENCODE_API_KEY", "OPENCODE_GO_API_KEY")
+	case "anthropic":
+		names = append(names, "ANTHROPIC_API_KEY")
+	}
+	return names
 }
 
 // resolveEnvFile 决定用哪个 .env：显式指定的路径**必须存在**（显式配置静默降级
