@@ -323,11 +323,19 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	if err != nil {
 		return result, err
 	}
+	// firstErr 保存**原始错误**（不是折叠后的分类串）。
+	//
+	// 为什么不能只留 result.Err：它是 `%T` 折出的分类串，专门给公开结果用的
+	// （不得带平台响应体、路径或凭据）。但调用方拿到 Run 的返回值时要能
+	// `IsKind(err, KindConfig)` 做分支——把分类在返回路径上丢掉，调用方就只能
+	// 去解析字符串，而 errors.go 明令禁止那么做。
+	var firstErr error
 	for _, ch := range challenges {
 		// ctx 取消优先于一切：一次 Ctrl-C 之后继续把剩下的题跑完，会让用户
 		// 以为取消没生效，而平台侧已经在起题了。
 		if err := ctx.Err(); err != nil {
-			result.Err = safeError(Ef(KindCancelled, "harness.run", "运行被取消", err))
+			firstErr = Ef(KindCancelled, "harness.run", "运行被取消", err)
+			result.Err = safeError(firstErr)
 			break
 		}
 		if len(spec.Targets) > 0 && !contains(spec.Targets, ch.Code) {
@@ -335,7 +343,8 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 		}
 		cr, runErr := h.runChallenge(ctx, runID, spec, ch)
 		result.Challenges = append(result.Challenges, cr)
-		if runErr != nil && result.Err == "" {
+		if runErr != nil && firstErr == nil {
+			firstErr = runErr
 			result.Err = safeError(runErr)
 		}
 	}
@@ -357,10 +366,7 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 			return result, Ef(KindPersistence, "harness.result", "保存运行指标失败", err)
 		}
 	}
-	if result.Err != "" {
-		return result, errors.New(result.Err)
-	}
-	return result, nil
+	return result, firstErr
 }
 
 // reclaimStale 回收上一次运行留下的、本次不用的沙箱资源。
@@ -514,9 +520,15 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		// 轮级错误必须先被识别再谈进展：0 回合 + 有错误的「跑完了」正是前身
 		// 280 run / 0 flag 的呈现方式，不能让它继续走提交与对账。
 		if res.Err != "" {
+			// 轮级错误必须终止**本题**：0 回合 + 有错误的「跑完了」正是前身
+			// 280 run / 0 flag 的呈现方式，不能让它继续走提交与对账。
+			//
+			// 但它不终止整次运行——v0.4 的要求是「再次失败则结束当前题目并继续
+			// 下一题」。所以这里返回错误（由 Run 记账后继续），而不是直接放弃。
 			cr.Outcome.Reason = ReasonError
 			cr.Outcome.Err = res.Err
-			break
+			cr.EndedAt = h.now()
+			return cr, Ef(KindProvider, "harness.round", "轮次以错误收场", errors.New(res.Err))
 		}
 		planner.Settle(it, res)
 		progressed := false
