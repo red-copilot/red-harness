@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -25,15 +26,18 @@ import (
 func (a *app) doctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	// json 输出给机器读（CI 门禁），默认的人读格式给终端。
-	_ = fs.Bool("json", false, "以 JSON 打印体检结果")
-	_ = fs.String("store", "runs", "运行目录根")
+	jsonOut := fs.Bool("json", false, "以 JSON 打印体检结果")
 	help, err := a.parseFlags("doctor", fs, args)
 	if help || err != nil {
 		return err
 	}
 
-	// doctor 不需要 store：体检的是宿主环境，与某次运行无关。所以装配点只用
-	// 包级 wired 拿端口，不传 storeDir（传了反而暗示「体检结果与 store 有关」）。
+	// doctor 不需要 store：体检的是宿主环境，与某次运行无关。所以装配点只传
+	// storeDir=""——**装配层必须容忍它**（store 根与体检无关）。传一个假目录
+	// 反而会让装配层真的去建目录、并把「体检」和「某个 store」绑在一起。
+	//
+	// ⚠️ **不要再注册 `--store`**：它会被解析、然后被丢掉，用户看到 --help 里
+	// 有这个 flag 就会以为体检是针对某个 store 做的。
 	ports, err := a.ports("")
 	if err != nil {
 		return err
@@ -45,12 +49,47 @@ func (a *app) doctor(args []string) error {
 	if err != nil {
 		return err
 	}
-	printDoctor(a.out(), rep)
-	if !rep.OK {
-		// 任何 Fatal 检查失败 ⇒ 退出码非 0（model.go 的 DoctorReport 契约）。
+	if *jsonOut {
+		if err := printDoctorJSON(a.out(), rep); err != nil {
+			return err
+		}
+	} else {
+		printDoctor(a.out(), rep)
+	}
+	// **Fatal 项失败必拦，OK 为假也必拦**：model.go 的契约是「任何 Fatal 检查失败
+	// ⇒ 退出码非 0」。只看 rep.OK 等于把「该不该拦」整个委托给填报告的一方——一旦
+	// OK 的语义被实现方改成「非致命汇总」，Fatal 守卫就失效了。所以这里取两者的
+	// **并集**：宁可多拦（纯告警也红），不可漏拦（Fatal 失败却绿）。
+	if !rep.OK || hasFatalFailure(rep) {
 		// 这里返回的是 KindConfig 而不是 notImplementedError：doctor 的**骨架**
 		// 已经接上了，失败的是环境本身。
 		return harness.Ef(harness.KindConfig, "cli.doctor", "体检未通过", nil)
+	}
+	return nil
+}
+
+// hasFatalFailure 报告是否有 Fatal 检查项失败。
+//
+// 与 `!rep.OK` 是**或**关系：它额外覆盖「OK 为真但某项 Fatal 检查失败」这种
+// 自相矛盾的报告——那是实现方的 bug，但不能让它变成一次绿色的 CI。
+func hasFatalFailure(rep harness.DoctorReport) bool {
+	for _, c := range rep.Checks {
+		if c.Fatal && !c.OK {
+			return true
+		}
+	}
+	return false
+}
+
+// printDoctorJSON 打印机器可读的体检结果。
+//
+// ⚠️ **必须与 printDoctor 走同一份 DoctorReport**：Detail 由各检查项自己保证
+// 不含凭据明文（model.go 的 DoctorCheck 注释）。CI 门禁靠 `.ok` 判成败。
+func printDoctorJSON(w io.Writer, rep harness.DoctorReport) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(rep); err != nil {
+		return harness.Ef(harness.KindConfig, "cli.doctor", "打印 JSON 体检结果失败", err)
 	}
 	return nil
 }

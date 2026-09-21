@@ -10,8 +10,10 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	harness "github.com/red-copilot/red-harness"
 )
@@ -60,7 +62,6 @@ func (f *fakeLister) List(context.Context) ([]harness.RunSummary, error) {
 }
 
 type fakeControl struct {
-	storeDir  string
 	paused    int
 	cancelled int
 }
@@ -77,6 +78,12 @@ func (f *fakeDoctor) Doctor(context.Context) (harness.DoctorReport, error) {
 
 // ── Main 的对外契约 ──
 
+// newTestApp 是测试用的 app：输出全部丢弃（断言走 Main/dispatch 的返回值与
+// 捕获的 buffer），需要注入端口时再设 a.Wire。
+func newTestApp() *app {
+	return &app{stdout: io.Discard, stderr: io.Discard}
+}
+
 // TestMainHelpListsAllSubcommands 钉住 --help：退出码 0，且输出含全部 8 个
 // 子命令名。用户发现子命令的唯一途径就是这个输出，漏一个等于该子命令不存在。
 func TestMainHelpListsAllSubcommands(t *testing.T) {
@@ -88,8 +95,12 @@ func TestMainHelpListsAllSubcommands(t *testing.T) {
 		t.Fatalf("子命令数 = %d，PLAN.md:58 要求 8 个", len(subcommands))
 	}
 	for _, name := range subcommands {
-		if !strings.Contains(out.String(), name) {
-			t.Errorf("--help 输出缺少子命令 %q：\n%s", name, out.String())
+		// 必须匹配**清单行**（行首两空格 + 名字），不能只 Contains(name)：
+		// usageText 的散文里本来就有 "run"（"runner 镜像"、"经 run 目录下的
+		// control socket"）和 "help"（"每个子命令都支持 --help。"），只做
+		// Contains 的话删掉整行清单也照样绿——这条断言就白写了。
+		if !strings.Contains(out.String(), "\n  "+name+" ") {
+			t.Errorf("--help 的子命令清单缺少 %q：\n%s", name, out.String())
 		}
 	}
 	if errb.Len() != 0 {
@@ -147,7 +158,7 @@ func TestSubcommandsReturnNotImplementedKind(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			// 零值 app ⇒ 装配层未接线，正是本波次的真实状态。
-			a := &app{stdout: io.Discard, stderr: io.Discard}
+			a := newTestApp()
 			err := a.exec(c.name, c.args)
 			if err == nil {
 				t.Fatalf("%s: 骨架波次应当返回错误", c.name)
@@ -233,14 +244,25 @@ func TestMainNeverWritesToProcessStdio(t *testing.T) {
 	}
 	origOut, origErr := os.Stdout, os.Stderr
 	os.Stdout, os.Stderr = wOut, wErr
-	defer func() { os.Stdout, os.Stderr = origOut, origErr }()
+	// 用 t.Cleanup 而不是 defer：panic 时 defer 不跑，进程 stdio 会被永久
+	// 指向一个没人读的管道（后续测试的输出全部消失或阻塞）。
+	t.Cleanup(func() { os.Stdout, os.Stderr = origOut, origErr })
+	t.Cleanup(func() { _ = rOut.Close(); _ = rErr.Close() })
 
 	var out, errb bytes.Buffer
-	code := Main([]string{"run", "--budget-rounds=abc"}, &out, &errb)
-	code |= Main([]string{"--help"}, &out, &errb)
-	code |= Main([]string{"list"}, &out, &errb)
-	if code == 0 {
-		t.Errorf("三个调用都应当非 0（前两个之外的 list 在骨架波次也是非 0）")
+	// **分开断言每个调用的退出码**：OR 起来的话「run 那一次错了但 list 非 0」
+	// 也会绿——而 run 那一次正是这条测试要钉的回归。
+	for _, c := range []struct {
+		args []string
+		want int
+	}{
+		{[]string{"run", "--budget-rounds=abc"}, exitUsage},
+		{[]string{"--help"}, exitOK},
+		{[]string{"list"}, exitNotImplemented},
+	} {
+		if got := Main(c.args, &out, &errb); got != c.want {
+			t.Errorf("Main(%v) = %d，期望 %d", c.args, got, c.want)
+		}
 	}
 
 	// 先关写端再读，否则 ReadAll 会一直等（没有任何字节写进来）。
@@ -283,8 +305,10 @@ func TestSubcommandHelpExitsZero(t *testing.T) {
 			if code := Main([]string{name, "--help"}, &out, &errb); code != 0 {
 				t.Fatalf("%s --help = %d，期望 0（stderr=%q）", name, code, errb.String())
 			}
-			if !strings.Contains(out.String(), name) {
-				t.Errorf("%s --help 的输出未提到自己：%q", name, out.String())
+			// 子命令的 --help 必须打自己的用法行（"用法：red-harness <name>"），
+			// 而不是只让名字恰好出现在某段散文里。
+			if !strings.Contains(out.String(), "用法：red-harness "+name) {
+				t.Errorf("%s --help 的输出未打自己的用法行：%q", name, out.String())
 			}
 		})
 	}
@@ -293,7 +317,7 @@ func TestSubcommandHelpExitsZero(t *testing.T) {
 // TestSubcommandRejectsExtraPositionalArgs 位置参数在子命令里没有语义，
 // 静默忽略会让 `run demo-1`（本意是 --targets demo-1）看起来像跑通了。
 func TestSubcommandRejectsExtraPositionalArgs(t *testing.T) {
-	a := &app{stdout: io.Discard, stderr: io.Discard}
+	a := newTestApp()
 	err := a.exec("run", []string{"demo-1"})
 	if err == nil || !strings.Contains(err.Error(), "demo-1") {
 		t.Fatalf("多余位置参数应被拒绝且点名：%v", err)
@@ -305,13 +329,14 @@ func TestSubcommandRejectsExtraPositionalArgs(t *testing.T) {
 // TestInjectWireFeedsMain 断言装配层的注入点真的接进了 Main。
 // T14 的 wire.go 就是靠这个点把 harness.New 装进来的。
 func TestInjectWireFeedsMain(t *testing.T) {
-	prev := wired
-	t.Cleanup(func() { wired = prev })
-
-	lister := &fakeLister{sums: []harness.RunSummary{{
-		RunID: "r-1", State: harness.RunRunning, Scenario: "fake",
-	}}}
-	injectWire(func(string) (Ports, error) { return Ports{Runs: lister}, nil })
+	// 用 injectWire 的返回值做恢复：它是这个 helper 的**唯一**用法
+	// （`t.Cleanup(injectWire(fn))`），手写 prev/cleanup 会让返回值那条
+	// 恢复路径永远没有覆盖。
+	t.Cleanup(injectWire(func(string) (Ports, error) {
+		return Ports{Runs: &fakeLister{sums: []harness.RunSummary{{
+			RunID: "r-1", State: harness.RunRunning, Scenario: "fake",
+		}}}}, nil
+	}))
 
 	var out, errb bytes.Buffer
 	if code := Main([]string{"list", "--store", "/tmp/rh"}, &out, &errb); code != 0 {
@@ -325,14 +350,12 @@ func TestInjectWireFeedsMain(t *testing.T) {
 // TestListHidesTerminalRunsUnlessAll 钉住 list 的默认过滤：终局 run 默认不列
 // （否则跑过几十次之后列表里全是历史），要看得显式 --all。
 func TestListHidesTerminalRunsUnlessAll(t *testing.T) {
-	prev := wired
-	t.Cleanup(func() { wired = prev })
-
-	lister := &fakeLister{sums: []harness.RunSummary{
-		{RunID: "r-live", State: harness.RunRunning, Scenario: "fake"},
-		{RunID: "r-done", State: harness.RunCompleted, Scenario: "fake"},
-	}}
-	injectWire(func(string) (Ports, error) { return Ports{Runs: lister}, nil })
+	t.Cleanup(injectWire(func(string) (Ports, error) {
+		return Ports{Runs: &fakeLister{sums: []harness.RunSummary{
+			{RunID: "r-live", State: harness.RunRunning, Scenario: "fake"},
+			{RunID: "r-done", State: harness.RunCompleted, Scenario: "fake"},
+		}}}, nil
+	}))
 
 	var out, errb bytes.Buffer
 	if code := Main([]string{"list", "--store", "/tmp/rh"}, &out, &errb); code != 0 {
@@ -359,7 +382,7 @@ func TestRunWiredMapsFlagsToRunSpec(t *testing.T) {
 		RunID: "r-1", State: harness.RunCompleted, Reason: harness.ReasonSolved,
 	}}}
 	var gotStore string
-	a := &app{stdout: io.Discard, stderr: io.Discard}
+	a := newTestApp()
 	a.Wire = func(storeDir string) (Ports, error) {
 		gotStore = storeDir
 		return Ports{Engine: eng}, nil
@@ -409,7 +432,7 @@ func TestRunWiredMapsFlagsToRunSpec(t *testing.T) {
 // 那就等于没有护栏——这正是 v0.2 的死代码护栏那一类问题）。
 func TestRunWiredDefaultsToHarnessBudget(t *testing.T) {
 	eng := &fakeEngine{handle: fakeHandle{snap: harness.Snapshot{RunID: "r-1"}}}
-	a := &app{stdout: io.Discard, stderr: io.Discard}
+	a := newTestApp()
 	a.Wire = func(string) (Ports, error) { return Ports{Engine: eng}, nil }
 
 	if code := dispatch([]string{"run", "--scenario", "fake", "--store", "/tmp/rh"}, *a); code != 0 {
@@ -428,7 +451,7 @@ func TestRunWiredDefaultsToHarnessBudget(t *testing.T) {
 // 引擎侧对终态 run 会拒绝恢复，CLI 这一层绝不能自作主张地重跑。
 func TestResumeWiredPassesRunID(t *testing.T) {
 	eng := &fakeEngine{handle: fakeHandle{snap: harness.Snapshot{RunID: "r-9"}}}
-	a := &app{stdout: io.Discard, stderr: io.Discard}
+	a := newTestApp()
 	a.Wire = func(string) (Ports, error) { return Ports{Engine: eng}, nil }
 
 	if code := dispatch([]string{"resume", "--store", "/tmp/rh", "--run", "r-9"}, *a); code != 0 {
@@ -444,7 +467,7 @@ func TestResumeWiredPassesRunID(t *testing.T) {
 func TestPauseWiredDialsControlSocket(t *testing.T) {
 	ctrl := &fakeControl{}
 	var gotPath string
-	a := &app{stdout: io.Discard, stderr: io.Discard}
+	a := newTestApp()
 	a.Wire = func(storeDir string) (Ports, error) {
 		return Ports{Control: func(socketPath string) (controlClient, error) {
 			gotPath = socketPath
@@ -491,7 +514,7 @@ func TestDoctorUnhealthyExitsNonZero(t *testing.T) {
 			{Name: "docker", OK: false, Detail: "docker 不在 PATH", Fatal: true},
 		},
 	}}
-	a := &app{stdout: io.Discard, stderr: io.Discard}
+	a := newTestApp()
 	a.Wire = func(string) (Ports, error) { return Ports{Doctor: doc}, nil }
 
 	if code := dispatch([]string{"doctor"}, *a); code == 0 {
@@ -503,7 +526,7 @@ func TestDoctorUnhealthyExitsNonZero(t *testing.T) {
 // （例如 store 目录建不出来）原样冒出来，不被吞成「未实现」。
 func TestWireErrorIsNotMaskedAsNotImplemented(t *testing.T) {
 	sentinel := harness.Ef(harness.KindPersistence, "store.open", "运行目录不可写", nil)
-	a := &app{stdout: io.Discard, stderr: io.Discard}
+	a := newTestApp()
 	a.Wire = func(string) (Ports, error) { return Ports{}, sentinel }
 
 	err := a.exec("run", []string{"--store", "/nope"})
@@ -519,5 +542,206 @@ func TestNilWritersDoNotPanic(t *testing.T) {
 	}
 	if code := dispatch(nil, app{}); code == 0 {
 		t.Error("无参数应当返回非 0")
+	}
+}
+
+// ── 退出码：脚本靠它分支，三个码必须各自被钉住 ──
+
+// TestExitCodesAreDistinct 钉住「用法错误 = 2」「未实现 = 3」「其它失败 = 1」。
+// cli.go 的注释说脚本靠退出码判断该改命令还是该看日志——如果没人钉住，
+// 一次重构就能让三类错误混成一个码而全绿。
+func TestExitCodesAreDistinct(t *testing.T) {
+	cases := []struct {
+		args []string
+		want int
+	}{
+		{[]string{"bogus"}, exitUsage},                       // 未知子命令
+		{[]string{"help", "bogus"}, exitUsage},               // help 拼错也要非 0
+		{[]string{"run", "--bogus"}, exitUsage},              // 未知 flag
+		{[]string{"run", "demo-1"}, exitUsage},               // 多余位置参数
+		{[]string{"run", "--budget-rounds=abc"}, exitUsage},  // flag 值非法
+		{[]string{"pause", "--store", "/tmp/rh"}, exitUsage}, // 缺 --run
+		{[]string{"run", "--scenario", "fake"}, exitNotImplemented},
+	}
+	for _, c := range cases {
+		var out, errb bytes.Buffer
+		if got := Main(c.args, &out, &errb); got != c.want {
+			t.Errorf("Main(%v) = %d，期望 %d（stderr=%q）", c.args, got, c.want, errb.String())
+		}
+	}
+}
+
+// TestHelpForUnknownSubcommandFails 钉住 `help bogus`：它必须像 `bogus` 一样
+// 报错并退出 2。退出 0 等于告诉脚本「这个子命令存在」。
+func TestHelpForUnknownSubcommandFails(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := Main([]string{"help", "bogus"}, &out, &errb); code != exitUsage {
+		t.Fatalf("help bogus = %d，期望 %d", code, exitUsage)
+	}
+	if !strings.Contains(errb.String(), "bogus") {
+		t.Errorf("help bogus 未点名：%q", errb.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("失败路径不应写 stdout：%q", out.String())
+	}
+}
+
+// TestHelpFlagAfterHelpIsNotASubcommand 钉住 `help --help` / `help -h`：
+// splitSubcommand 把 `-h`/`--help` 也映射成名字 "help"，所以 help 后面跟一个
+// help flag 时，rest[0] 就是 "--help"。若不特判，它会走未知子命令分支、退出 2，
+// 而 usageText 结尾写着「每个子命令都支持 --help」——照着自己看到的说明敲反而
+// 失败，是最不该有的一类不可信。
+func TestHelpFlagAfterHelpIsNotASubcommand(t *testing.T) {
+	for _, args := range [][]string{{"help", "--help"}, {"help", "-h"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var out, errb bytes.Buffer
+			if code := Main(args, &out, &errb); code != exitOK {
+				t.Fatalf("%v = %d，期望 %d；stderr=%q", args, code, exitOK, errb.String())
+			}
+			if !strings.Contains(out.String(), "子命令：") {
+				t.Errorf("%v 未打印用法：%q", args, out.String())
+			}
+			if errb.Len() != 0 {
+				t.Errorf("%v 不应写 stderr：%q", args, errb.String())
+			}
+		})
+	}
+}
+
+// TestFlagErrorPrintsUsageOnce 钉住「flag 解析失败时用法只打一遍」：
+// flag 包自己已经调过 Usage()，parseFlags 再调一次会把整份 flag 清单打两遍。
+func TestFlagErrorPrintsUsageOnce(t *testing.T) {
+	var out, errb bytes.Buffer
+	Main([]string{"run", "--budget-rounds=abc"}, &out, &errb)
+	if n := strings.Count(errb.String(), "用法：red-harness run"); n != 1 {
+		t.Errorf("用法打了 %d 遍，期望 1：\n%s", n, errb.String())
+	}
+	if !strings.Contains(errb.String(), "budget-rounds") {
+		t.Errorf("错误消息未点名 flag：%q", errb.String())
+	}
+}
+
+// ── --run 的路径安全：它会被 join 成 socket 路径 ──
+
+// TestRunIDRejectsPathEscape 钉住 RunID 的「单个目录名」契约（model.go:84）。
+// filepath.Join 会把 `..` 规整掉，所以未校验的 --run 能让 pause/cancel 作用在
+// **别人的** run 上——那正是 requireRunID 注释里说的「打断了别人的题」。
+func TestRunIDRejectsPathEscape(t *testing.T) {
+	bad := []string{"..", "../other-run", "../../etc/x", "a/b", `/abs/path`, ".hidden", " r-1 ", "."}
+	for _, id := range bad {
+		if err := requireRunID(id); err == nil {
+			t.Errorf("requireRunID(%q) 通过了，期望被拒", id)
+		}
+	}
+	for _, id := range []string{"r-1", "2026-09-20T10-00-00_abc"} {
+		if err := requireRunID(id); err != nil {
+			t.Errorf("requireRunID(%q) = %v，期望通过", id, err)
+		}
+	}
+	// 越界的 id 绝不能落在 store 根之外的另一个 run 目录里。
+	if got := controlSocketPath("/tmp/rh", "../other-run"); got == "/tmp/rh/runs/other-run/control.sock" {
+		t.Errorf("越界 runID 拨到了别人的 socket：%q", got)
+	}
+}
+
+// TestPauseRejectsEscapingRunID 从 Main 这一层再确认：越界的 --run 在
+// **拨号之前**就被拒（否则控制命令可能发给 store 根之外的监听者）。
+func TestPauseRejectsEscapingRunID(t *testing.T) {
+	ctrl := &fakeControl{}
+	dialed := false
+	a := newTestApp()
+	a.Wire = func(string) (Ports, error) {
+		return Ports{Control: func(string) (controlClient, error) {
+			dialed = true
+			return ctrl, nil
+		}}, nil
+	}
+	if err := a.exec("pause", []string{"--store", "/tmp/rh", "--run", "../other-run"}); err == nil {
+		t.Fatal("越界的 --run 应当被拒")
+	}
+	if dialed {
+		t.Error("越界的 --run 不该走到拨号")
+	}
+	if ctrl.paused != 0 {
+		t.Errorf("Pause 被调用 %d 次，期望 0", ctrl.paused)
+	}
+}
+
+// TestReportRequiresRun 钉住 report 的 --run：缺它时不能退化成「随便挑一个 run」
+// （那会生成一份看起来正常、实际属于别人的报告）。
+func TestReportRequiresRun(t *testing.T) {
+	a := newTestApp()
+	err := a.exec("report", []string{"--store", "/tmp/rh"})
+	if err == nil || !strings.Contains(err.Error(), "--run") {
+		t.Fatalf("缺 --run 的 report 应当被拒且点名 --run：%v", err)
+	}
+}
+
+// ── 预算：负值不能变成「不限」 ──
+
+// TestBudgetNegativeValuesFallBackToDefaults 钉住「负数 ≠ 拆掉护栏」。
+// Budget.Exhausted 的判据是 `b.MaxRounds > 0 && …`，所以负数落进 Budget
+// 等价于**关掉**该维度——用户以为收紧了，实际把护栏拆了。
+func TestBudgetNegativeValuesFallBackToDefaults(t *testing.T) {
+	f := &runFlags{budgetRounds: -1, budgetWall: -time.Minute, budgetTurns: -1, budgetCost: -5}
+	got := f.budget()
+	want := harness.DefaultBudget()
+	if got.MaxRounds != want.MaxRounds || got.MaxWall != want.MaxWall || got.MaxTurns != want.MaxTurns {
+		t.Errorf("负数预算 = %+v，期望退回默认 %+v", got, want)
+	}
+	if got.MaxCostUSD != 0 {
+		t.Errorf("负成本上限 = %v，期望归 0（不限）", got.MaxCostUSD)
+	}
+}
+
+// TestRelativeStoreReachesPortsAsAbsolutePath 钉住「绝对化发生在所有出口上」：
+// 装配层拿到的 storeDir 必须与 RunSpec.StoreDir 是同一个字符串，否则同一个
+// store 有两种表示——装配层按 cwd 建、摘要按绝对根比对，恢复时报「配置漂移」。
+func TestRelativeStoreReachesPortsAsAbsolutePath(t *testing.T) {
+	eng := &fakeEngine{handle: fakeHandle{snap: harness.Snapshot{RunID: "r-1"}}}
+	var gotStore string
+	a := newTestApp()
+	a.Wire = func(storeDir string) (Ports, error) {
+		gotStore = storeDir
+		return Ports{Engine: eng}, nil
+	}
+	if code := dispatch([]string{"run", "--scenario", "fake", "--store", "runs"}, *a); code != 0 {
+		t.Fatalf("dispatch(run) = %d", code)
+	}
+	if !filepath.IsAbs(gotStore) {
+		t.Errorf("装配层收到的 storeDir = %q，期望绝对路径", gotStore)
+	}
+	if len(eng.started) != 1 {
+		t.Fatalf("Start 调用次数 = %d", len(eng.started))
+	}
+	if eng.started[0].StoreDir != gotStore {
+		t.Errorf("spec.StoreDir = %q 与装配层的 %q 不一致（同一个 store 不能有两种表示）",
+			eng.started[0].StoreDir, gotStore)
+	}
+}
+
+// TestPauseRelativeStoreDialsSameRootAsRun 钉住 pause 的拨号根与 run 建 socket
+// 的根一致：run 用绝对化的 store 建 socket，pause 若用相对的 --store 就会去
+// cwd 下找一个不存在的 control.sock。
+//
+// （「--store 先绝对化再入 spec」不另设用例：上面那条已经把
+// `spec.StoreDir == 装配层收到的绝对路径` 一并钉住了。）
+func TestPauseRelativeStoreDialsSameRootAsRun(t *testing.T) {
+	var gotPath string
+	a := newTestApp()
+	a.Wire = func(storeDir string) (Ports, error) {
+		return Ports{Control: func(socketPath string) (controlClient, error) {
+			gotPath = socketPath
+			return &fakeControl{}, nil
+		}}, nil
+	}
+	if code := dispatch([]string{"pause", "--store", "runs", "--run", "r-1"}, *a); code != 0 {
+		t.Fatalf("dispatch(pause) = %d", code)
+	}
+	if want := controlSocketPath(absStoreDir("runs"), "r-1"); gotPath != want {
+		t.Errorf("socket 路径 = %q，期望 %q", gotPath, want)
+	}
+	if !filepath.IsAbs(gotPath) {
+		t.Errorf("socket 路径 = %q，期望绝对路径", gotPath)
 	}
 }

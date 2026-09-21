@@ -21,6 +21,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	harness "github.com/red-copilot/red-harness"
@@ -156,27 +158,34 @@ func dispatch(args []string, a app) int {
 	case name == "help":
 		// `help` / `--help` / `-h` 是**成功路径**：退出码 0、写 stdout。
 		// `help run` 顺带打该子命令自己的用法。
-		if len(rest) > 0 && isSubcommand(rest[0]) {
-			if err := a.exec(rest[0], []string{"--help"}); err != nil {
-				return exitCode(err)
-			}
+		//
+		// ⚠️ **`help bogus` 也必须失败**：退出 0 等于告诉脚本「这个子命令存在」，
+		// 而它拼错了。与「未知子命令」走同一条错误路径（点名 + 退出码 2）。
+		// `help --help` / `help -h` 是「给 help 自己求用法」，与裸 `--help` 同义。
+		// 不特判的话 `--help` 会被当成子命令名走下面的未知分支，退出码 2 并报
+		// 「未知子命令: --help」——而 usageText 结尾正写着「每个子命令都支持
+		// --help」，用户照着自己看到的说明敲反而失败。
+		if len(rest) > 0 && (rest[0] == "-h" || rest[0] == "--help") {
+			rest = rest[1:]
+		}
+		if len(rest) == 0 {
+			fmt.Fprint(a.out(), usageText)
 			return exitOK
 		}
-		fmt.Fprint(a.out(), usageText)
+		if !isSubcommand(rest[0]) {
+			return unknownSubcommand(a, rest[0])
+		}
+		if err := a.exec(rest[0], []string{"--help"}); err != nil {
+			return exitCode(err)
+		}
 		return exitOK
 	case !ok:
-		if name != "" {
-			// 点名用户打的那个词：拼错子命令是最常见的输入，只回一坨用法
-			// 等于让用户自己去找错在哪。
-			fmt.Fprintf(a.errw(), "未知子命令: %s\n", name)
-		}
-		fmt.Fprint(a.errw(), usageText)
-		return exitUsage
+		// name 为空表示一个参数都没给：只打用法，不点名（没词可点）。
+		return unknownSubcommand(a, name)
 	}
 	if err := a.exec(name, rest); err != nil {
 		// parseFlags 已经把消息与用法写进 stderr 了，不要再打一遍。
-		var rep *reportedError
-		if errors.As(err, &rep) {
+		if rep, ok := errors.AsType[*reportedError](err); ok {
 			return rep.code
 		}
 		fmt.Fprintf(a.errw(), "red-harness %s: %v\n", name, err)
@@ -224,13 +233,26 @@ func splitSubcommand(args []string) (name string, rest []string, ok bool) {
 	return args[0], args[1:], isSubcommand(args[0])
 }
 
-func isSubcommand(name string) bool {
-	for _, s := range subcommands {
-		if s == name {
-			return true
-		}
+// unknownSubcommand 是「未知子命令」的**唯一**出口：点名 + 打用法 + 退出码 2。
+//
+// 三条路径共用它（裸的 `bogus`、`help bogus`、以及一个参数都没给），共用一份
+// 实现才能保证它们的退出码与输出面永远一致——测试
+// `TestHelpForUnknownSubcommandFails` 钉的正是「`help bogus` 与 `bogus` 行为
+// 相同」这条不变量，手抄两份的话它只是碰巧成立。
+//
+// name 为空表示「一个参数都没给」：此时没词可点，只打用法。
+func unknownSubcommand(a app, name string) int {
+	if name != "" {
+		// 点名用户打的那个词：拼错子命令是最常见的输入，只回一坨用法
+		// 等于让用户自己去找错在哪。
+		fmt.Fprintf(a.errw(), "未知子命令: %s\n", name)
 	}
-	return false
+	fmt.Fprint(a.errw(), usageText)
+	return exitUsage
+}
+
+func isSubcommand(name string) bool {
+	return slices.Contains(subcommands, name)
 }
 
 // ── 退出码与错误标记 ──
@@ -264,11 +286,29 @@ type reportedError struct {
 func (e *reportedError) Error() string { return e.err.Error() }
 func (e *reportedError) Unwrap() error { return e.err }
 
+// usageError 是「命令行用法写错了」：退出码 2，消息由 dispatch 统一打印。
+//
+// 为什么与 reportedError 分开：reportedError 的前提是「消息已经打过了」，
+// 而这里的消息还没打。缺 `--run`、多给了位置参数都属于这一类——它们和
+// 「flag 值非法」是同一层错误，退出码必须一致，否则脚本会把「命令写错了」
+// 当成「操作失败了」（前者该改命令，后者该看日志）。
+type usageError struct{ err error }
+
+func (e *usageError) Error() string { return e.err.Error() }
+func (e *usageError) Unwrap() error { return e.err }
+
+// usagef 构造一个用法错误。
+func usagef(op, format string, args ...any) error {
+	return &usageError{err: harness.Ef(harness.KindConfig, op, fmt.Sprintf(format, args...), nil)}
+}
+
 // exitCode 把错误映射成退出码。
 func exitCode(err error) int {
-	var ni *notImplementedError
-	if errors.As(err, &ni) {
+	if _, ok := errors.AsType[*notImplementedError](err); ok {
 		return exitNotImplemented
+	}
+	if _, ok := errors.AsType[*usageError](err); ok {
+		return exitUsage
 	}
 	return exitFailure
 }
@@ -296,30 +336,87 @@ func (a *app) parseFlags(name string, fs *flag.FlagSet, args []string) (help boo
 			return true, nil
 		}
 		// flag 自己的消息就含 flag 名（`invalid value "abc" for flag
-		// -budget-rounds: parse error`），这正是可诊断性需要的；再补上用法，
-		// 免得用户为了看用法再跑一次 --help。
-		fs.Usage()
+		// -budget-rounds: parse error`），这正是可诊断性需要的。用法**已经**
+		// 由 flag 包写进 buf 了（Parse 失败时它会调 fs.Usage()），这里再调一次
+		// 会把整份用法打两遍。
 		fmt.Fprint(a.errw(), buf.String())
 		return false, &reportedError{err: perr, code: exitUsage}
 	}
 	if fs.NArg() > 0 {
-		return false, harness.Ef(harness.KindConfig, "cli."+name,
-			fmt.Sprintf("%s 不接受位置参数: %s（题目列表请用 --targets）", name,
-				strings.Join(fs.Args(), " ")), nil)
+		// 用法错误 ⇒ 退出码 2（与 flag 解析失败一致）：脚本要能区分
+		// 「命令行写错了」与「跑起来之后失败了」。
+		return false, usagef("cli."+name, "%s 不接受位置参数: %s（%s）", name,
+			strings.Join(fs.Args(), " "), positionalHint(name))
 	}
 	return false, nil
 }
 
-// splitList 把逗号分隔的列表拆开并去空白。空串返回 nil（调用方据此判断
-// 「没给」而不是「给了一个空项」）。
+// positionalHint 给出该子命令正确的写法。
+//
+// 共用一条「请用 --targets」对 doctor/list/serve/report 是错的：它们根本没有
+// --targets。把用户指向一个不存在的 flag，比不提示更糟。
+func positionalHint(name string) string {
+	switch name {
+	case "run":
+		return "题目列表请用 --targets"
+	case "resume", "pause", "cancel", "report":
+		return "运行 ID 请用 --run"
+	default:
+		return "本子命令没有位置参数，请用 --help 看可用 flag"
+	}
+}
+
+// splitList 把逗号分隔的列表拆开并去空白。
+//
+// 空串返回 nil（调用方据此判断「没给」而不是「给了一个空项」）。
+//
+// ⚠️ **逐项丢弃空项，所以 `--targets=,` 与「没给 --targets」不可区分。** 这是
+// 有意的取舍：一个空项只可能来自手滑多打的逗号，报错会让 `--targets "a,b,"`
+// 这种常见脚本写法失败；而它**不会**造成静默漏跑——被丢掉的是空串，不是题目
+// 名。（真正危险的是 `--targets ""`：那会落成 Targets=nil，即「全部未完成」。
+// 想表达「一道都不跑」必须不启动 run，而不是给空列表。）
 func splitList(s string) []string {
 	var out []string
-	for _, part := range strings.Split(s, ",") {
+	for part := range strings.SplitSeq(s, ",") {
 		if p := strings.TrimSpace(part); p != "" {
 			out = append(out, p)
 		}
 	}
 	return out
+}
+
+// runIDError 报告 RunID 非法。
+//
+// **共享契约（必须与 store 的 validRunID 判据一致，store/store.go）**：RunID 是
+// 单个目录名——非空、是本地相对路径、不是 `.`、不以点开头、不含路径分隔符。
+// 两边各写一份是因为 cli 不导入 store（见 docs/architecture.md 的依赖方向）。
+//
+// ⚠️ 本函数**比 store 多一条**：拒绝前后空白。那是 CLI 特有的输入卫生（flag
+// 值可能带空白，而目录名不会），store 收到的是已经规整过的目录名。
+//
+// 为什么这不是「防手滑」而是「防越界」：RunID 是 run 目录名，而 pause/cancel 会
+// 把它 join 成 socket 路径——`filepath.Join` 会把 `..` 规整掉，于是
+// `--run ../other-run` 的落点是 `<store>/other-run/control.sock`，**整条 runs/
+// 都被跳过了**，等于把控制命令发给别人的 run。改这里必须同时改 store。
+func runIDError(id string) error {
+	bad := func() error {
+		return usagef("cli",
+			"--run %q 非法：必须是单个目录名（不得含路径分隔符、不得以点开头、不得为 ..）", id)
+	}
+	// 前后空白不会被任何一层去掉，却会被原样当成目录名——直接拒绝，避免
+	// 「校验通过、拼路径时又变成另一个名字」。
+	if strings.TrimSpace(id) != id {
+		return bad()
+	}
+	// `.` 与 `..` 由 IsLocal 判掉（`..` 不是本地路径，`.` 需要显式排除）；
+	// `id[0] == '.'` 是共享契约里那条「不得以点开头」。
+	if id == "" || !filepath.IsLocal(id) || id == "." || id[0] == '.' {
+		return bad()
+	}
+	if strings.ContainsAny(id, `/\`) {
+		return bad()
+	}
+	return nil
 }
 
 // requireRunID 校验 `--run`。
@@ -328,9 +425,9 @@ func splitList(s string) []string {
 // 运行上，猜错一个等于打断了别人的题。
 func requireRunID(runID string) error {
 	if strings.TrimSpace(runID) == "" {
-		return harness.Ef(harness.KindConfig, "cli", "缺少 --run（运行 ID）", nil)
+		return usagef("cli", "缺少 --run（运行 ID）")
 	}
-	return nil
+	return runIDError(runID)
 }
 
 const usageText = `red-harness —— 进攻性安全 Harness（v0.3.0）

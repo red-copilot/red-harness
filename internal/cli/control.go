@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"bufio"
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"net"
@@ -36,8 +40,22 @@ const (
 // ⚠️ **这是与 engine 侧各写一份的共享约定**（engine 不能导入本包）。改这里必须
 // 同时改 T11 的服务端，否则 pause/cancel 会静默连不上——测试
 // `TestControlSocketPathIsUnderRunDir` 钉住的就是这个字面形状。
+//
+// 形状与 store 的 `<root>/runs/<id>` 布局必须一致（store.FileStore.RunDir）。
+// 这里多一道「拒绝逃逸」的兜底：调用方已经把 `--run` 过了 requireRunID，但
+// **万一将来有人绕过它**，宁可给出一个明显不存在的路径，也不要把控制命令发给
+// store 里的另一个 run。注意 `filepath.Join` 会把 `..` 规整掉，所以
+// `--run ../other-run` 的落点是 `<store>/other-run/control.sock`——**整条 runs/
+// 都被跳过了**，这正是兜底要拦的形状。
 func controlSocketPath(storeDir string, runID harness.RunID) string {
-	return filepath.Join(storeDir, "runs", string(runID), controlSocketName)
+	runsDir := filepath.Join(storeDir, "runs")
+	runDir := filepath.Join(runsDir, string(runID))
+	if filepath.Dir(runDir) != runsDir {
+		// 越界的 runID（含 `..` 或分隔符）——返回一个不可能存在的路径，
+		// 让拨号直接失败，而不是把控制命令发给 store 里的另一个 run。
+		return filepath.Join(runsDir, controlSocketName)
+	}
+	return filepath.Join(runDir, controlSocketName)
 }
 
 // controlCommand 是控制命令的 wire 形状。
@@ -72,8 +90,8 @@ func (a *app) cancel(args []string) error { return a.controlCmd(args, "cancel") 
 func (a *app) controlCmd(args []string, cmd string) error {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	var (
-		store = fs.String("store", "runs", "运行目录根")
-		runID = fs.String("run", "", "目标运行 ID")
+		storeFlag = fs.String("store", "runs", "运行目录根")
+		runID     = fs.String("run", "", "目标运行 ID")
 	)
 	help, err := a.parseFlags(cmd, fs, args)
 	if help || err != nil {
@@ -83,14 +101,18 @@ func (a *app) controlCmd(args []string, cmd string) error {
 		return err
 	}
 
-	ports, err := a.ports(*store)
+	// **先绝对化再拼路径**：run 进程建 socket 时用的是 spec() 里那份绝对路径的
+	// store 根（见 run.go 的 absStoreDir），这里若用相对的 `--store` 就会去
+	// cwd 下找一个并不存在的 control.sock——「run 在跑，pause 却说没在跑」。
+	store := absStoreDir(*storeFlag)
+	ports, err := a.ports(store)
 	if err != nil {
 		return err
 	}
 	if ports.Control == nil {
 		return notImplemented(cmd)
 	}
-	client, err := ports.Control(controlSocketPath(*store, harness.RunID(*runID)))
+	client, err := ports.Control(controlSocketPath(store, harness.RunID(*runID)))
 	if err != nil {
 		// 连不上通常意味着「这个 run 没有在跑」——把原样错误上抛，不要改写成
 		// 「未实现」或「运行不存在」：前者会让人以为功能没做，后者会掩盖真实的
@@ -115,8 +137,11 @@ func (a *app) controlCmd(args []string, cmd string) error {
 // 但 run 已经结束」的模糊状态。一问一答的 socket 语义最不容易出错。
 type socketControl struct{ path string }
 
-// newSocketControl 拨到 path。失败在**拨号时**就返回，而不是等到发命令——
-// 「run 不在跑」应当在用户按下 pause 的瞬间报出来。
+// newSocketControl 是 controlDialer 的生产实现：先探一次活性，成功才返回客户端。
+//
+// 为什么探一次就关：`pause`/`cancel` 是低频的人手操作，而「run 不在跑」必须在
+// 用户按下的瞬间报出来，不能等到发命令时才失败。探活连接立刻关掉——真正的
+// 命令由 send 自己新建连接（一问一答，见 socketControl 的注释）。
 func newSocketControl(path string) (controlClient, error) {
 	conn, err := net.DialTimeout("unix", path, controlTimeout)
 	if err != nil {
@@ -131,7 +156,21 @@ func (c *socketControl) Pause(ctx context.Context) error  { return c.send(ctx, "
 func (c *socketControl) Resume(ctx context.Context) error { return c.send(ctx, "resume") }
 func (c *socketControl) Cancel(ctx context.Context) error { return c.send(ctx, "cancel") }
 
-// send 发一条命令并读回一行应答。空应答视为成功（服务端在 T11 里定具体形状）。
+// 编译期断言：newSocketControl 就是 controlDialer 要的那个形状。
+//
+// 本波次它还没有调用点（T14 的 wire.go 才把 Ports.Control 接上），所以这条断言
+// 是「它是生产实现」这个声明的**唯一**机械保证——否则一次签名漂移只会让
+// T14 在装配时才发现。
+var _ controlDialer = newSocketControl
+
+// send 发一条命令并读回一行应答。
+//
+// 三条边界（都是「静默成功」的入口，必须 fail closed）：
+//   - **只读到换行/EOF**：服务端回完应答不一定关连接，用 ReadAll 会一直等到
+//     超时，把一次成功的 pause 报成读取失败。所以按行读。
+//   - **读不出结构**：非空但解析不出 `{"ok":…}` 的应答按失败处理——以前
+//     这个分支会 return nil，把服务端的报错吞成成功。
+//   - **写入**：`--run` 的合法性由 requireRunID 保证，这里只管协议。
 func (c *socketControl) send(ctx context.Context, cmd string) error {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", c.path)
@@ -147,18 +186,35 @@ func (c *socketControl) send(ctx context.Context, cmd string) error {
 		return harness.Ef(harness.KindConfig, "cli.control", "控制命令写入失败: "+cmd, err)
 	}
 	// 读回一行应答。EOF 也算成功：服务端收到命令后直接关闭是合法应答。
-	reply, err := io.ReadAll(io.LimitReader(conn, 4096))
-	if err != nil {
+	line, err := bufio.NewReader(io.LimitReader(conn, 4096)).ReadBytes('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
 		return harness.Ef(harness.KindConfig, "cli.control", "控制命令应答读取失败: "+cmd, err)
 	}
-	if len(reply) > 0 {
-		var out struct {
-			OK  bool   `json:"ok"`
-			Err string `json:"error,omitempty"`
-		}
-		if json.Unmarshal(reply, &out) == nil && !out.OK && out.Err != "" {
-			return harness.Ef(harness.KindConfig, "cli.control", out.Err, nil)
-		}
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return nil
+	}
+	var out struct {
+		OK    bool   `json:"ok"`
+		Err   string `json:"error,omitempty"`
+		Reply string `json:"message,omitempty"`
+	}
+	if err := json.Unmarshal(line, &out); err != nil {
+		return harness.Ef(harness.KindConfig, "cli.control",
+			"控制命令应答无法解析（"+cmd+"）: "+truncateForMsg(line), err)
+	}
+	if !out.OK {
+		return harness.Ef(harness.KindConfig, "cli.control",
+			cmp.Or(out.Err, out.Reply, "服务端未确认（ok=false）"), nil)
 	}
 	return nil
+}
+
+// truncateForMsg 把应答截短再拼进错误消息：它会被打进终端与 CI 日志。
+func truncateForMsg(b []byte) string {
+	const max = 200
+	if len(b) > max {
+		return string(b[:max]) + "…"
+	}
+	return string(b)
 }

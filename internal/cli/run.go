@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"time"
 
 	harness "github.com/red-copilot/red-harness"
@@ -49,7 +50,7 @@ type runFlags struct {
 // register 把 flag 挂到一个 FlagSet 上。名字即 CLI 的公开面，改名字是破坏性变更。
 func (f *runFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.store, "store", "runs", "运行目录根（<store>/runs/<runID>/）")
-	fs.StringVar(&f.scenario, "scenario", "", "场景名（对应装配层 Options.Scenarios 的键），空表示全部未完成的题")
+	fs.StringVar(&f.scenario, "scenario", "", "场景名（对应装配层 Options.Scenarios 的键）")
 	fs.StringVar(&f.targets, "targets", "", "题目 code 列表，逗号分隔；空表示全部未完成")
 
 	fs.StringVar(&f.provider, "provider", "", "pi 的 --provider")
@@ -76,8 +77,6 @@ func (f *runFlags) register(fs *flag.FlagSet) {
 	fs.Float64Var(&f.budgetCost, "budget-cost", 0, "累计成本上限 USD（0 表示不限）")
 
 	fs.StringVar(&f.hint, "hint", harness.HintAuto, "提示策略：off / auto / always")
-	// 默认干跑：真提交会消耗平台额度且不可撤销，所以默认值必须是**不写平台**的
-	// 那一侧，要真提交得显式 --submit。
 	fs.BoolVar(&f.submit, "submit", false, "是否真向平台提交（默认干跑，只记账）")
 
 	fs.IntVar(&f.policyMaxAttempts, "max-attempts", 0, "同一意图的最大重试轮数（0 表示用引擎默认）")
@@ -89,6 +88,10 @@ func (f *runFlags) register(fs *flag.FlagSet) {
 // **零值必须是「用默认值」而不是「不限」**：`Budget{MaxRounds: 0}` 在
 // `Budget.Exhausted` 里表示该维度不设限，如果用户什么都没填就落成零值，
 // 预算护栏会整条消失——而「护栏看起来在、实际不在」比没有护栏更危险。
+//
+// **负数同样必须归到默认值**：`Exhausted` 的判据是 `b.MaxRounds > 0 && …`，
+// 所以 `--budget-rounds=-1` 落进 Budget 等于**关掉**该维度（而不是「用默认」
+// 或报错）——用户以为收紧了，实际把护栏拆了。
 func (f *runFlags) budget() harness.Budget {
 	def := harness.DefaultBudget()
 	b := harness.Budget{
@@ -97,14 +100,18 @@ func (f *runFlags) budget() harness.Budget {
 		MaxTurns:   f.budgetTurns,
 		MaxCostUSD: f.budgetCost, // 0 = 不限，与 harness 的语义一致
 	}
-	if b.MaxRounds == 0 {
+	if b.MaxRounds <= 0 {
 		b.MaxRounds = def.MaxRounds
 	}
-	if b.MaxWall == 0 {
+	if b.MaxWall <= 0 {
 		b.MaxWall = def.MaxWall
 	}
-	if b.MaxTurns == 0 {
+	if b.MaxTurns <= 0 {
 		b.MaxTurns = def.MaxTurns
+	}
+	if b.MaxCostUSD < 0 {
+		// 负成本上限在 Exhausted 里同样等价于「不限」，是纯粹的输入错误。
+		b.MaxCostUSD = 0
 	}
 	return b
 }
@@ -113,6 +120,11 @@ func (f *runFlags) budget() harness.Budget {
 //
 // ⚠️ **RunSpec 会整份写进 run.json（公开文件），所以这里绝不能放凭据。**
 // provider 的 API key 走进程环境变量，平台 token 走 bridge 子进程环境变量。
+//
+// ⚠️ **StoreDir 先绝对化再入 spec。** 它是 `RunSpec.Digest()` 的一部分，而
+// `--store` 的默认值是一个相对路径（"runs"）：原样写进去等于把 **cwd 变成配置
+// 的一部分**——同一个 store 在 /a 与 /b 下起两次会得到两个不同的摘要，恢复时
+// 报「配置漂移」，而两次其实指向不同的目录（更糟的是不报错的那种）。
 func (f *runFlags) spec() harness.RunSpec {
 	return harness.RunSpec{
 		Scenario: f.scenario,
@@ -138,12 +150,35 @@ func (f *runFlags) spec() harness.RunSpec {
 		Budget:     f.budget(),
 		HintPolicy: f.hint,
 		Submit:     f.submit,
-		StoreDir:   f.store,
+		StoreDir:   f.storeDir(),
 		Policy: harness.PolicySpec{
 			MaxAttemptsPerIntent: f.policyMaxAttempts,
 			DryRoundsBeforeHint:  f.policyDryRounds,
 		},
 	}
+}
+
+// storeDir 把 `--store` 折成绝对路径，是**唯一**该用来喂装配层（`a.ports`）、
+// 拼 socket 路径、以及写进 RunSpec.StoreDir 的 store 值。
+//
+// ⚠️ **不要在这里改回 f.store**：`spec()` 把绝对化后的值写进 RunSpec.StoreDir，
+// 而 StoreDir 是 Digest 的一部分、也是恢复时的漂移判据。如果装配层拿到的是
+// 相对路径（"runs"）而摘要里是 "/abs/cwd/runs"，同一个 store 就有了两种表示：
+// 装配层按 cwd 建 store、摘要按另一个根比对，换个 cwd 恢复就报「配置漂移」；
+// pause/cancel 更直接——它们会去 cwd 下找一个并不存在的 control.sock。
+// 所以「绝对化」必须发生在**所有**出口上，而不是只发生在 spec 里。
+func (f *runFlags) storeDir() string { return absStoreDir(f.store) }
+
+// absStoreDir 把 store 根折成绝对路径（解析失败时退回原值，让 store.New 给出
+// 更准确的错误）。
+//
+// 它同时被 runFlags 与 pause/cancel 使用：这两条路径必须对同一个 `--store`
+// 得到同一个字符串，否则「run 在哪儿建的 socket」与「pause 去哪儿拨号」会分叉。
+func absStoreDir(store string) string {
+	if abs, err := filepath.Abs(store); err == nil {
+		return abs
+	}
+	return store
 }
 
 // run 执行 `run` 子命令：新建一次运行并等它终局。
@@ -156,7 +191,7 @@ func (a *app) run(args []string) error {
 		return err
 	}
 
-	ports, err := a.ports(f.store)
+	ports, err := a.ports(f.storeDir())
 	if err != nil {
 		return err
 	}
@@ -165,6 +200,7 @@ func (a *app) run(args []string) error {
 		return notImplemented("run")
 	}
 
+	// 信号 → Cancel 的接线在 T14（要先拿到 handle 才能 Cancel）。
 	handle, err := ports.Engine.Start(context.Background(), f.spec())
 	if err != nil {
 		return err
@@ -198,7 +234,7 @@ func (a *app) resume(args []string) error {
 		return err
 	}
 
-	ports, err := a.ports(*store)
+	ports, err := a.ports(absStoreDir(*store))
 	if err != nil {
 		return err
 	}
@@ -232,7 +268,7 @@ func (a *app) list(args []string) error {
 		return err
 	}
 
-	ports, err := a.ports(*store)
+	ports, err := a.ports(absStoreDir(*store))
 	if err != nil {
 		return err
 	}
