@@ -1,307 +1,102 @@
-# red-harness 架构图（v0.3.0）
+# red-harness SDK 架构（v0.4.0-research）
 
-> 生成时间：2026-09-20
-> 基线提交：`f799af3`（Merge branch 't10-cli'）
-> 状态：**W0 + W1 已合并**（契约冻结、dag/gate 迁移、store、executor、bridge、CLI 骨架）；
-> **W2/W3 未开始**（engine、scenario、piai 迁移、wire 装配层、report、web、example）。
->
-> 图中**红色虚线框 = 尚未落地**；绿色 = 已落地且自测绿。
->
-> 分阶段交付与出口门见 [roadmap.md](roadmap.md)。本文描述当前实现与目标接线，
-> roadmap 描述先做什么以及何时算完成。
+> 更新：2026-09-21。本文按当前工作区代码描述实现状态；目标行为见 [PLAN v0.4](PLAN%20v0.4.md)，交付顺序见 [roadmap.md](roadmap.md)。
+> 旧 Engine、RunHandle、事件快照和 CLI 仍在源码中，供 v0.3 读取与测试使用；它们尚未成为 v0.4 的可用入口。
 
----
+## 1. 定位与边界
 
-## 0. 架构结论与信任边界
+v0.4 是面向**明确授权的 CTF、TSecBench 和本地靶场**的单机研究 SDK。一次同步 Harness.Run 串行处理题目；每题一个 Docker sandbox、一个 pi Agent 会话。宿主负责平台 API、目标范围、调度、候选判定和结果；Agent 与工具都在 sandbox 内运行。当前不支持一般真实资产、多用户、远程 worker、并发 Run 或崩溃续跑。
 
-red-harness 采用“**可信控制面 + 非可信执行面**”模型。Agent 与它调用的安全工具被视为
-不可信代码；它们可以产出事件和候选，但不能决定授权范围、直接调用平台写接口、持有
-平台凭据或写入公开运行状态。
-
-```mermaid
+~~~mermaid
 flowchart LR
-    U["操作者<br/>CLI · 本地 Web"] --> CP
+    Caller["SDK 调用者 / 未来 CLI"] --> H["Harness.Run<br/>同步编排"]
+    H --> S["Scenario<br/>Fake / TSecBench"]
+    S --> B["bridge<br/>宿主平台凭据"]
+    H --> D["DAG Planner + Renderer"]
+    H --> G["Candidate Gate"]
+    H --> R["ResultStore<br/>公开指标"]
+    H --> X["Sandbox.NewSession"]
+    X --> P["pi 主进程<br/>Docker 容器"]
+    P --> T["工具<br/>同一容器"]
+    P -->|"规范化事件"| H
+    X -->|"目标 IP:port 白名单"| Target["授权靶场"]
+    X -->|"provider 代理"| Model["模型服务"]
+~~~
 
-    subgraph CP["可信控制面 · 宿主"]
-        EN["Engine<br/>单写者状态机"]
-        PO["Policy + Scope<br/>预算 · 目标范围 · 提交判定"]
-        SC["Scenario<br/>唯一平台副作用入口"]
-        ST["Store<br/>事件 · 快照 · 私密账本"]
-        EN --> PO
-        EN --> SC
-        EN --> ST
-    end
+### 信任边界
 
-    subgraph EP["非可信执行面 · 容器"]
-        AG["Agent"] --> TL["安全工具"]
-    end
-
-    subgraph BG["边界执行"]
-        EX["Executor<br/>资源/进程隔离"]
-        NW["Network policy<br/>目标白名单 · provider 代理"]
-    end
-
-    EN --> EX --> EP
-    EP -->|"事件/候选；背压 channel"| EN
-    EP --> NW
-    SC -->|"无凭据回流"| PF["TSecBench bridge"]
-    NW -->|"仅授权 IP:port"| TG["挑战目标"]
-    NW -->|"仅白名单域名"| PV["模型 provider"]
-
-    classDef trusted fill:#e8eefc,stroke:#3b5bdb
-    classDef untrusted fill:#fff4d6,stroke:#a16207
-    classDef boundary fill:#fde7e7,stroke:#b3261e
-    class CP,EN,PO,SC,ST trusted
-    class EP,AG,TL untrusted
-    class BG,EX,NW boundary
-```
-
-五条架构约束：
-
-1. **Engine 是唯一状态写者**；Agent、Web、Scenario 只能向它提交输入。
-2. **Scenario 是唯一平台副作用入口**；写操作结果不确定时必须先 Reconcile。
-3. **Executor 是最终执行边界**；prompt 和 Agent 自律不是安全控制。
-4. **范围在容器外计算并强制执行**；Agent 只能看到解析后的目标端点。
-5. **公开账本与私密账本物理分离**；任何跨界复制都必须经过指纹化或脱敏。
-
----
-
-## 1. 分层与端口接线（当前真实状态）
-
-```mermaid
-flowchart TB
-    subgraph ENTRY["入口"]
-        CMD["cmd/red-harness/main.go"]
-        CLI["internal/cli<br/>doctor · list · run · resume<br/>pause · cancel · serve · report"]
-    end
-
-    subgraph ROOT["harness 根包 —— 纯契约（类型 + 接口，零实现）"]
-        CORE["Engine · RunHandle · RunSpec · Snapshot<br/>DomainEvent · Budget · RunState · Error/Kind"]
-        PORTS["可替换端口<br/>Platform + HealthChecker · Scenario · Executor<br/>Agent + AgentFactory + EventSink<br/>Planner · Renderer · CandidateGate · RejectedLedger<br/>RunPolicy · Store · EvidenceStore · GraphStore"]
-        REG["RegisterEngine 注入点<br/>newEngine 变量 · 未注册即 KindConfig"]
-        CORE --- PORTS
-        CORE --- REG
-    end
-
-    subgraph DONE["已落地适配器"]
-        BR["bridge/ · Client<br/>常驻 Python JSONL 桥<br/>check_vpn·list·start·hint·submit·close"]
-        EX["executor/ · Docker<br/>per-run bridge 网 + iptables 白名单<br/>宿主 CONNECT 域名代理 · 按 label 回收"]
-        ST["store/ · FileStore<br/>events.jsonl 先写 → run.json 原子写<br/>private/ 0700 明文账本"]
-        DG["dag/ · Scheduler + Renderer<br/>事实—意图图 · 阶段链 + 三条剪枝"]
-        GT["gate/ · Gate + Ledger<br/>首现优先族别判定 · 指纹账本"]
-        AN["answer/ · Shape + Fingerprint<br/>叶子包"]
-        PI["piai/ · Agent<br/>pi RPC 帧解析 · 看门狗 · 会话复位"]
-        RN["runner/Dockerfile<br/>red-harness-runner:v0.3.0"]
-    end
-
-    subgraph TODO["尚未落地"]
-        EN["engine/ 单写者内核 + 恢复 + 控制面 — T11"]
-        SC["scenario/ TSecBench + fake — T13"]
-        RP["report/ — T16"]
-        WB["web/ 本地看板 — T15"]
-        EG["example/ 离线端到端 — T17"]
-        WF["internal/cli/wire.go 装配层"]
-        PM["piai 迁移到 harness.Agent — T12<br/>Round 签名仍是 v0.2"]
-        PO["RunPolicy 默认实现"]
-    end
-
-    CMD --> CLI
-    CLI -.->|WireFunc| WF
-    WF --> CORE
-    EN --> CORE
-    SC --> CORE
-    RP --> CORE
-    WB --> CORE
-    EG --> CORE
-    BR --> PORTS
-    EX --> PORTS
-    ST --> PORTS
-    DG --> PORTS
-    GT --> PORTS
-    PI -.->|签名未对齐| PORTS
-    PM --> PORTS
-    PO --> PORTS
-    DG --> AN
-    GT --> AN
-    EX --> RN
-
-    classDef done fill:#dff5e1,stroke:#2f7d32
-    classDef todo fill:#fde7e7,stroke:#b3261e,stroke-dasharray:4 3
-    classDef root fill:#e8eefc,stroke:#3b5bdb
-    class BR,EX,ST,DG,GT,AN,PI,RN done
-    class EN,SC,RP,WB,EG,WF,PM,PO todo
-    class CORE,PORTS,REG root
-```
-
-**编译期依赖方向（实测，来自各包 import）**
-
-| 包 | 导入的内部包 | 说明 |
+| 边界 | 责任 | 不允许流过的内容 |
 |---|---|---|
-| `answer` | — | 叶子 |
-| `dag` | `harness`, `answer` | |
-| `gate` | `harness`, `answer` | |
-| `piai` | `harness` | |
-| `bridge` | `harness` | |
-| `executor` | `harness` | |
-| `store` | `harness`, `answer` | |
-| `internal/cli` | `harness` | |
-| `cmd/red-harness` | `internal/cli` | |
+| 宿主控制面 | 解析授权目标、调用平台、维持预算、提交候选、保存指标 | Agent 不持有平台 token，不直接调用平台写接口 |
+| Sandbox | 非 root、只读 rootfs、有界 tmpfs、资源和网络限制；pi 与工具在容器内 | 宿主可写工作目录、Docker socket、未授权目标 |
+| 公开结果 | profile 摘要、题目、轮次、进度、耗时、失败类别等 | flag、候选明文、模型 key、平台 token、原始 trace |
+| 私密证据 | 仅研究所需的原始输出与候选，限制文件权限 | 自动进入公开结果或 CLI 输出 |
 
-**已有编译期契约断言**：`harness.Planner`/`Renderer`（`dag/schedule.go:37,428`）、
-`harness.Executor`（`executor/docker.go:33`）、`harness.CandidateGate`/`RejectedLedger`
-（`gate/provenance_test.go:527,524`）、`harness.Platform`/`HealthChecker`
-（`bridge/client_test.go:29-30`）、`harness.Store`/`GraphStore`（`store/store_test.go:697-698`）、
-`harness.EvidenceStore`（`store/private.go:324`）。
-**缺断言**：`harness.Agent` / `AgentFactory`（piai 尚未迁移）。
+以上是目标不变式。当前 Docker 适配器已实现基础隔离配置；越界阻断、凭据泄漏和所有清理路径仍需真实容器集成门证明。
 
----
+## 2. SDK 端口与依赖方向
 
-## 2. 运行期轮循环（engine/ 的设计契约，T11 待实现）
+根包定义通用模型与端口；实现包依赖根包，装配代码负责组合，根包不导入具体适配器。
 
-```mermaid
-flowchart LR
-    A["Planner.Next<br/>取下一个可执行意图"] --> B["Renderer.Render<br/>渲染本轮 prompt"]
-    B --> C["Agent.Round<br/>发 prompt · 等本轮结束"]
-    C -->|EventSink 推事件| D["事件 channel · 有缓冲<br/>满了阻塞 = 有意背压"]
-    D --> E["runLoop 单写者消费"]
-    E --> F["Planner.ObserveEvent<br/>事实入图"]
-    E --> G["Gate.Observe<br/>候选只记账 · 绝不 IO"]
-    F --> H["Planner.Settle<br/>按客观产出回填"]
-    G --> I["轮末 harvest<br/>Gate.New 取未提交候选"]
-    I --> J["Scenario.Evaluate"]
-    J --> P["Platform.Submit"]
-    P --> K["Gate.Mark"]
-    H --> L["Store.Append 领域事件<br/>→ 原子写快照<br/>→ GraphStore.PutGraph"]
-    K --> L
-    L --> M{"RunPolicy.OnRoundStart<br/>预算 / 进度 / ctx"}
-    M -->|继续| A
-    M -->|终止| N["Scenario.Cleanup<br/>Executor.Reclaim 按 run label"]
+| 端口 / 模块 | 当前职责 | 代码状态 |
+|---|---|---|
+| Harness.Run(ctx, RunSpec) | 同步遍历题目、调用轮循环、保存结果 | 已实现初版；缺硬化与纵向验收 |
+| Scenario | Discover → Prepare → Hint/Evaluate/Reconcile → Cleanup；平台副作用唯一入口 | scenario/Fake 与 TSecBench 已有；后者依赖宿主 bridge |
+| Sandbox / SandboxSession | 为每题建隔离网络，Launch 一个 attached 主进程，Close/Reclaim 回收 | executor/Docker 已有；Probe 当前只检查镜像 |
+| AgentFactory / Agent | 将 pi 绑定到已创建的 session，通过 RPC 执行轮次并发事件 | piai/Factory 已有；生产链路尚未做容器内验收 |
+| Planner / Renderer | DAG 事实、意图、剪枝和 prompt 渲染 | dag 可复用；由调用者注入 |
+| CandidateGate | 按来源归类、去重、判定候选可提交性 | gate.NewAll 提供 v0.4 的 observed/derived 视图 |
+| ResultStore | 保存公开指标并按维度聚合 | store/ResultFileStore 已有初版；指标口径未齐 |
+| CLI 装配 | doctor/list/run/stats 对接同步 Harness | **未实现**；当前 CLI 仍使用 v0.3 Engine.Start/Resume，WireFunc 为 nil |
 
-    classDef gap fill:#fde7e7,stroke:#b3261e,stroke-dasharray:4 3
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N gap
-```
+v0.4 的接口集中在根包 v04.go、model.go 和 ports.go。Version = 0.3.0 仍用于旧图 schema；ResearchVersion = 0.4.0-research 是新 SDK 标识。源码目前同时保留两套 API，不能把测试通过理解为 CLI 已切换。
 
-**分支顺序是契约**（继承 v0.2，`harness.go:427 → 445 → 450 → 458 → 463`）：
-`ctx.Err()` 判定必须先于 provider 护栏，否则一次零回合的墙钟超时会变成「模型服务挂了」。
+## 3. 一题的运行流程
 
-**单写者不变式**：`runLoop` 是唯一改状态的 goroutine；全部输入（agent 事件、平台结果、
-控制命令）走 channel 进 loop。状态变化**先追加带单调序号的领域事件**（`events.jsonl`），
-**再原子保存快照**（`run.json`）——顺序不可颠倒。
-
----
-
-## 3. 事实层 / 答案层双账本 + 存储布局
-
-```mermaid
-flowchart TB
-    subgraph TOOL["工具输出"]
-        OUT["完整 Output · 从不截断"]
-        DET["Details · report_fact 载荷"]
+~~~mermaid
+sequenceDiagram
+    participant H as Harness
+    participant S as Scenario
+    participant X as Sandbox
+    participant A as Agent
+    participant G as Gate / DAG
+    participant R as ResultStore
+    H->>S: Discover / Prepare
+    S-->>H: Challenge / Target
+    H->>X: NewSession(宿主解析的目标)
+    H->>A: New(session) / Start
+    loop 预算内每轮
+        H->>G: Next / Render
+        H->>A: Round(prompt)
+        A-->>G: 规范化事件 / 候选
+        H->>G: Settle(轮次结果)
+        H->>S: Evaluate(允许提交的候选)
+        H->>S: Reconcile(平台权威进度)
     end
+    H->>A: Close
+    H->>X: Close / Reclaim
+    H->>S: Cleanup
+    H->>R: Save(公开指标)
+~~~
 
-    subgraph FACT["事实层 — dag.Graph（可公开）"]
-        EX1["宿主抽取 host-verified<br/>指纹匹配 · 落盘只存 sha256:12 + offset"]
-        EX2["agent 申报 agent-asserted<br/>置信度封顶 0.7"]
-        G1["FactKind: target service artifact<br/>credential vuln foothold negative<br/>刻意没有 flag/answer"]
-    end
+关键规则：
 
-    subgraph ANS["答案层 — gate.Gate（明文只进 private/）"]
-        G2["三族分账<br/>observed 可提交 · derived 只记账 · fabricated 只记账"]
-        G3["首现优先 · 不可回退<br/>agent 写文件再 cat 不能洗白"]
-    end
+1. Prepare 返回的目标须由宿主解析为不可变的 IP:port 集合，再交给 Sandbox；调用者不能扩大 AllowHosts。
+2. Agent 的 reader 只向有界事件队列发送事件；编排 goroutine 消费并更新 DAG、Gate 和运行状态。
+3. observed 与 derived 候选允许提交，fabricated 不提交；同一 Run 对同一候选只提交一次。提交结果不确定时，先按平台权威进度 Reconcile，再决定是否重试。
+4. 每题最多一次提示；连续两轮无平台进度且无新增宿主验证事实时触发。提示后再次停滞，应切换未尝试的意图。
+5. 可重试的 provider/进程故障最多重建 Agent 一次，并只回灌脱敏事实摘要；取消、超时、正常结束和失败都必须清理资源。
 
-    OUT --> EX1 --> G1
-    DET --> EX2 --> G1
-    OUT -->|answerShaped 命中即丢| G2
-    DET --> G2
-    G2 --> G3
+**当前实现偏差**：eventSink 是无界切片且回调可在 reader 路径直接执行；Run 没有进程级单运行锁，Reclaim 只传入新生成的 run ID；SandboxSpec.AllowHosts 可由调用者填写；Probe 只做镜像检查；若 Planner/Renderer/Gate 缺失，题目会无轮次返回；墙钟与成本预算、一次重启、事实型停滞检测、cleanup 错误记录均未完成。以上均属路线图 P0，不应标记为已满足。
 
-    subgraph DISK["&lt;StoreDir&gt;/runs/&lt;runID&gt;/"]
-        F1["run.json 0600 快照 · 无 Flags 字段"]
-        F2["graph.json 0600 DAG schema 1"]
-        F3["events.jsonl 0600 只带指纹"]
-        F4["private/ 0700<br/>candidates.jsonl 0600 明文<br/>evidence/ 0600 原始输出"]
-        F5["report.json · report.md 0644"]
-    end
-    G1 -->|GraphStore| F2
-    G3 -->|EvidenceStore| F4
-    G1 -->|Store.Append| F3 --> F1
+## 4. 数据与结果语义
 
-    classDef secret fill:#fff4d6,stroke:#a16207
-    class G2,G3,F4 secret
-```
+- DAG 的事实层只记录可追溯的目标、服务、凭据线索和负面事实；答案层由 Gate 单独管理。answer.Fingerprint 是唯一指纹格式源。
+- RunResult 是内存返回值，可能包含 Outcome.Flags；ResultFileStore 用专门的公开结构序列化，避免把整个返回值写盘。
+- 目标公开结果位于 &lt;ResultDir&gt;/results/&lt;runID&gt;.json，只含指标与错误类别。原始 trace、证据和候选若需要持久化，应进入权限为 0700/0600 的 private/；当前 v0.4 私密 trace 持久化尚未接通。
+- 比较通过率时，应记录**起跑时剩余 flag 数**与本次新增确认数。当前聚合把最终累计进度当作本次确认量，RemainingAtStart 等字段未填，因此现有 Stats 不能用于通过率结论。
+- SolverProfile 的 prompt、只读扩展、Planner 参数和提示策略应在一次 Run 中冻结并以摘要标识。当前 RunResult.ProfileDigest 使用构造 Harness 时的 profile，运行时又读取 RunSpec.Profile 的 bundle；需统一为一份来源。
 
-**硬规矩**：候选明文只允许存在于 `private/`（0700/0600）与返回值 `OutcomeView.Flags`。
-`run.json` / `events.jsonl` / `graph.json` / `report.*` / 看板 HTML 一律只留指纹。
+## 5. 当前状态与验收口径
 
----
-
-## 4. DAG 模型（dag 包，当前唯一有实质实现的核心）
-
-```mermaid
-flowchart LR
-    subgraph N["节点 · Node"]
-        NF["fact<br/>7 类 FactKind"]
-        NI["intent<br/>9 类 IntentKind<br/>pending/active/done/failed<br/>blocked/abandoned/interrupted"]
-    end
-
-    NF -->|requires 前置| NI
-    NI -->|produces 产出 = 证据引用| NF
-    NF -->|enables 分支点| NI
-    NFneg["negative 事实"] -->|refutes 死胡同剪枝| NI
-    NF -->|derived_from 推导链| NF
-    NI -->|supersedes 换方向| NI
-
-    subgraph SCH["Scheduler 调度"]
-        CH["seedChain 阶段链<br/>按 category 铺 · 阶段序即优先级"]
-        PR["三条剪枝<br/>跳过被证伪的 · 跳过前置未满足的 · 跳过试够了的"]
-        HB["诚实边界：不做拓扑排序调度<br/>不做攻击路径规划"]
-    end
-    NI --> SCH
-```
-
-六种边各自挣得一项能力：`requires`/`produces` 是执行契约，`enables` 是分支点，
-`refutes` 是死胡同剪枝，`derived_from` 是推导链（provenance），`supersedes` 是换方向。
-
----
-
-## 5. 现状要点
-
-**已落地且自测绿**
-
-| 包 | 关键实现 |
-|---|---|
-| `answer` | `Shape` 推断（envelope / 裸值）、`Fingerprint`（唯一真源，`fp:<hex8>/len=/<首>…<尾>`） |
-| `dag` | 图 + 六种边 + `Scheduler`（阶段链 + 三条剪枝）+ `Renderer`（golden 测试）+ 落盘 schema 1 |
-| `gate` | `Gate`（首现优先、三族分账、格式闸）+ `Ledger`（指纹账本） |
-| `store` | `FileStore`（事件先于快照、撕裂末行修复、原子写、private 权限） |
-| `executor` | `Docker`（argv 级隔离、per-run 网络 + iptables、宿主 CONNECT 代理、按 label 回收） |
-| `bridge` | `Client`（JSONL 协议、handshake、崩溃重启、错误分类映射） |
-| `piai` | `Agent`（pi RPC 帧解析、看门狗、会话复位、UI 对话框自动应答） |
-| `internal/cli` | 8 个子命令骨架 + flag 解析 + control socket 客户端 |
-| `runner` | `red-harness-runner:v0.3.0` 镜像（已真构建，digest 记录在 `runner/README.md`） |
-
-**断链处（架构图里的红色节点）**
-
-- `engine/` 整个包不存在 ⇒ `harness.New` 永远返回「引擎实现未注册」，`RegisterEngine` 无人调用。
-- `internal/cli/wire.go` 不存在 ⇒ `cli.WireFunc` 为 nil，`app.ports()` 返回空 `Ports`，
-  CLI 每个子命令都走「未实现」分支。
-- `scenario/` 不存在 ⇒ 有 `Platform`（bridge）但没人把它适配成 `Scenario`，
-  `Options.Scenarios` 无从填充。
-- `piai.Agent.Round(ctx, prompt, emit)` 仍是 v0.2 签名，与 `harness.Agent.Round(ctx, RoundRequest)`
-  不兼容，且无 `AgentFactory`；piai 里也没有 `var _ harness.Agent = ...` 断言，所以**编译绿但契约未对齐**。
-- `RunPolicy`、`report/`、`web/`、`example/` 均无实现。
-
-**一句话**：契约层与全部叶子适配器已完成，中间那层（engine + wire + scenario + piai 迁移）是空的
-——这正是 W2 的四个任务（T11/T12/T13/T14）。
-
----
-
-## 附：Mermaid 渲染
-
-以上代码块可直接粘贴到支持 Mermaid 的渲染器（GitHub、VS Code 插件、mermaid.live）。
-若需导出为图片：
-
-```bash
-npx -y @mermaid-js/mermaid-cli -i docs/architecture.md -o docs/architecture.png
-```
+截至本文更新，go test ./... -count=1 通过。它证明现有包测试可编译并运行，**未证明**同步 Harness 的真实 Docker 纵向闭环、CLI 可用、默认拒绝出站、取消清理或线上通过率。下一步先完成 Fake + stub pi 的容器内全生命周期，再按 [roadmap.md](roadmap.md) 逐项封闭 P0。

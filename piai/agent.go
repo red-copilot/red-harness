@@ -19,6 +19,9 @@ import (
 // 生命周期：Start 起进程 + 握手 + new_session；Round 一轮一个 prompt；Close 整组
 // kill。pi 不会自己退出（M0 实测），所以 Close 不能省。
 type Agent struct {
+	// Session, when set, is the only supported process-launch path for v0.4.
+	// A nil Session keeps the legacy local test adapter available.
+	Session harness.SandboxSession
 	// BinPath 覆盖二进制路径（stub 测试与显式部署用）。为空时按
 	// DiscoverBin 的顺序发现。
 	BinPath string
@@ -215,9 +218,21 @@ func (a *Agent) Start(ctx context.Context, req harness.AgentStart) error {
 		a.Workdir = abs
 	}
 
-	bin, err := DiscoverBin(a.BinPath)
-	if err != nil {
-		return err
+	var bin string
+	if a.Session != nil {
+		if _, err := a.Session.Probe(ctx); err != nil {
+			return err
+		}
+		bin = a.BinPath
+		if bin == "" {
+			bin = "pi"
+		}
+	} else {
+		var err error
+		bin, err = DiscoverBin(a.BinPath)
+		if err != nil {
+			return err
+		}
 	}
 	a.BinPath = bin
 
@@ -225,9 +240,14 @@ func (a *Agent) Start(ctx context.Context, req harness.AgentStart) error {
 	if err != nil {
 		return err
 	}
-	env := childEnv(envMap, filepath.Dir(bin))
-	if a.HomeDir != "" {
-		env = append(env, "HOME="+a.HomeDir)
+	var env []string
+	if a.Session != nil {
+		env = sandboxEnv(envMap, a.Provider, a.HomeDir)
+	} else {
+		env = childEnv(envMap, filepath.Dir(bin))
+		if a.HomeDir != "" {
+			env = append(env, "HOME="+a.HomeDir)
+		}
 	}
 	a.env = env
 	a.envPath = envPath
@@ -240,10 +260,17 @@ func (a *Agent) Start(ctx context.Context, req harness.AgentStart) error {
 			a.Provider, envPath, providerKeyName(a.Provider))
 	}
 
-	if v, err := checkVersion(ctx, bin, env, a.versionRange()); err != nil {
-		return err
+	if a.Session != nil {
+		// The version probe must run in the same image and namespace as pi. The
+		// attached session is the sole process slot, so the image-level Probe is
+		// the management check and protocol handshake is the runtime check.
+		a.version = "sandbox"
 	} else {
-		a.version = v
+		if v, err := checkVersion(ctx, bin, env, a.versionRange()); err != nil {
+			return err
+		} else {
+			a.version = v
+		}
 	}
 
 	if err := a.spawn(ctx); err != nil {
@@ -313,8 +340,10 @@ func hasExtensionCommand(cmds []SlashCommand) bool {
 // spawn 起一个 pi 进程并装上回调。调用方负责 already-dead 检查。
 func (a *Agent) spawn(ctx context.Context) error {
 	args := buildArgs(a.sessionDir(), a.Extensions, a.Provider, a.Model, a.Thinking, a.SystemPrompt, a.Approve)
-	if err := os.MkdirAll(a.sessionDir(), 0o755); err != nil {
-		return fmt.Errorf("piai: 创建 session-dir 失败: %w", err)
+	if a.Session == nil {
+		if err := os.MkdirAll(a.sessionDir(), 0o755); err != nil {
+			return fmt.Errorf("piai: 创建 session-dir 失败: %w", err)
+		}
 	}
 	// 回调随 startProc 一起传进去：进程一起来 reader 就在跑，任何「返回后再赋值」
 	// 的写法都会留下丢帧窗口（丢一条 extension_ui_request 就是永久挂死）。
@@ -344,7 +373,18 @@ func (a *Agent) spawn(ctx context.Context) error {
 			a.mu.Unlock()
 		},
 	}
-	p, err := startProc(cfg)
+	var p *proc
+	var err error
+	if a.Session != nil {
+		cmd := append([]string{a.BinPath}, args...)
+		managed, launchErr := a.Session.Launch(ctx, harness.ProcessSpec{Command: cmd, Env: envMapToMap(a.env), Workdir: a.Workdir})
+		if launchErr != nil {
+			return launchErr
+		}
+		p, err = startManagedProc(managed, cfg)
+	} else {
+		p, err = startProc(cfg)
+	}
 	if err != nil {
 		return err
 	}
@@ -354,6 +394,16 @@ func (a *Agent) spawn(ctx context.Context) error {
 	a.needReset = false
 	a.mu.Unlock()
 	return nil
+}
+
+func envMapToMap(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // ensureProc 保证有一个活进程，必要时按退避重启。

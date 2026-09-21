@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	harness "github.com/red-copilot/red-harness"
 )
 
 // 失效模式常量。它们会经 RoundResult.Err 透到 harness 的护栏里，
@@ -278,10 +280,12 @@ type procConfig struct {
 // proc 是一个 pi 进程 + 它的 reader/writer 协程。它不认识协议语义（那是
 // Agent 的事），只负责：把帧送出去、把帧收进来、死的时候说清楚。
 type proc struct {
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
-	q     *frameQueue
-	out   *FrameReader
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	managed harness.ManagedProcess
+	killFn  func()
+	q       *frameQueue
+	out     *FrameReader
 
 	waitOnce sync.Once
 	waitErr  error
@@ -335,6 +339,13 @@ func startProc(cfg procConfig) (*proc, error) {
 		pending:  map[string]chan Response{},
 		onFrame:  cfg.onFrame,
 		onDeath:  cfg.onDeath,
+		killFn: func() {
+			if cmd.Process == nil {
+				return
+			}
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Process.Kill()
+		},
 	}
 	p.lastWrite.Store(time.Now().UnixNano())
 	go p.readStderr(stderr)
@@ -344,6 +355,26 @@ func startProc(cfg procConfig) (*proc, error) {
 		p.waitErr = cmd.Wait()
 		close(p.waitDone)
 	}()
+	return p, nil
+}
+
+// startManagedProc attaches the pi protocol transport to a sandbox-owned
+// process. No host exec is performed here; the sandbox has already created
+// the process as its PID 1 and owns its lifetime.
+func startManagedProc(m harness.ManagedProcess, cfg procConfig) (*proc, error) {
+	if m == nil {
+		return nil, errors.New("piai: sandbox returned nil managed process")
+	}
+	p := &proc{
+		stdin: m, managed: m, q: newFrameQueue(), out: NewFrameReader(m),
+		waitDone: make(chan struct{}), pending: map[string]chan Response{},
+		onFrame: cfg.onFrame, onDeath: cfg.onDeath,
+		killFn: func() { _ = m.Kill() },
+	}
+	p.lastWrite.Store(time.Now().UnixNano())
+	go p.writeLoop()
+	go p.readLoop()
+	go func() { p.waitErr = m.Wait(); close(p.waitDone) }()
 	return p, nil
 }
 
@@ -535,12 +566,9 @@ func (p *proc) death() string {
 // kill 整组终止。pi 不会自己退出（M0 实测：三个 spike 全靠外部整组终止），
 // 所以这是唯一可靠的收尾方式。
 func (p *proc) kill() {
-	if p.cmd.Process == nil {
-		return
+	if p.killFn != nil {
+		p.killFn()
 	}
-	// 负 pid = 整个进程组。Setpgid 让 pi 及其 bundled node 子进程同组。
-	_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
-	_ = p.cmd.Process.Kill()
 	p.q.close()
 	_ = p.stdin.Close()
 	select {

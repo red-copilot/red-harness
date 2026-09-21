@@ -273,6 +273,7 @@ type runPlan struct {
 	PidsLimit      int
 	StopTimeout    int
 	Tmpfs          string
+	ExtraTmpfs     []string
 	SecurityOpts   []string
 	Command        []string
 	Env            map[string]string
@@ -282,7 +283,8 @@ type runPlan struct {
 	NetworkSubnet  string
 	NetworkGateway string
 	// 挂载面：宿主路径 → 容器内路径。**只允许一个**（本题工作目录）。
-	Mounts map[string]string
+	Mounts         map[string]string
+	ReadonlyMounts map[string]string
 }
 
 // planRun 把 ExecSpec + DockerConfig 渲染成 runPlan。
@@ -526,6 +528,9 @@ func runArgv(p runPlan) []string {
 		// /tmp 是只读 rootfs 下唯一的可写区，size= 上限就是「最多能写多少」。
 		argv = append(argv, "--tmpfs", p.Tmpfs)
 	}
+	for _, tmpfs := range p.ExtraTmpfs {
+		argv = append(argv, "--tmpfs", tmpfs)
+	}
 
 	// ── 网络 ──
 	argv = append(argv, "--network", p.NetworkName)
@@ -539,6 +544,14 @@ func runArgv(p runPlan) []string {
 	sort.Strings(mounts)
 	for _, src := range mounts {
 		argv = append(argv, "-v", src+":"+p.Mounts[src])
+	}
+	readonly := make([]string, 0, len(p.ReadonlyMounts))
+	for src := range p.ReadonlyMounts {
+		readonly = append(readonly, src)
+	}
+	sort.Strings(readonly)
+	for _, src := range readonly {
+		argv = append(argv, "-v", src+":"+p.ReadonlyMounts[src]+":ro")
 	}
 
 	// ── env ──

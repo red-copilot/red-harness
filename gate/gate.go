@@ -521,6 +521,23 @@ func (g *Gate) New() []harness.Candidate {
 	return out
 }
 
+// NewAll is the v0.4 submission view. Observed and derived candidates are both
+// grounded enough to submit; fabricated candidates remain excluded. New keeps
+// the v0.3 observed-only behavior for legacy callers.
+func (g *Gate) NewAll() []harness.Candidate {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []harness.Candidate
+	for _, f := range g.order {
+		c := g.byFlag[f]
+		if c.Submitted || c.Provenance == harness.ProvenanceFabricated {
+			continue
+		}
+		out = append(out, *c)
+	}
+	return append([]harness.Candidate(nil), out...)
+}
+
 // Mark 回填提交结果。
 //
 // 无论对错都置 Submitted —— 「同一答案永不重提」是硬规矩（前身：重提只是白烧

@@ -104,6 +104,31 @@ func childEnv(envMap map[string]string, binDir string) []string {
 	return out
 }
 
+// sandboxEnv intentionally does not inherit os.Environ. The sandbox receives
+// only the provider credential and a minimal runtime environment; platform
+// tokens and host control variables must remain on the trusted side.
+func sandboxEnv(envMap map[string]string, provider, home string) []string {
+	merged := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin"}
+	for k, v := range envMap {
+		merged[k] = v
+	}
+	for _, name := range []string{providerKeyName(provider), "OPENCODE_API_KEY", "OPENCODE_GO_API_KEY"} {
+		if name != "_API_KEY" && strings.TrimSpace(os.Getenv(name)) != "" {
+			merged[name] = os.Getenv(name)
+		}
+	}
+	if home != "" {
+		merged["HOME"] = home
+	} else if merged["HOME"] == "" {
+		merged["HOME"] = "/work/.home"
+	}
+	out := make([]string, 0, len(merged))
+	for k, v := range merged {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
 // resolveEnvFile 决定用哪个 .env：显式指定的路径**必须存在**（显式配置静默降级
 // 是事故温床），否则从 dir 起向上查找。
 func resolveEnvFile(explicit, dir string) (map[string]string, string, error) {

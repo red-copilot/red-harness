@@ -31,6 +31,7 @@ type Docker struct {
 // 为什么写在这里而不是留给使用方发现：契约漂移（有人在 Executor 接口上加了
 // 方法）会在**装配层**才炸，而那里通常离改动最远。断言把它拉回改动现场。
 var _ harness.Executor = (*Docker)(nil)
+var _ harness.Sandbox = (*Docker)(nil)
 
 // NewDocker 构造 Docker 执行器。
 //

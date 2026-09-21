@@ -141,7 +141,9 @@ type Agent interface {
 // 为什么是工厂而不是实例：一道 run 可能跑多道题，而 agent 是**每题一个**的
 // （每题独立 HOME、独立 new_session）。工厂由装配层注入。
 type AgentFactory interface {
-	New(spec AgentSpec, ev EventSink) (Agent, error)
+	// New must bind the agent to the already-created sandbox session. The
+	// factory must not fall back to starting the configured binary on the host.
+	New(spec AgentSpec, session SandboxSession, ev EventSink) (Agent, error)
 }
 
 // EventSink 是 agent 把流式事件交给引擎的唯一通道。

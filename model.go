@@ -98,14 +98,20 @@ type RunSpec struct {
 	Targets  []string     `json:"targets,omitempty"`
 	Agent    AgentSpec    `json:"agent"`
 	Executor ExecutorSpec `json:"executor"`
-	Budget   Budget       `json:"budget"`
+	// Sandbox is the v0.4 execution configuration. Executor remains for the
+	// v0.3 compatibility surface and old graph snapshots.
+	Sandbox SandboxSpec `json:"sandbox,omitempty"`
+	Budget  Budget      `json:"budget"`
 	// HintPolicy 见 HintOff / HintAuto / HintAlways。
 	HintPolicy string `json:"hintPolicy"`
 	// Submit 为假时只记账不提交（干跑）。干跑用于离线验证与对照。
 	Submit bool `json:"submit"`
 	// StoreDir 是运行目录的根。恢复时必须与快照里的摘要一致。
-	StoreDir string     `json:"storeDir"`
-	Policy   PolicySpec `json:"policy"`
+	StoreDir string `json:"storeDir"`
+	// ResultDir is the v0.4 metrics root, kept separate from private evidence.
+	ResultDir string        `json:"resultDir,omitempty"`
+	Profile   SolverProfile `json:"profile,omitempty"`
+	Policy    PolicySpec    `json:"policy"`
 }
 
 // Digest 返回配置摘要（sha256 前 16 个十六进制字符）。
