@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -24,14 +25,33 @@ type Agent struct {
 	Session harness.SandboxSession
 	// BinPath 覆盖二进制路径（stub 测试与显式部署用）。为空时按
 	// DiscoverBin 的顺序发现。
+	//
+	// **sandbox 路径（Session != nil）下它是容器内的名字或路径**，缺省 "pi"
+	// （由容器 PATH 解析，runner 镜像里 pi 在 /usr/local/bin）。DiscoverBin 在
+	// 这条路径上**不会**被调用——宿主上发现出来的二进制在容器里不存在，把它写进
+	// argv 只会得到「executable not found」。
 	BinPath string
-	// Workdir 是 pi 的工作目录。AGENTS.md 从这里加载（M0 确认非交互模式照常加载）。
+	// Workdir 是**宿主侧**的工作目录起点（sandbox 路径下见下）。
+	// 宿主路径（Session == nil）下它就是 pi 的 cwd，AGENTS.md 从这里加载
+	// （M0 确认非交互模式照常加载）。
+	//
+	// **sandbox 路径下它不参与进程启动**：容器里 pi 的 cwd 由
+	// Session.Probe 的 ProbeResult.Workdir 决定，这里只剩一个用途——作为
+	// resolveEnvFile 向上查找 .env 的起点（凭据在宿主侧读出来再注入容器环境）。
+	// 若调用方在这里填的是**容器内**路径（例如 /work），宿主上的 .env 查找几乎
+	// 必然落空，凭据就只能来自进程环境变量；那条路径由下面的 provider 预检
+	// 明确报错，不会静默降级。
 	Workdir string
-	// SessionDir 是 --session-dir。为空时落在 <Workdir>/.pi-sessions。
-	// 不用 --no-session：get_entries 游标与 sessionFile 需要会话文件。
+	// SessionDir 是 --session-dir。为空时：宿主路径落在 <Workdir>/.pi-sessions；
+	// sandbox 路径落在 <容器工作目录>/.pi-sessions（**绝不能**是宿主路径，见
+	// sessionDir）。不用 --no-session：get_entries 游标与 sessionFile 需要会话文件。
 	SessionDir string
 	// HomeDir 指向一个每题独立的 HOME。pi 从 $HOME/.pi/agent/* 发现扩展/角色/
 	// 技能，共享 HOME 会跨题污染（前身教训）。为空时不动 HOME。
+	//
+	// sandbox 路径下它必须是**容器内**路径（宿主 HOME 在容器里不存在）：为空时
+	// 由 sandboxHome 推导到 <容器工作目录>/.home——那是只读 rootfs 下唯一可写的
+	// 位置，也是 executor 自己钉的缺省值。
 	HomeDir string
 	// EnvFile 显式指定 .env 路径。为空时从 Workdir 向上逐级查找。
 	EnvFile string
@@ -85,6 +105,11 @@ type Agent struct {
 	version string
 	env     []string
 	envPath string
+	// containerWorkdir 是 sandbox 路径下 pi 在**容器内**的工作目录，取自
+	// Session.Probe 的 ProbeResult.Workdir（只有 sandbox 实现知道容器里的
+	// 工作目录是什么）。宿主路径下为空。它是 --session-dir、HOME 与
+	// ProcessSpec.Workdir 的共同基准：这三处都必须是容器内路径。
+	containerWorkdir string
 }
 
 // roundState 是「reader 协程 → Round 协程」的事件通道。
@@ -167,9 +192,55 @@ func (a *Agent) maxRestarts() int {
 	return 5
 }
 
+// defaultContainerWorkdir 是 sandbox 实现没有给出容器工作目录时的兜底。
+//
+// 它必须与 executor/spec.go 的 defaultWorkdir（"/work"）一致：两边指的是同一
+// 个目录，而 sandbox 的 /work 是 tmpfs 挂载点。这里**不引 executor 包**——
+// piai 只依赖根包契约，路径约定靠这份注释与测试（sandbox_test.go 断言缺省值）
+// 对齐，而不是靠一个跨包常量。
+const defaultContainerWorkdir = "/work"
+
+// containerHomeName 是容器内 HOME 相对工作目录的名字，与 executor 的
+// `HOME = <workdir>/.home` 保持一致。
+const containerHomeName = ".home"
+
+// sandboxWorkdir 返回 sandbox 路径下 pi 在容器内的工作目录。
+//
+// 为什么不能直接用 a.Workdir：那是**宿主**绝对路径（resolveEnvFile 用它找
+// .env）。容器里的 /work 是 tmpfs，宿主路径在容器里根本不存在——把它交给
+// Launch 会让 docker run --workdir 指向一个不存在的目录，pi 起不来。
+func (a *Agent) sandboxWorkdir() string {
+	if a.containerWorkdir != "" {
+		return a.containerWorkdir
+	}
+	return defaultContainerWorkdir
+}
+
+// sandboxHome 返回容器内 HOME。显式配置（Agent.HomeDir / AgentStart.HomeDir）
+// 优先，其次沿用 Probe 报出来的容器工作目录，最后才是缺省值。
+//
+// 为什么需要它：宿主路径分支在 HomeDir 为空时**不动 HOME**（继承宿主进程的
+// HOME），而宿主 HOME 在容器里不存在；只读 rootfs 下 pi 写不了会话目录会以
+// 「静默失去扩展加载能力」的形式失败（M0 实测）。
+func (a *Agent) sandboxHome() string {
+	if a.HomeDir != "" {
+		return a.HomeDir
+	}
+	return path.Join(a.sandboxWorkdir(), containerHomeName)
+}
+
+// sessionDir 返回 --session-dir 的值。它在**两条路径下都必须是该路径可见的
+// 文件系统位置**：宿主路径下是宿主目录，sandbox 路径下是容器内目录。
+//
+// 为什么 sandbox 路径必须改写：它被塞进 pi 的 argv，而 argv 在容器里执行。
+// 传宿主路径的后果不是报错而是「静默落到别处」——pi 会把会话写到容器里一个
+// 我们不认识的地方，而 get_entries 游标与 sessionFile 都指着它。
 func (a *Agent) sessionDir() string {
 	if a.SessionDir != "" {
 		return a.SessionDir
+	}
+	if a.Session != nil {
+		return path.Join(a.sandboxWorkdir(), ".pi-sessions")
 	}
 	return filepath.Join(a.Workdir, ".pi-sessions")
 }
@@ -208,21 +279,36 @@ func (a *Agent) Start(ctx context.Context, req harness.AgentStart) error {
 		a.Extensions = req.Extensions
 	}
 	a.Approve = a.Approve || req.Approve
+	if req.HomeDir != "" {
+		a.HomeDir = req.HomeDir
+	}
 	if req.Thinking != "" {
 		a.Thinking = req.Thinking
 	}
 	if a.Workdir == "" {
 		a.Workdir = "."
 	}
+	// 宿主路径才绝对化 Workdir：它是给 filepath（.env 查找、session-dir）用的。
+	// sandbox 路径下 Workdir 同样只作 .env 查找起点，绝对化无害；容器内路径由
+	// Probe 的结果决定，不经过这里。
 	if abs, err := filepath.Abs(a.Workdir); err == nil {
 		a.Workdir = abs
 	}
 
 	var bin string
 	if a.Session != nil {
-		if _, err := a.Session.Probe(ctx); err != nil {
-			return err
+		// Probe 是**管理检查**：确认镜像可用、容器/session 就绪，并回报容器内的
+		// 工作目录（Launch 的 Workdir 与 --session-dir 都以它为基准）。
+		// 它不启动任何进程——Launch 才是唯一启动 pi 的路径。
+		probe, err := a.Session.Probe(ctx)
+		if err != nil {
+			return fmt.Errorf("piai: sandbox 探测失败: %w", err)
 		}
+		a.containerWorkdir = probe.Workdir
+		// 容器内没有宿主二进制：缺省用容器 PATH 上的 "pi"（runner 镜像里在
+		// /usr/local/bin/pi，而 sandboxEnv 钉的 PATH 含 /usr/local/bin）。
+		// 这里**刻意不调 DiscoverBin**——它探的是宿主，宿主上有没有 pi 与容器里
+		// 能不能跑无关，宿主发现出来的绝对路径在容器里不存在。
 		bin = a.BinPath
 		if bin == "" {
 			bin = "pi"
@@ -242,7 +328,9 @@ func (a *Agent) Start(ctx context.Context, req harness.AgentStart) error {
 	}
 	var env []string
 	if a.Session != nil {
-		env = sandboxEnv(envMap, a.Provider, a.HomeDir)
+		// HOME 用**容器内**路径：宿主 HOME 在容器里不存在，而只读 rootfs 下
+		// pi 写不了会话目录会以「静默失去扩展加载能力」的形式失败（M0 实测）。
+		env = sandboxEnv(envMap, a.Provider, a.sandboxHome())
 	} else {
 		env = childEnv(envMap, filepath.Dir(bin))
 		if a.HomeDir != "" {
@@ -261,9 +349,22 @@ func (a *Agent) Start(ctx context.Context, req harness.AgentStart) error {
 	}
 
 	if a.Session != nil {
-		// The version probe must run in the same image and namespace as pi. The
-		// attached session is the sole process slot, so the image-level Probe is
-		// the management check and protocol handshake is the runtime check.
+		// ── 版本校验在 sandbox 路径上的取舍（**这是已知的验证缺口**）──
+		//
+		// v0.4 要求「Probe 在**同一镜像**里核验 pi 版本与运行位置」。当前契约
+		// 做不到：ProbeResult 只有 {ContainerID, PID, Image, Workdir}，没有版本
+		// 字段；而 checkVersion 走的是宿主 exec.Command(bin, "--version")——在
+		// sandbox 路径上那正是被禁止的宿主进程启动，而且探的还是宿主上那个 pi
+		// （与镜像里那份完全无关）。
+		//
+		// 所以这里**没有**拿 ProbeResult 去核对版本，也**没有**填一个看起来像
+		// 版本的假值："sandbox" 是「未校验」的显式标记，不是版本号。Version()
+		// 的调用方看到它就知道版本校验这条防线没有生效。
+		//
+		// 真正的修法不在本包：ProbeResult 需要带上镜像内 pi 的版本（由 sandbox
+		// 实现在同一镜像里执行 `pi --version` 得到），piai 再做区间校验。在那之前
+		// 这里必须留一条明确的缺口记录，而不是用注释把它说成「已由协议握手覆盖」
+		// ——协议握手验的是 RPC 形状，与版本区间是两件事。
 		a.version = "sandbox"
 	} else {
 		if v, err := checkVersion(ctx, bin, env, a.versionRange()); err != nil {
@@ -338,15 +439,27 @@ func hasExtensionCommand(cmds []SlashCommand) bool {
 }
 
 // spawn 起一个 pi 进程并装上回调。调用方负责 already-dead 检查。
+//
+// 两条路径共用同一套 argv 构造（buildArgs）、同一套环境变量（a.env，已在
+// Start 里按路径算好）与同一套回调装配；差别只有**谁启动进程**：
+//
+//	Session != nil → Session.Launch(ProcessSpec)：sandbox 内的附着式主进程，
+//	                 argv / env / cwd 三者都必须是**容器内**语义。
+//	Session == nil → startProc：宿主 exec.Command，只保留给本地测试。
+//
+// 生产路径是前者（v0.4 硬规矩：绝不允许宿主 exec.Command(pi)）。
 func (a *Agent) spawn(ctx context.Context) error {
 	args := buildArgs(a.sessionDir(), a.Extensions, a.Provider, a.Model, a.Thinking, a.SystemPrompt, a.Approve)
 	if a.Session == nil {
+		// session-dir 由 pi 在容器内自己创建（它是可写 tmpfs 下的路径，宿主上
+		// 不存在也不能替它建）；只有宿主路径才需要在这里预建目录。
 		if err := os.MkdirAll(a.sessionDir(), 0o755); err != nil {
 			return fmt.Errorf("piai: 创建 session-dir 失败: %w", err)
 		}
 	}
-	// 回调随 startProc 一起传进去：进程一起来 reader 就在跑，任何「返回后再赋值」
-	// 的写法都会留下丢帧窗口（丢一条 extension_ui_request 就是永久挂死）。
+	// 回调随 startProc/startManagedProc 一起传进去：进程一起来 reader 就在跑，
+	// 任何「返回后再赋值」的写法都会留下丢帧窗口（丢一条 extension_ui_request
+	// 就是永久挂死）。
 	cfg := procConfig{
 		bin:  a.BinPath,
 		args: args,
@@ -376,10 +489,21 @@ func (a *Agent) spawn(ctx context.Context) error {
 	var p *proc
 	var err error
 	if a.Session != nil {
-		cmd := append([]string{a.BinPath}, args...)
-		managed, launchErr := a.Session.Launch(ctx, harness.ProcessSpec{Command: cmd, Env: envMapToMap(a.env), Workdir: a.Workdir})
+		// ProcessSpec 的三个字段都是**容器内**语义：
+		//   Command  : argv[0] 是容器 PATH 上的名字（a.BinPath，缺省 "pi"）；
+		//              provider 凭据绝不进这里（ps 可见 argv 是硬规矩）。
+		//   Env      : 只含 provider 凭据与最小运行环境（sandboxEnv 不继承宿主
+		//              os.Environ），由 executor 渲染成 docker run -e。
+		//   Workdir  : 容器内工作目录（Probe 报出来的那个），不是宿主路径——
+		//              宿主路径在容器里不存在，会让 --workdir 指到空处。
+		spec := harness.ProcessSpec{
+			Command: append([]string{a.BinPath}, args...),
+			Env:     envMapToMap(a.env),
+			Workdir: a.sandboxWorkdir(),
+		}
+		managed, launchErr := a.Session.Launch(ctx, spec)
 		if launchErr != nil {
-			return launchErr
+			return fmt.Errorf("piai: sandbox 启动 pi 失败: %w", launchErr)
 		}
 		p, err = startManagedProc(managed, cfg)
 	} else {
