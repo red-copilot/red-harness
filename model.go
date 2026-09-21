@@ -274,6 +274,16 @@ type OutcomeView struct {
 	// 判据。前身那条「通关即停」是死代码，事故现场就是这么来的。
 	ProgressConfirmed int
 	ProgressTotal     int
+	// RemainingAtStart 是**起跑时**还差几个 flag（Discover 时从平台进度算出）。
+	//
+	// 为什么必须单独记：「本次新增确认了多少」不能用最终累计进度代替。平台上的
+	// 题目可能已经做掉一部分，把历史进度算成本次能力会让通过率结论系统性偏高，
+	// 而且两批题目组成不同时完全不可比。增量 = ProgressConfirmed -
+	// (ProgressTotal - RemainingAtStart)；RemainingAtStart 为 0 表示分母未知
+	// （FlagCount 未知），此时不得宣称召回率。
+	RemainingAtStart int
+	// Score 是平台给出的累计得分（来自 Evaluation.Score）。
+	Score int
 	// Stats 是 agent 会话的权威计数。
 	Stats Stats
 	// Report 是报告文件路径（若已生成）。
