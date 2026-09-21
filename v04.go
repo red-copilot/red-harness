@@ -636,13 +636,23 @@ func contains(xs []string, want string) bool {
 	return false
 }
 
-// safeError 把错误折成一个**可进公开结果**的分类串。
+// safeError 把错误折成一个**可进公开结果**的失败分类。
 //
-// 为什么只留类型名：err.Error() 可能带平台响应体、路径甚至凭据，而 RunResult.Err
-// 会写进公开的 results/<runID>.json。真正的诊断信息留在调用方手里的 error 里。
+// 优先用错误分类（Kind）：它是枚举，可比较、无明文，且正好回答报告要问的
+// 「怎么失败的」——provider 故障与执行器故障必须是两个串，否则通过率结论会把
+// 它们混成一类。拿不到分类时才退回类型名。
+//
+// 为什么类型名只能当兜底：`*harness.Error` 对统计毫无信息量（所有被包装过的
+// 错误都是它），而 `%T` 的输出形态也不稳定。但它比空串好——空串与「没有失败」
+// 同形，调用方会把一次失败读成成功。
+//
+// 两条路径都只产出标识符形态的串，所以 RunResult.Err 可以安全落进公开结果。
 func safeError(err error) string {
 	if err == nil {
 		return ""
+	}
+	if k, ok := KindOf(err); ok {
+		return string(k)
 	}
 	return fmt.Sprintf("%T", err)
 }

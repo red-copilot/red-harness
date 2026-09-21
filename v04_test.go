@@ -512,6 +512,49 @@ func TestRunPolicyZeroValueDoesNotPanic(t *testing.T) {
 	}
 }
 
+// TestRunResultErrCarriesFailureClass：公开结果里的失败类别必须是**枚举分类**，
+// 而不是 `*harness.Error` 这种对统计毫无信息量的类型名。
+//
+// 回归：safeError 原先只输出 %T，于是 provider 故障与执行器故障在 results.json
+// 里变成同一个串——通过率结论无法把它们分开，而分开正是 M3 的要求。
+func TestRunResultErrCarriesFailureClass(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}},
+		answers: map[string]string{"c1": "flag{x}"}}
+	sb := &fakeSandbox{probeErr: Ef(KindExecutor, "sandbox.probe", "假探测失败", nil)}
+	ag := &fakeAgent{}
+	factory := &scriptedAgentFactory{agent: ag}
+
+	h := newTestHarness(t, sc, sb, factory, func(Challenge) CandidateGate { return newStubGate() })
+	res, err := h.Run(context.Background(), testRunSpec())
+	if err == nil {
+		t.Fatal("Probe 失败必须让 Run 返回错误")
+	}
+	if !IsKind(err, KindExecutor) {
+		t.Errorf("错误分类 = %v，期望 KindExecutor", err)
+	}
+	if res.Err != string(KindExecutor) {
+		t.Errorf("RunResult.Err = %q，期望 %q（分类而不是类型名）", res.Err, KindExecutor)
+	}
+}
+
+// TestKindOf：取分类的语义边界。
+func TestKindOf(t *testing.T) {
+	if _, ok := KindOf(nil); ok {
+		t.Error("nil 错误不得给出分类")
+	}
+	if _, ok := KindOf(errors.New("普通错误")); ok {
+		t.Error("非 *harness.Error 不得给出分类")
+	}
+	if _, ok := KindOf(&Error{Kind: "", Op: "x"}); ok {
+		t.Error("空 Kind 与「没有分类」同形，必须返回 ok=false")
+	}
+	// 包裹之后仍能取到分类。
+	wrapped := errors.New("外层")
+	if k, ok := KindOf(Ef(KindProvider, "round", "内层", wrapped)); !ok || k != KindProvider {
+		t.Errorf("KindOf = (%q, %v)，期望 (%q, true)", k, ok, KindProvider)
+	}
+}
+
 // ── 夹具 ──
 
 func testRunSpec() RunSpec {

@@ -104,3 +104,20 @@ func IsKind(err error, k Kind) bool {
 	e, ok := errors.AsType[*Error](err)
 	return ok && e.Kind == k
 }
+
+// KindOf 返回 err 链上的错误分类；链上没有 *Error 时返回 ok=false。
+//
+// 为什么需要一个「取分类」而不是「判分类」的函数：**落盘与报告需要分类本身**。
+// 公开结果里只能放可比较的枚举值，而 `%T` 折出来的类型名（`*harness.Error`）
+// 对通过率结论毫无用处——provider 故障与执行器故障会变成同一个串，而这两类
+// 正是必须分开统计的。分类是枚举，它**没有明文**，可以安全进公开结果。
+//
+// 返回 (Kind, true) 时 Kind 一定非空：空 Kind 与「没有分类」同形，让调用方
+// 拿到空串再自己判断，等于把「没分类」这条信息藏进一个合法值里。
+func KindOf(err error) (Kind, bool) {
+	e, ok := errors.AsType[*Error](err)
+	if !ok || e.Kind == "" {
+		return "", false
+	}
+	return e.Kind, true
+}
