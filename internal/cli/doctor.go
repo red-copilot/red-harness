@@ -21,8 +21,15 @@ import (
 // 值打印出来就会进终端 scrollback、进工单、进 CI 日志——这正是本计划里
 // 「凭据绝不入库」那条规则要防的扩散路径。
 //
-// 本波次只交付 flag 解析与注入点：真正的检查项（Python SDK / 凭据 / VPN /
-// Docker / runner 镜像 / pi 版本 / provider 配置）在 T14 里由装配层接上。
+// 本波次只交付 flag 解析与注入点：真正的检查项（Docker / runner 镜像 /
+// provider 凭据 / VPN）由装配层（`internal/wire`）接上——**CLI 自己不做检查**，
+// 它连 docker 可不可用都不该知道。
+//
+// ⚠️ **v0.4 的 `Harness.Doctor` 不返回 error**（见 v04.go），所以这里没有
+// 「体检本身出错」这条分支：体检的结论**全部**通过 `DoctorReport.Checks`
+// 表达，任何检查项失败都必须落成一项 FAIL，而不是一个 error。装配层因此必须
+// 把「探测失败」也记成 FAIL 项（`wire.Doctor` 就是这么做的）——否则一次
+// 「docker 命令都跑不起来」会表现为体检全绿。
 func (a *app) doctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	// json 输出给机器读（CI 门禁），默认的人读格式给终端。
@@ -38,17 +45,17 @@ func (a *app) doctor(args []string) error {
 	//
 	// ⚠️ **不要再注册 `--store`**：它会被解析、然后被丢掉，用户看到 --help 里
 	// 有这个 flag 就会以为体检是针对某个 store 做的。
-	ports, err := a.ports("")
+	//
+	// 第二个参数（RunSpec）传零值：体检与本次运行的配置无关，而 spec 一旦参与
+	// 装配就会被写进公开面。装配层不得要求它非空。
+	ports, err := a.ports("", harness.RunSpec{})
 	if err != nil {
 		return err
 	}
 	if ports.Doctor == nil {
 		return notImplemented("doctor")
 	}
-	rep, err := ports.Doctor.Doctor(context.Background())
-	if err != nil {
-		return err
-	}
+	rep := ports.Doctor.Doctor(context.Background())
 	if *jsonOut {
 		if err := printDoctorJSON(a.out(), rep); err != nil {
 			return err
