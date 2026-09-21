@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 )
@@ -234,24 +235,37 @@ type HarnessOptions struct {
 }
 
 func NewHarness(opts HarnessOptions) (*Harness, error) {
-	missing := ""
+	var missing []string
 	if opts.Scenario == nil {
-		missing = "Scenario"
+		missing = append(missing, "Scenario")
 	}
 	if opts.Sandbox == nil {
-		if missing != "" {
-			missing += ", "
-		}
-		missing += "Sandbox"
+		missing = append(missing, "Sandbox")
 	}
 	if opts.Agents == nil {
-		if missing != "" {
-			missing += ", "
-		}
-		missing += "Agents"
+		missing = append(missing, "Agents")
 	}
-	if missing != "" {
-		return nil, Ef(KindConfig, "harness.new", "缺少必需端口: "+missing, nil)
+	// Planner / Renderer / Gate / Results 同样是**生产必需**端口，缺了它们这台
+	// Harness 会以「静默错误」的方式失败：
+	//   - 缺 Planner/Renderer/Gate：每道题都会走「未执行任何轮次」那条路，报告
+	//     把一次装配错误读成「模型不行」；
+	//   - 缺 Results：Run 里的 `if h.results != nil` 会让「跑完不落盘」变成一次
+	//     静默成功，表现为「跑了几十次，stats 说零次」。
+	// 两者都是「看起来跑通了、其实什么都没验证」的形状，必须在启动时拒绝。
+	if opts.Planner == nil {
+		missing = append(missing, "Planner")
+	}
+	if opts.Renderer == nil {
+		missing = append(missing, "Renderer")
+	}
+	if opts.Gate == nil {
+		missing = append(missing, "Gate")
+	}
+	if opts.Results == nil {
+		missing = append(missing, "Results")
+	}
+	if len(missing) > 0 {
+		return nil, Ef(KindConfig, "harness.new", "缺少必需端口: "+strings.Join(missing, ", "), nil)
 	}
 	now := opts.Now
 	if now == nil {

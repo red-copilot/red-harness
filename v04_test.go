@@ -373,22 +373,21 @@ func TestRunNoProgressIsNotSuccess(t *testing.T) {
 	}
 }
 
-// TestRunMissingPlannerIsConfigError：缺 Planner/Renderer/Gate 时必须明确报错，
-// 不能静默返回一道「空轮次」的题——那会让装配错误被读成模型不行。
-func TestRunMissingPlannerIsConfigError(t *testing.T) {
+// TestRunChallengeReclaimsOnProbeFailure：题级失败路径也必须回收资源。
+//
+// 装配错误（缺 Planner 等）现在被 NewHarness 挡住了，所以「一道题中途失败」这条
+// 路径要由**运行期**故障来覆盖：Probe 失败时 session 与场景都必须被清理。
+func TestRunChallengeReclaimsOnProbeFailure(t *testing.T) {
 	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}},
 		answers: map[string]string{"c1": "flag{x}"}}
-	sb := &fakeSandbox{}
+	sb := &fakeSandbox{probeErr: Ef(KindExecutor, "sandbox.probe", "假探测失败", nil)}
 	ag := &fakeAgent{}
 	factory := &scriptedAgentFactory{agent: ag}
 
-	h := newTestHarness(t, sc, sb, factory, nil) // 不给 planner/renderer/gate
+	h := newTestHarness(t, sc, sb, factory, func(Challenge) CandidateGate { return newStubGate() })
 	res, err := h.Run(context.Background(), testRunSpec())
 	if err == nil {
-		t.Fatal("缺 Planner/Renderer/Gate 时 Run 必须返回错误")
-	}
-	if !IsKind(err, KindConfig) {
-		t.Errorf("错误分类 = %v，期望 KindConfig", err)
+		t.Fatal("Probe 失败必须让 Run 返回错误")
 	}
 	if res.Err == "" {
 		t.Error("RunResult.Err 必须非空")
@@ -570,7 +569,7 @@ func testRunSpec() RunSpec {
 func newTestHarness(t *testing.T, sc Scenario, sb Sandbox, af AgentFactory,
 	gate func(Challenge) CandidateGate) *Harness {
 	t.Helper()
-	opts := HarnessOptions{Scenario: sc, Sandbox: sb, Agents: af, Gate: gate}
+	opts := HarnessOptions{Scenario: sc, Sandbox: sb, Agents: af, Gate: gate, Results: &recordingResults{}}
 	if gate != nil {
 		opts.Planner = func(Challenge) Planner { return &stubPlanner{} }
 		opts.Renderer = func(Challenge) Renderer { return stubRenderer{} }
@@ -580,6 +579,76 @@ func newTestHarness(t *testing.T, sc Scenario, sb Sandbox, af AgentFactory,
 		t.Fatalf("NewHarness: %v", err)
 	}
 	return h
+}
+
+// recordingResults 是记账型 ResultStore：只记 Save 调用，不落盘。
+//
+// 它同时也是「NewHarness 拒绝缺 Results」这条守卫的对照物——缺了它这台 Harness
+// 会把「跑完不落盘」变成一次静默成功。
+type recordingResults struct {
+	mu    sync.Mutex
+	saved []RunResult
+}
+
+func (r *recordingResults) Save(_ context.Context, res RunResult) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.saved = append(r.saved, res)
+	return nil
+}
+func (r *recordingResults) Get(context.Context, RunID) (RunResult, error) {
+	return RunResult{}, errors.New("未实现")
+}
+func (r *recordingResults) List(context.Context) ([]RunResult, error) { return nil, nil }
+func (r *recordingResults) Stats(context.Context, StatsQuery) (StatsReport, error) {
+	return StatsReport{}, nil
+}
+
+// TestNewHarnessRejectsMissingPorts：生产必需端口缺一个就启动失败。
+//
+// 缺 Planner/Renderer/Gate 时每道题都会走「未执行任何轮次」，报告把装配错误读成
+// 「模型不行」；缺 Results 时「跑完不落盘」是一次静默成功，表现为「跑了几十次，
+// stats 说零次」。两者都必须在启动时挡住。
+func TestNewHarnessRejectsMissingPorts(t *testing.T) {
+	base := func() HarnessOptions {
+		return HarnessOptions{
+			Scenario: &stubScenario{}, Sandbox: &fakeSandbox{},
+			Agents:   &scriptedAgentFactory{agent: &fakeAgent{}},
+			Planner:  func(Challenge) Planner { return &stubPlanner{} },
+			Renderer: func(Challenge) Renderer { return stubRenderer{} },
+			Gate:     func(Challenge) CandidateGate { return newStubGate() },
+			Results:  &recordingResults{},
+		}
+	}
+	if _, err := NewHarness(base()); err != nil {
+		t.Fatalf("齐备端口不应失败: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		drop func(*HarnessOptions)
+	}{
+		{"Scenario", func(o *HarnessOptions) { o.Scenario = nil }},
+		{"Sandbox", func(o *HarnessOptions) { o.Sandbox = nil }},
+		{"Agents", func(o *HarnessOptions) { o.Agents = nil }},
+		{"Planner", func(o *HarnessOptions) { o.Planner = nil }},
+		{"Renderer", func(o *HarnessOptions) { o.Renderer = nil }},
+		{"Gate", func(o *HarnessOptions) { o.Gate = nil }},
+		{"Results", func(o *HarnessOptions) { o.Results = nil }},
+	} {
+		o := base()
+		tc.drop(&o)
+		_, err := NewHarness(o)
+		if err == nil {
+			t.Errorf("缺 %s 时必须启动失败", tc.name)
+			continue
+		}
+		if !IsKind(err, KindConfig) {
+			t.Errorf("缺 %s 的错误分类 = %v，期望 KindConfig", tc.name, err)
+		}
+		if !strings.Contains(err.Error(), tc.name) {
+			t.Errorf("缺 %s 的错误消息必须点名它: %v", tc.name, err)
+		}
+	}
 }
 
 // stubPlanner 永远返回同一个意图，直到预算耗尽。
