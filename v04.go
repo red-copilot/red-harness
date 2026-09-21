@@ -107,8 +107,14 @@ type Sandbox interface {
 
 // SolverProfile is immutable run input. The bundle is mounted read-only by a
 // sandbox implementation; Digest is stable and safe to put in public results.
+//
+// 一次 Run 里它被冻结（Run 开始时算一次 Digest），摘要同时驱动挂载、prompt 与
+// 结果分组——三者用同一份来源，否则「同一 profile」在报告里会变成两个东西。
 type SolverProfile struct {
-	Name            string         `json:"name,omitempty"`
+	Name string `json:"name,omitempty"`
+	// SystemPrompt 走 pi 的 --append-system-prompt（保留 pi 默认编码能力）。
+	// 它由 Run 在每道题 Start 时注入 agent——放在 profile 里而不是 AgentSpec 里，
+	// 是因为它属于「一次 Run 冻结的解法配置」，而 AgentSpec 描述的是进程参数。
 	SystemPrompt    string         `json:"systemPrompt,omitempty"`
 	ExtensionBundle string         `json:"extensionBundle,omitempty"`
 	Planner         map[string]any `json:"planner,omitempty"`
@@ -476,8 +482,9 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		return cr, err
 	}
 	defer func() { _ = ag.Close(context.Background()) }()
-	if err := ag.Start(ctx, AgentStart{Workdir: sb.Workdir, Provider: spec.Agent.Provider,
-		Model: spec.Agent.Model, Thinking: spec.Agent.Thinking, Extensions: spec.Agent.Extensions,
+	if err := ag.Start(ctx, AgentStart{Workdir: sb.Workdir, SystemPrompt: h.profile.SystemPrompt,
+		Provider: spec.Agent.Provider,
+		Model:    spec.Agent.Model, Thinking: spec.Agent.Thinking, Extensions: spec.Agent.Extensions,
 		Approve: spec.Agent.Approve, SessionDir: spec.Agent.SessionDir, HomeDir: spec.Agent.HomeDir}); err != nil {
 		cr.EndedAt = h.now()
 		return cr, err

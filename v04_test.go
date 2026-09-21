@@ -117,15 +117,20 @@ func (p *fakeProcess) Kill() error {
 
 // fakeAgent 按脚本逐轮产出事件。它**不启动任何进程**——它是编排测试里的替身。
 type fakeAgent struct {
-	rounds   int
-	started  int
-	closed   int
-	steers   []string
-	script   func(round int, emit func(Event))
-	roundErr error
+	rounds    int
+	started   int
+	closed    int
+	steers    []string
+	lastStart AgentStart
+	script    func(round int, emit func(Event))
+	roundErr  error
 }
 
-func (a *fakeAgent) Start(context.Context, AgentStart) error { a.started++; return nil }
+func (a *fakeAgent) Start(_ context.Context, req AgentStart) error {
+	a.started++
+	a.lastStart = req
+	return nil
+}
 func (a *fakeAgent) Round(_ context.Context, req RoundRequest) (RoundResult, error) {
 	a.rounds++
 	if a.roundErr != nil {
@@ -533,6 +538,41 @@ func TestRunResultErrCarriesFailureClass(t *testing.T) {
 	}
 	if res.Err != string(KindExecutor) {
 		t.Errorf("RunResult.Err = %q，期望 %q（分类而不是类型名）", res.Err, KindExecutor)
+	}
+}
+
+// TestRunFreezesProfileIntoAgentStart：profile 的 system prompt 必须真的到达 agent。
+//
+// 回归：Run 只转发 spec.Agent.*，profile 的 SystemPrompt 没有任何注入路径——
+// 它在 SolverProfile 里存在、进 Digest、写进公开结果，却从不生效。一个「看起来
+// 在、实际没生效」的字段比没有这个字段更糟：它会让 profile 对照实验得出错误结论。
+func TestRunFreezesProfileIntoAgentStart(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}},
+		answers: map[string]string{"c1": "flag{x}"}}
+	sb := &fakeSandbox{}
+	ag := &fakeAgent{}
+	factory := &scriptedAgentFactory{agent: ag}
+
+	opts := HarnessOptions{Scenario: sc, Sandbox: sb, Agents: factory,
+		Planner:  func(Challenge) Planner { return &stubPlanner{} },
+		Renderer: func(Challenge) Renderer { return stubRenderer{} },
+		Gate:     func(Challenge) CandidateGate { return newStubGate() },
+		Results:  &recordingResults{},
+		Profile:  SolverProfile{Name: "p1", SystemPrompt: "你是一个授权的 CTF 解题助手"}}
+	h, err := NewHarness(opts)
+	if err != nil {
+		t.Fatalf("NewHarness: %v", err)
+	}
+	if _, err := h.Run(context.Background(), testRunSpec()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if ag.lastStart.SystemPrompt != "你是一个授权的 CTF 解题助手" {
+		t.Errorf("AgentStart.SystemPrompt = %q，profile 的 prompt 没有到达 agent",
+			ag.lastStart.SystemPrompt)
+	}
+	// Workdir 必须是容器内路径，不是宿主路径。
+	if ag.lastStart.Workdir != "/work" {
+		t.Errorf("AgentStart.Workdir = %q，期望容器内路径 /work", ag.lastStart.Workdir)
 	}
 }
 
