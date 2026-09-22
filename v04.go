@@ -413,6 +413,7 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	// profile 对照实验的结论失效。
 	digest, err := bundleDigest(spec.Profile.ExtensionBundle)
 	if err != nil {
+		result.State = RunFailed
 		return result, Ef(KindConfig, "harness.profile", "扩展包内容摘要无法计算", err)
 	}
 	result.BundleDigest = digest
@@ -423,11 +424,18 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	// 遗留——那次调用是空转，而孤儿会一直攒着（每个 bridge 占一个网段，攒够
 	// 之后新 run 连网络都建不出来）。live 集合里只有本次 run，所以本次自己的
 	// 资源不会被误删。
+	//
+	// 下面这三处提前返回都要显式置 RunFailed：State 的契约是「Run 返回了错误，
+	// State 就必是 failed 或 cancelled」——留空串会让调用方退回解析错误字符串，
+	// 而 errors.go 明令禁止那么做。这几条路径都发生在**任何题目起跑之前**，
+	// 所以是 failed 而不是 cancelled（用户没按 Ctrl-C）。
 	if err := h.reclaimStale(ctx, runID); err != nil {
+		result.State = RunFailed
 		return result, err
 	}
 	challenges, err := h.scenario.Discover(ctx, spec)
 	if err != nil {
+		result.State = RunFailed
 		return result, err
 	}
 	// firstErr 保存**原始错误**（不是折叠后的分类串）。

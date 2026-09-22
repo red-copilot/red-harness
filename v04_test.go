@@ -220,9 +220,13 @@ type stubScenario struct {
 	reconcileCalls int
 	evalErr        error
 	cleanupErr     error
+	discoverErr    error
 }
 
 func (s *stubScenario) Discover(context.Context, RunSpec) ([]Challenge, error) {
+	if s.discoverErr != nil {
+		return nil, s.discoverErr
+	}
 	return append([]Challenge(nil), s.challenges...), nil
 }
 
@@ -527,6 +531,31 @@ func TestRunRestartsProcessOnceWithSafeSummary(t *testing.T) {
 	}
 	if len(second.prompts) == 0 || !strings.Contains(second.prompts[0], "平台已确认进度") || strings.Contains(second.prompts[0], "flag{answer}") {
 		t.Fatalf("recovery prompt missing safe summary or included answer: %q", second.prompts)
+	}
+}
+
+// TestRunEarlyFailureReportsFailedState：起跑前就失败的运行必须是 failed 终态。
+//
+// State 的契约是「Run 返回了错误，State 就必是 failed 或 cancelled」。留空串会
+// 让调用方退回解析错误字符串去判断发生了什么，而 errors.go 明令禁止那么做
+// （「不要用字符串匹配错误消息来判断」）。
+//
+// 这几条路径都发生在任何题目起跑之前，用户也没按 Ctrl-C，所以是 failed 而不是
+// cancelled——把它们报成取消会让人去找一个不存在的信号。
+func TestRunEarlyFailureReportsFailedState(t *testing.T) {
+	sc := &stubScenario{discoverErr: errors.New("平台不可达")}
+	h := newTestHarness(t, sc, &fakeSandbox{}, &scriptedAgentFactory{agent: &fakeAgent{}},
+		func(Challenge) CandidateGate { return newStubGate() })
+
+	res, err := h.Run(context.Background(), testRunSpec())
+	if err == nil {
+		t.Fatal("Discover 失败必须让 Run 返回错误")
+	}
+	if res.State != RunFailed {
+		t.Errorf("State = %q，期望 %q", res.State, RunFailed)
+	}
+	if res.Completed {
+		t.Error("起跑前就失败的运行不得被记成解出")
 	}
 }
 
