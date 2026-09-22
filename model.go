@@ -65,6 +65,21 @@ const (
 	RunCompleted RunState = "completed"
 	RunFailed    RunState = "failed"
 	RunCancelled RunState = "cancelled"
+	// RunFinished 是 v0.4 的运行终态：Run 的轮循环**正常走到了终点**。
+	//
+	// 为什么不复用 RunCompleted，以及为什么必须有这个值：
+	// `RunResult.Completed` 的含义是「**有题目解出来了**」（平台权威的
+	// Objective.Completed），而一次运行完全可以正常结束却一道题都没解出来——
+	// 那正是前身「280 run / 0 flag」的形状。用一个词表示两件事，报告就无法区分
+	// 「跑完了且解出来了」与「跑完了但什么都没解出来」，而后者恰恰是最需要被
+	// 看见的那一类。
+	//
+	// 所以 v0.4 把它们拆成两个问题：
+	//   - `State`：运行**怎么结束的**（finished / failed / cancelled）；
+	//   - `Completed`：运行**解出来了没有**。
+	//
+	// RunCompleted 保留不动：它是 v0.3 快照面的值，旧图与旧快照的读取路径仍在。
+	RunFinished RunState = "finished"
 )
 
 // Terminal 报告这个状态是否已经终局。
@@ -74,7 +89,7 @@ const (
 // 引擎的 Resume 必须先用它挡一道。
 func (s RunState) Terminal() bool {
 	switch s {
-	case RunCompleted, RunFailed, RunCancelled:
+	case RunCompleted, RunFailed, RunCancelled, RunFinished:
 		return true
 	}
 	return false
@@ -268,6 +283,12 @@ type OutcomeView struct {
 	Negative int
 	// HintUsed 是提示次数（提示会按比例扣分，所以要单列）。
 	HintUsed int
+	// BranchesAbandoned 是被放弃的分支数（换支次数）。
+	//
+	// 为什么要单列：一次运行以 `no_intent` 收场时，报告必须能回答「是因为所有
+	// 方向都做完了，还是因为编排层把几个方向判成了停滞而扔掉」——这两个答案指向
+	// 完全不同的改法（前者是题目确实做不动，后者是阈值或提示策略需要调）。
+	BranchesAbandoned int
 	// ProgressConfirmed / ProgressTotal 是**平台权威的**作答进度。
 	//
 	// 为什么不用 `len(Flags)` 代替：「通关立即终止」必须能在**不知道 FlagCount**

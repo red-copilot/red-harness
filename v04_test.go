@@ -3,6 +3,8 @@ package harness
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -556,6 +558,230 @@ func TestRunHintRequestedOncePerChallenge(t *testing.T) {
 	}
 }
 
+// TestRunStagnationSwitchesBranchAfterHint：停滞 → 提示一次 → 仍然停滞 ⇒ 放弃
+// 当前分支，调度未尝试的方向。
+//
+// 这是 M3 里唯一没落地的行为。判据是「连续两轮既无平台进度、也无新增宿主验证
+// 事实」，处置是「提示后再次连续两轮停滞则放弃当前分支」。
+//
+// 轮次账（threshold = 2，HintAuto）：
+//
+//	1: a, dry=1
+//	2: a, dry=2 ⇒ 请求提示（每题唯一一次），dry 归零
+//	3: a, dry=1
+//	4: a, dry=2 ⇒ 放弃 a
+//	5: b, dry=1
+//	6: b, dry=2 ⇒ 放弃 b
+//	7: 前沿耗尽 ⇒ no_intent
+func TestRunStagnationSwitchesBranchAfterHint(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}},
+		answers: map[string]string{"c1": "flag{never}"}}
+	ag := &fakeAgent{}
+	factory := &scriptedAgentFactory{agent: ag}
+	// 每轮都产出一条**抽不出事实**的输出：既无平台进度，也无宿主新事实。
+	ag.script = func(_ int, _ func(Event)) {
+		emitToolEnd(factory.sink, "call", "ls", "nothing here\n")
+	}
+	planner := &multiIntentPlanner{intents: []string{"intent-a", "intent-b"}}
+
+	h := newTestHarnessWithPlanner(t, sc, &fakeSandbox{}, factory, planner)
+	spec := testRunSpec()
+	spec.HintPolicy = HintAuto
+
+	res, err := h.Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run 返回错误: %v", err)
+	}
+	cr := res.Challenges[0].Outcome
+	if sc.hints != 1 {
+		t.Errorf("提示请求 %d 次，期望 1（每题最多一次，换支不得放宽这条）", sc.hints)
+	}
+	if got := planner.abandoned; len(got) != 2 || got[0] != "intent-a" || got[1] != "intent-b" {
+		t.Errorf("被放弃的分支 = %v，期望先 a 后 b", got)
+	}
+	if cr.BranchesAbandoned != 2 {
+		t.Errorf("BranchesAbandoned = %d，期望 2（报告要能解释为什么停）", cr.BranchesAbandoned)
+	}
+	if cr.Reason != ReasonNoIntent {
+		t.Errorf("Reason = %q，期望 %q（两支都被放弃后前沿为空）", cr.Reason, ReasonNoIntent)
+	}
+}
+
+// TestRunHostFactsPreventStagnation：有新增宿主事实的轮次**不算**停滞。
+//
+// 只看平台进度是不够的——一道题在拿到 flag 之前往往先积累一批真实事实
+// （banner、凭据线索、可达服务），那正是有进展的样子。把它们读成停滞，agent
+// 会在真的推进时被反复打断，甚至被换支。
+func TestRunHostFactsPreventStagnation(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}},
+		answers: map[string]string{"c1": "flag{never}"}}
+	ag := &fakeAgent{}
+	factory := &scriptedAgentFactory{agent: ag}
+	ag.script = func(_ int, _ func(Event)) {
+		emitToolEnd(factory.sink, "call", "nmap", "80/tcp open http\n")
+	}
+	// 每见一个事件就抬一格宿主事实水位线：平台进度始终为 0，但事实在增长。
+	planner := &multiIntentPlanner{intents: []string{"intent-a", "intent-b"}, bumpOnObserve: true}
+
+	h := newTestHarnessWithPlanner(t, sc, &fakeSandbox{}, factory, planner)
+	spec := testRunSpec()
+	spec.HintPolicy = HintAuto
+	spec.Budget = Budget{MaxRounds: 5, MaxWall: time.Minute, MaxTurns: 100}
+
+	res, err := h.Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run 返回错误: %v", err)
+	}
+	cr := res.Challenges[0].Outcome
+	if sc.hints != 0 {
+		t.Errorf("提示请求 %d 次，期望 0——宿主事实在增长就不是停滞", sc.hints)
+	}
+	if cr.BranchesAbandoned != 0 {
+		t.Errorf("BranchesAbandoned = %d，期望 0——不得把有进展的分支换掉", cr.BranchesAbandoned)
+	}
+	// 跑到轮次预算耗尽，说明它一直在正常推进而不是被判停滞。
+	if cr.Reason != ReasonMaxRounds {
+		t.Errorf("Reason = %q，期望 %q", cr.Reason, ReasonMaxRounds)
+	}
+}
+
+// TestRunStateSeparatesFinishFromSolved：运行终态与「题目是否解出」是两个问题。
+//
+// 一次运行可以正常结束却一道题都没解出来（ReasonNoProgress），也可以被取消。
+// 用同一个字段表示这两件事，报告就分不清「跑完了但什么都没解出来」与
+// 「跑完了且解出来了」——前者正是前身「280 run / 0 flag」的形状。
+func TestRunStateSeparatesFinishFromSolved(t *testing.T) {
+	t.Run("跑完但没解出", func(t *testing.T) {
+		sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}},
+			answers: map[string]string{"c1": "flag{never}"}}
+		ag := &fakeAgent{}
+		factory := &scriptedAgentFactory{agent: ag}
+		ag.script = func(_ int, _ func(Event)) { emitToolEnd(factory.sink, "call", "ls", "nothing\n") }
+		h := newTestHarness(t, sc, &fakeSandbox{}, factory, func(Challenge) CandidateGate { return newStubGate() })
+		spec := testRunSpec()
+		spec.Budget = Budget{MaxRounds: 2, MaxWall: time.Minute, MaxTurns: 100}
+
+		res, err := h.Run(context.Background(), spec)
+		if err != nil {
+			t.Fatalf("Run 返回错误: %v", err)
+		}
+		if res.State != RunFinished {
+			t.Errorf("State = %q，期望 %q", res.State, RunFinished)
+		}
+		if res.Completed {
+			t.Error("没解出任何题时 Completed 必须为假")
+		}
+		if res.Reason != ReasonNoProgress {
+			t.Errorf("Reason = %q，期望 %q", res.Reason, ReasonNoProgress)
+		}
+	})
+
+	t.Run("解出", func(t *testing.T) {
+		sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}},
+			answers: map[string]string{"c1": "flag{real-answer}"}}
+		ag := &fakeAgent{}
+		factory := &scriptedAgentFactory{agent: ag}
+		ag.script = func(_ int, _ func(Event)) {
+			emitToolEnd(factory.sink, "call", "cat", "flag{real-answer}\n")
+		}
+		h := newTestHarness(t, sc, &fakeSandbox{}, factory, func(Challenge) CandidateGate { return newStubGate() })
+
+		res, err := h.Run(context.Background(), testRunSpec())
+		if err != nil {
+			t.Fatalf("Run 返回错误: %v", err)
+		}
+		if res.State != RunFinished || !res.Completed {
+			t.Errorf("State/Completed = %q/%v，期望 %q/true", res.State, res.Completed, RunFinished)
+		}
+	})
+}
+
+// TestBundleDigestTracksContent：扩展包内容摘要必须随**内容**变化。
+//
+// SolverProfile.Digest() 只对结构体 JSON 取摘要，而 ExtensionBundle 在那里面是
+// 一个路径字符串——同一个路径下内容换了，摘要不变，于是报告会把两份不同的扩展包
+// 算作同一组，profile 对照实验的结论是错的。
+func TestBundleDigestTracksContent(t *testing.T) {
+	// 空路径 = 未核验。空串是它与「内容没问题」的区别所在。
+	if got, err := bundleDigest(""); err != nil || got != "" {
+		t.Fatalf("空路径应得到空串（未核验），got %q err %v", got, err)
+	}
+	// 不存在或不是目录 ⇒ fail closed，绝不静默返回空串。
+	if _, err := bundleDigest(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("路径不存在时必须报错，而不是当成「未核验」")
+	}
+
+	dir := t.TempDir()
+	write := func(name, content string) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.js", "one")
+	write("sub/b.js", "two")
+	base, err := bundleDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base == "" {
+		t.Fatal("有内容的 bundle 不该得到空摘要")
+	}
+	// 同一份内容重复算必须稳定（目录遍历顺序不稳定，不排序就会漂）。
+	again, err := bundleDigest(dir)
+	if err != nil || again != base {
+		t.Fatalf("同一份内容两次摘要不同: %q vs %q (err=%v)", base, again, err)
+	}
+
+	// 改内容 ⇒ 摘要变。
+	write("a.js", "ONE")
+	changed, err := bundleDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == base {
+		t.Error("扩展包内容变了但摘要没变——profile 分组会把两次不同的实验算成一组")
+	}
+
+	// 只追加一个空文件也要变（路径本身参与摘要）。
+	write("c.js", "")
+	added, err := bundleDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added == changed {
+		t.Error("新增文件后摘要必须变")
+	}
+
+	// 长度前缀：拼接歧义必须被区分开，否则 "ab"+"c" 与 "a"+"bc" 会撞成同一个摘要。
+	split := t.TempDir()
+	if err := os.WriteFile(filepath.Join(split, "x"), []byte("ab"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(split, "y"), []byte("c"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	if err := os.WriteFile(filepath.Join(other, "x"), []byte("a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "y"), []byte("bc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d1, err1 := bundleDigest(split)
+	d2, err2 := bundleDigest(other)
+	if err1 != nil || err2 != nil {
+		t.Fatal(err1, err2)
+	}
+	if d1 == d2 {
+		t.Error("不同切分的内容算出了同一个摘要——长度前缀没起作用")
+	}
+}
+
 func TestRunCostBudgetUsesAgentStats(t *testing.T) {
 	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}}, answers: map[string]string{"c1": "flag{never}"}}
 	ag := &fakeAgent{stats: Stats{Turns: 2, CostUSD: 0.02}}
@@ -710,7 +936,13 @@ func TestRunFreezesProfileIntoAgentStart(t *testing.T) {
 	if ag.lastStart.Workdir != "/work" {
 		t.Errorf("AgentStart.Workdir = %q，期望容器内路径 /work", ag.lastStart.Workdir)
 	}
-	override := SolverProfile{Name: "run-specific", SystemPrompt: "本次运行的提示", ExtensionBundle: "/tmp/profile"}
+	// bundle 必须是一个**真实存在**的目录：Run 会在任何副作用之前算它的内容摘要
+	// 并冻结（算不出来就 fail closed），所以这里不能用 /tmp 下的假路径。
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "ext.js"), []byte("// solver extension\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	override := SolverProfile{Name: "run-specific", SystemPrompt: "本次运行的提示", ExtensionBundle: bundle}
 	spec := testRunSpec()
 	spec.Profile = override
 	res, err := h.Run(context.Background(), spec)
@@ -722,6 +954,9 @@ func TestRunFreezesProfileIntoAgentStart(t *testing.T) {
 	}
 	if sb.specs[len(sb.specs)-1].ProfileDir != override.ExtensionBundle {
 		t.Error("RunSpec.Profile 的 bundle 未进入 sandbox")
+	}
+	if res.BundleDigest == "" {
+		t.Error("配了 bundle 就必须冻结内容摘要，空串是「未核验」的意思")
 	}
 }
 
@@ -764,6 +999,23 @@ func newTestHarness(t *testing.T, sc Scenario, sb Sandbox, af AgentFactory,
 		opts.Renderer = func(Challenge) Renderer { return stubRenderer{} }
 	}
 	h, err := NewHarness(opts)
+	if err != nil {
+		t.Fatalf("NewHarness: %v", err)
+	}
+	return h
+}
+
+// newTestHarnessWithPlanner 与 newTestHarness 相同，但允许注入自己实现的
+// Planner——换支与停滞用例需要「放弃一支之后能拿到另一支」，而默认的
+// stubPlanner 永远返回同一个意图。
+func newTestHarnessWithPlanner(t *testing.T, sc Scenario, sb Sandbox, af AgentFactory,
+	planner Planner) *Harness {
+	t.Helper()
+	h, err := NewHarness(HarnessOptions{Scenario: sc, Sandbox: sb, Agents: af,
+		Gate:    func(Challenge) CandidateGate { return newStubGate() },
+		Results: &recordingResults{}, Locker: fakeRunLocker{},
+		Planner:  func(Challenge) Planner { return planner },
+		Renderer: func(Challenge) Renderer { return stubRenderer{} }})
 	if err != nil {
 		t.Fatalf("NewHarness: %v", err)
 	}
@@ -863,6 +1115,58 @@ func (p *stubPlanner) Settle(*IntentRef, RoundResult) {}
 func (p *stubPlanner) ObserveEvent(Event, int)        {}
 func (p *stubPlanner) HostFacts() int                 { return p.hostFacts }
 func (p *stubPlanner) Abandon(it *IntentRef) {
+	if it == nil {
+		return
+	}
+	p.abandoned = append(p.abandoned, it.ID)
+}
+
+// multiIntentPlanner 按**前沿语义**提供多个意图：Next 返回第一个尚未被放弃的，
+// 全被放弃后返回 (nil, nil)（与 dag.Scheduler 的收尾信号同形）。
+//
+// 为什么不能用 stubPlanner 测换支：它永远返回同一个意图，于是「放弃之后拿到了
+// 另一支」这件事在它身上根本无法表达——测试会通过，而换支并没有发生。
+type multiIntentPlanner struct {
+	intents   []string
+	abandoned []string
+	hostFacts int
+	// bumpOnObserve 为真时每个事件都把宿主事实水位线抬一格，用来模拟「本轮真的
+	// 从工具输出里抽到了新事实」。
+	bumpOnObserve bool
+	// current 记录 Next 最近一次返回的意图，供断言「agent 在哪一支上跑」。
+	current string
+}
+
+func (p *multiIntentPlanner) Next(context.Context, PlannerInput) (*IntentRef, error) {
+	for _, id := range p.intents {
+		if p.wasAbandoned(id) {
+			continue
+		}
+		p.current = id
+		return &IntentRef{ID: id, Kind: "recon", Goal: "目标 " + id}, nil
+	}
+	p.current = ""
+	return nil, nil
+}
+
+func (p *multiIntentPlanner) wasAbandoned(id string) bool {
+	for _, a := range p.abandoned {
+		if a == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *multiIntentPlanner) Activate(*IntentRef)            {}
+func (p *multiIntentPlanner) Settle(*IntentRef, RoundResult) {}
+func (p *multiIntentPlanner) ObserveEvent(Event, int) {
+	if p.bumpOnObserve {
+		p.hostFacts++
+	}
+}
+func (p *multiIntentPlanner) HostFacts() int { return p.hostFacts }
+func (p *multiIntentPlanner) Abandon(it *IntentRef) {
 	if it == nil {
 		return
 	}

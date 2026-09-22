@@ -8,6 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -232,13 +236,29 @@ type RunResult struct {
 	RunID         RunID
 	Scenario      string
 	ProfileDigest string
-	Model         string
-	StartedAt     time.Time
-	EndedAt       time.Time
-	Challenges    []ChallengeResult
-	Completed     bool
-	Reason        string
-	Err           string
+	// BundleDigest 是本次运行实际挂载的扩展包**内容**摘要。
+	//
+	// 与 ProfileDigest 并列、不合并：ProfileDigest 描述的是「解法配置是什么」
+	// （含 bundle 的路径），BundleDigest 描述的是「那份配置指向的内容是什么」。
+	// 两者合一会让「同一 profile 换了 bundle 内容」看起来像同一次实验。
+	//
+	// 空串表示**未核验**（没有配 bundle），语义与 ProbeResult.PiVersion 一致：
+	// 调用方不得把它读成「内容没问题」。
+	BundleDigest string
+	Model        string
+	StartedAt    time.Time
+	EndedAt      time.Time
+	Challenges   []ChallengeResult
+	// State 是**运行怎么结束的**（finished / failed / cancelled）。
+	// 它与 Completed 回答的是两个不同的问题，见 RunFinished 的注释。
+	State RunState
+	// Completed 是**解出来了没有**（有题目达成平台权威的目标）。
+	//
+	// ⚠️ 不要把「运行没报错」当成它：正常跑完但一道题没解出来是
+	// ReasonNoProgress，Completed 为假——那正是前身「280 run / 0 flag」的形状。
+	Completed bool
+	Reason    string
+	Err       string
 }
 
 // Harness is the synchronous v0.4 façade. It intentionally contains no pause,
@@ -387,6 +407,15 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	started := h.now()
 	runID := RunID(fmt.Sprintf("run-%d", started.UnixNano()))
 	result := RunResult{RunID: runID, Scenario: spec.Scenario, ProfileDigest: spec.Profile.Digest(), Model: spec.Agent.Model, StartedAt: started}
+	// 扩展包内容摘要在**任何副作用之前**算并冻结：它要描述的是本次运行实际
+	// 挂载的那份 bundle，而不是跑到一半被人替换后的样子。算不出来就 fail closed
+	// ——一份「摘要未知」的 profile 无法与别的运行分组比较，而分组错了会让整个
+	// profile 对照实验的结论失效。
+	digest, err := bundleDigest(spec.Profile.ExtensionBundle)
+	if err != nil {
+		return result, Ef(KindConfig, "harness.profile", "扩展包内容摘要无法计算", err)
+	}
+	result.BundleDigest = digest
 
 	// 先按 label 扫掉**上次崩溃**留下的容器/网络/规则，再建本题的资源。
 	//
@@ -428,8 +457,9 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	}
 	result.EndedAt = h.now()
 	result.Completed = runCompleted(result)
+	result.State = runState(result, firstErr)
 	switch {
-	case IsKind(firstErr, KindCancelled):
+	case result.State == RunCancelled:
 		result.Reason = ReasonStopped
 	case result.Err != "":
 		if IsKind(firstErr, KindProvider) {
@@ -485,6 +515,35 @@ func runCompleted(r RunResult) bool {
 		}
 	}
 	return false
+}
+
+// runState 判定一次运行的终态：finished / failed / cancelled。
+//
+// **取消优先于失败**：一次 Ctrl-C 之后即使某道题恰好以错误收场，用户该看到的是
+// 「被取消」——那是他自己按的键，而不是他需要去排查的故障。反过来把取消报成
+// 失败，会让人去查一个不存在的 bug。
+//
+// 取消的判据有两处，缺一不可：
+//   - `firstErr` 的分类：绝大多数取消路径会带着 KindCancelled 返回；
+//   - 题级 `ReasonStopped`：轮循环**开头**的 ctx 判定是直接 `break` 并以
+//     `(cr, nil)` 收场的（那一轮根本没开始跑），所以 firstErr 会是 nil。只看
+//     firstErr 会让「刚好在轮首被取消」的那次运行被判成 finished。
+//
+// ReasonStopped 只在取消路径上被写入，所以拿它当判据是安全的（它不是「跑完了」
+// 的同义词——正常跑完是 ReasonSolved / ReasonNoProgress / ReasonMax* 等）。
+func runState(r RunResult, firstErr error) RunState {
+	if IsKind(firstErr, KindCancelled) {
+		return RunCancelled
+	}
+	for _, c := range r.Challenges {
+		if c.Outcome.Reason == ReasonStopped {
+			return RunCancelled
+		}
+	}
+	if r.Err != "" {
+		return RunFailed
+	}
+	return RunFinished
 }
 
 func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, ch Challenge) (cr ChallengeResult, runErr error) {
@@ -603,6 +662,9 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	}
 	var used Budget
 	dryRounds, hintUsed, lastProgress := 0, 0, ch.Solved
+	// 停滞判据的另一半：宿主已验证事实的水位线。初值在**进循环之前**取，
+	// 这样第 1 轮就有一个可比的基线（建图时入图的授权地址也算数）。
+	lastHostFacts := planner.HostFacts()
 	restarted := false
 	var previousTurns int
 	var previousCost float64
@@ -791,6 +853,20 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 				break
 			}
 		}
+		// 停滞的第二个判据：**宿主新增了已验证事实**。
+		//
+		// 只看平台进度是不够的——一道题在拿到 flag 之前往往先积累一批真实事实
+		// （banner、凭据线索、可达服务），那正是有进展的样子；把它们读成停滞
+		// 会让 agent 在真的推进时被反复打断，甚至被换支，而每一次打断都要付
+		// 提示额度或一条分支的代价。
+		//
+		// 读在这里而不是轮首：事实是本轮事件经 sink.Flush 灌进图的，轮首读到
+		// 的水位线还是上一轮结束时的值。只数宿主族（见 HostFacts 的注释）——
+		// 否则 agent 只要反复 report_fact 就能永远不被判停滞。
+		if facts := planner.HostFacts(); facts > lastHostFacts {
+			progressed = true
+			lastHostFacts = facts
+		}
 		if progressed {
 			dryRounds = 0
 		} else {
@@ -823,6 +899,26 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 					return cr, err
 				}
 			}
+			// 提示之后**重新开始数**：换支的判据是「提示后又连续停滞 threshold
+			// 轮」，而不是「提示那一轮本来就够阈值了」。不归零的话下一轮立刻触发
+			// 换支，提示等于白给——那既浪费一次平台提示额度，也浪费一个分支。
+			dryRounds = 0
+		} else if hintUsed > 0 && dryRounds >= threshold {
+			// 提示过、也给够了机会，仍然停滞 ⇒ 放弃当前分支，转去未尝试的方向。
+			//
+			// 为什么不在提示时就换支：提示是最便宜的一次纠偏，先给它一次机会；
+			// 给了还不动，才说明问题出在这一支本身（方向选错了，或者 agent 在这
+			// 一点上反复打转），继续把剩余额度投进去没有意义。
+			//
+			// **HintOff 下不会走到这里**（hintUsed 恒为 0）：那一档的契约是
+			// 「从不请求提示」，而规范里的换支是提示链的下游——用户既然关掉了
+			// 自动干预，编排层就不该背着他改换方向。
+			//
+			// 终止性不依赖这里：Abandon 把意图移出前沿后，若前沿真的空了，下一轮
+			// Next 返回 (nil, nil)，轮循环以 ReasonNoIntent 收场。
+			planner.Abandon(it)
+			cr.Outcome.BranchesAbandoned++
+			dryRounds = 0
 		}
 	}
 	cr.Outcome.Code = ch.Code
@@ -980,4 +1076,75 @@ func digestJSON(v any) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
+}
+
+// bundleDigest 计算扩展包目录的**内容**摘要。
+//
+// 为什么需要它：`SolverProfile.Digest()` 是对结构体 JSON 取的，而
+// `ExtensionBundle` 在那个结构体里是一个**路径字符串**——同一个路径下的内容换
+// 了，摘要不变。于是报告会把两份不同的扩展包算作同一组，profile 对照实验得出
+// 的结论是错的（改了 bundle 却观察到同样结果，会被归因到模型身上）。
+//
+// 口径与 digestJSON 一致（sha256 的 hex[:8]），但输入是目录内容：按相对路径排序
+// 后逐个累积「相对路径 + 长度 + 内容」。**排序是必须的**——目录遍历顺序不稳定，
+// 不排序会让同一份 bundle 每次算出不同摘要，那比没有摘要更糟（它看起来在工作）。
+// 长度前缀也是必须的：只写内容的话，"ab"+"c" 与 "a"+"bc" 会撞成同一个摘要。
+//
+// 用流式 io.Copy 而不是 os.ReadFile：这个仓库对「一个大文件把宿主撑爆」是有
+// 前科的（见 SandboxSpec 关于 307 GB 的注释），摘要没有理由把整个文件读进内存。
+//
+// **空路径返回空串**，语义与 `ProbeResult.PiVersion` 一致：空串表示**未核验**
+// （本题没配扩展包），调用方不得把它读成「内容没问题」。路径存在但读不了则返回
+// 错误——那是 fail closed，与 executor/session.go 对 ProfileDir 的校验同一态度。
+func bundleDigest(dir string) (string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return "", nil
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("扩展包不是目录")
+	}
+	var files []string
+	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		// 统一用斜杠：Windows 上反斜杠会让同一份 bundle 在两种平台算出不同摘要。
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(files)
+	h := sha256.New()
+	for _, rel := range files {
+		f, err := os.Open(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			return "", err
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return "", err
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", rel, fi.Size())
+		_, copyErr := io.Copy(h, f)
+		_ = f.Close()
+		if copyErr != nil {
+			return "", copyErr
+		}
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8]), nil
 }
