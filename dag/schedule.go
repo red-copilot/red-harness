@@ -111,6 +111,53 @@ func (s *Scheduler) Settle(it *harness.IntentRef, res harness.RoundResult) {
 	s.known = nil
 }
 
+// HostFacts 返回宿主已验证事实的累计条数（TrustHost 族）。
+//
+// 只数宿主族，**不数 agent 自述族**：`report_fact` 申报的事实是 agent 自己的说法
+// （TrustAgent，置信度还被封顶），拿它当进展等于让 agent 靠「我说我有进展」续命。
+// 而停滞判定是要打断 agent 的，让被判定的那一方自己提供判据显然不行。
+//
+// AddFact 已把空 Trust 归一成 TrustHost（graph.go 的默认分支），所以这里只比较
+// 一个值就够，不需要处理「空串算哪族」。
+//
+// 这是 O(事实数) 的遍历，每轮只调一次。刻意不做增量计数器：计数器要一条与
+// AddFact 并行的写路径，而两条写路径必然漂移，漂移的表现是停滞判定慢慢失准。
+func (s *Scheduler) HostFacts() int {
+	if s.G == nil {
+		return 0
+	}
+	n := 0
+	for _, f := range s.G.factsIn("") {
+		if f.Trust == TrustHost {
+			n++
+		}
+	}
+	return n
+}
+
+// Abandon 放弃一个意图：它不再出现在前沿，调度转去别的方向。
+//
+// 与「尝试次数用尽」是两件事：次数用尽是规划器自己的额度（Activate 在进入执行时
+// +1，executable 在额度耗尽后跳过），而 Abandon 是**编排层的策略决定**——提示过
+// 一次之后仍然停滞，说明这一支的收益已经很低，该让位给未尝试的方向，而不是把
+// 剩余额度继续耗在同一个方向上。
+//
+// 走 SetState 而不是新造一套放弃语义：SetState 的注释写着它「只给外部事件驱动的
+// 状态迁移用」，而「提示后仍停滞」正是编排层知道、图自己算不出来的外部事实。
+// abandoned 在 executable 里是终态，所以这个意图不会再被调度（也不需要动
+// Attempts——它不是「试过了」，是「不试了」）。
+//
+// 错误记进 LastErr 而不向上返回：轮循环此刻已经跑完一轮，放弃失败不该把整道题
+// 变成错误，它只影响下一个意图的选择。与 Activate 的处置同形。
+func (s *Scheduler) Abandon(it *harness.IntentRef) {
+	if it == nil || s.G == nil {
+		return
+	}
+	if err := s.G.SetState(it.ID, IntentAbandoned); err != nil {
+		s.LastErr = err
+	}
+}
+
 // Ingest 把一次工具调用事件里的事实灌进图。这是 M5 的接线点：轮循环里
 // `for _, ev := range events { sched.Ingest(ev, round) }` 一行接上。
 //

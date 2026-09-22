@@ -209,6 +209,91 @@ func TestSchedulerAbandonsAfterCap(t *testing.T) {
 	}
 }
 
+// Abandon 是**编排层的策略动作**：还没试够次数也要能立刻让位。
+//
+// 与 TestSchedulerAbandonsAfterCap 的区别在于它不消耗尝试额度——语义是「不试了」，
+// 而不是「试过了」。提示后仍然停滞的那条路径依赖这个区别：那一支的额度可能还剩
+// 两次，但继续试下去的收益已经很低，该把轮次让给未尝试的方向。
+func TestSchedulerAbandonIsImmediate(t *testing.T) {
+	g := newTestGraph(t)
+	s := NewScheduler(g)
+	ctx := context.Background()
+	ch := harness.Challenge{Category: "pentest"}
+	it, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
+	s.Activate(it)
+
+	s.Abandon(it)
+
+	if s.LastErr != nil {
+		t.Fatalf("正常的 Abandon 不该产生错误: %v", s.LastErr)
+	}
+	n := g.Node(it.ID)
+	if n.State != IntentAbandoned {
+		t.Fatalf("Abandon 后应是 abandoned, got %s", n.State)
+	}
+	// 额度没被消耗：这正是它与「试够上限」的区别。若这里变成 2，说明有人把
+	// Abandon 实现成了「直接耗光额度」，那么调用方就无法区分两种放弃。
+	if n.Attempts != 1 {
+		t.Errorf("Abandon 不得消耗尝试额度, Attempts = %d（期望 1，即只有 Activate 那一次）", n.Attempts)
+	}
+	next, _ := s.Next(ctx, harness.PlannerInput{Challenge: ch, Outcome: harness.OutcomeView{}})
+	if next == nil {
+		t.Fatal("放弃一支后应给出下一个方向")
+	}
+	if next.ID == it.ID {
+		t.Error("abandoned 的意图不得再被挑出来")
+	}
+}
+
+// Abandon 收到不存在的意图时不 panic、也不上抛，只记 LastErr。
+//
+// 与 Activate 同形的处置：调用方此刻已经跑完一轮，放弃失败不该把整道题变成错误
+// ——它只影响下一个意图的选择。但也不能装作没发生，否则「换支从未生效」会静默。
+func TestSchedulerAbandonUnknownIntentRecordsError(t *testing.T) {
+	s := NewScheduler(newTestGraph(t))
+	s.Abandon(&harness.IntentRef{ID: "does-not-exist"})
+	if s.LastErr == nil {
+		t.Error("放弃一个不存在的意图必须记进 LastErr，否则换支失效是静默的")
+	}
+	s.Abandon(nil) // 不得 panic
+}
+
+// HostFacts 只数宿主族：agent 自述的事实不能当作「有进展」。
+//
+// 这是停滞判定的判据之一，而停滞判定会**打断** agent —— 让被判定的那一方自己
+// 提供判据是不行的：agent 只要反复 report_fact 就能永远不被判停滞，于是提示与
+// 换支这两条纠偏路径全部失效，而所有测试仍然全绿。
+func TestSchedulerHostFactsCountsOnlyHostVerified(t *testing.T) {
+	g := newTestGraph(t, "10.0.0.1:80")
+	s := NewScheduler(g)
+	// 基线**不是 0**：dag.New 会把题目的授权地址作为 FactTarget / TrustHost 入图
+	// （来源是平台，本来就是宿主验证的）。所以断言相对增量，而不是绝对值——
+	// 钉绝对值会让这条测试随建图行为一起漂移。
+	base := s.HostFacts()
+	if base == 0 {
+		t.Fatal("授权地址应在建图时作为宿主事实入图")
+	}
+
+	// 宿主抽取通道（nmap 输出里的事实，指纹匹配）
+	if res := s.Ingest(toolEnd("bash", "nmap -sV 10.0.0.1",
+		"80/tcp open http nginx/1.18.0\n"), 1); len(res.Added) == 0 {
+		t.Fatalf("应抽到宿主事实, got %+v", res)
+	}
+	hostOnly := s.HostFacts()
+	if hostOnly <= base {
+		t.Fatalf("宿主抽取之后 HostFacts 必须增加: %d → %d", base, hostOnly)
+	}
+
+	// agent 自述通道（report_fact ⇒ TrustAgent）
+	if _, err := g.AddFact(Node{Kind: NodeFact, FactKind: FactService,
+		Content: "agent 自述的服务", Source: "report_fact", Trust: TrustAgent}); err != nil {
+		t.Fatalf("agent 自述事实应能入库: %v", err)
+	}
+	if got := s.HostFacts(); got != hostOnly {
+		t.Errorf("agent 自述的事实不得计入宿主事实: %d → %d", hostOnly, got)
+	}
+}
+
 // Activate 时记的水位线是产出判定的基准：激活**之前**就存在的事实不算本轮产出。
 func TestSchedulerProducedUsesWatermark(t *testing.T) {
 	g := newTestGraph(t, "10.0.0.1:80")

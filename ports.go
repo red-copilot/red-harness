@@ -207,6 +207,22 @@ type Planner interface {
 	Settle(it *IntentRef, res RoundResult)
 	// ObserveEvent 把一个轮内事件喂给事实抽取。
 	ObserveEvent(ev Event, round int)
+	// HostFacts 返回**宿主已验证**事实的累计条数（TrustHost 族）。
+	//
+	// 它是「停滞」判定的另一半：v0.4 把停滞定义为「连续两轮既无平台进度、
+	// 也无新增宿主验证事实」。只看平台进度是不够的——一道题在拿到 flag 之前
+	// 往往先积累一批真实事实（banner、凭据线索、可达服务），那正是有进展的
+	// 样子；把它们读成停滞会让 agent 在真的推进时被反复打断、甚至被换支。
+	//
+	// 只数宿主族、不数 agent 自述族：`report_fact` 申报的事实是 agent 自己的
+	// 说法，拿它当进展等于让 agent 靠「我说我有进展」续命。
+	HostFacts() int
+	// Abandon 放弃一个意图：它不再出现在前沿，调度器转去下一个未尝试的方向。
+	//
+	// 与「尝试次数用尽」是两件事：次数用尽是规划器自己的额度，而 Abandon 是
+	// 编排层的策略决定——提示过一次之后仍然停滞，这一支就该让位给别的方向，
+	// 而不是把额度耗在同一个方向上。
+	Abandon(it *IntentRef)
 }
 
 // Renderer 把当前状态渲染成本轮 prompt。
@@ -279,17 +295,39 @@ type Candidate struct {
 //
 // 契约要点：
 //   - Observe 只做记账，**绝不做 IO**（不提交、不写盘）——提交只发生在轮末。
-//   - New 返回本次新增且尚未提交的候选，调用方据此提交，避免重复提交。
+//   - New / NewAll 返回尚未提交的候选，调用方据此提交，避免重复提交。
 //   - 候选必须过三闸（格式闸 / 来源闸 / 平台闸）才能提交，平台闸由调用方执行。
 //   - SetIntent 在每轮开始前告诉 gate「现在跑哪个意图」，供候选回填推导链锚点。
 //     v0.2 靠 `Session.IntentSink func(string,int)` 接线（`harness.go:145`），
 //     漏接时所有候选 IntentID 为空、Round 为 0，而族别判定不受影响所以**不报错**
 //     ——审计链断掉却无人知道。收进接口后漏接变成编译错误。
+//
+// **New 与 NewAll 的分工（v0.4）**：
+//
+//   - `NewAll` 是 v0.4 的**可提交集合**：observed 与 derived 两族都返回，
+//     fabricated 永不返回。这是召回率优先的取舍——前身的影子审计发现「29 条被拒
+//     候选里 19 条实为正确答案」，几乎全落在推导族，所以推导族必须进可提交集合。
+//   - `New` 是 v0.3 的 observed-only 视图，保留给旧调用方，v0.4 的轮循环不用它。
+//   - 两者都**不返回已提交过的候选**：「同一答案永不重提」是硬规矩。
+//
+// 为什么两个方法都在接口里、而不是靠调用方运行时断言 `interface{ NewAll() … }`：
+// 断言失败会**静默回落**到 observed-only——一个只实现了旧方法集的 gate 会让
+// derived 族再也提交不出去，而所有包自测全绿、报告上只表现为通过率偏低。
+// 收进接口后漏写变成编译错误（与 ObserveEvent 收进 Planner 是同一个理由）。
 type CandidateGate interface {
 	Observe(ev Event)
 	Candidates() []Candidate
+	// New 返回本次新增、未提交的 observed 族候选（v0.3 视图）。
 	New() []Candidate
-	Mark(flag string, res SubmitResult, err error)
+	// NewAll 返回本次新增、未提交的 observed + derived 候选（v0.4 视图）。
+	NewAll() []Candidate
+	// Mark 用**平台无关的** Evaluation 回填一次提交的判定。
+	//
+	// 为什么收 Evaluation 而不是平台层的 SubmitResult：gate 的账本是通用模型
+	// 的一部分，让它依赖某个平台的响应结构，等于把平台字段一路漏进调度与报告。
+	// 平台特有的字段由 Scenario 在 Evaluate 里映射掉，映射不进来的（例如
+	// CorrectFlagCount 这类）本就该由 Reconcile 的权威进度承担，而不是塞进账本。
+	Mark(flag string, res Evaluation, err error)
 	SetIntent(intentID string, round int)
 }
 

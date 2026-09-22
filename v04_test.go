@@ -845,7 +845,14 @@ func TestNewHarnessRejectsMissingPorts(t *testing.T) {
 }
 
 // stubPlanner 永远返回同一个意图，直到预算耗尽。
-type stubPlanner struct{ activated int }
+//
+// abandoned / hostFacts 是给停滞与换支用例用的可编程点：默认零值等价于「从不
+// 放弃、从不产生宿主事实」，也就是旧行为，所以既有用例不受影响。
+type stubPlanner struct {
+	activated int
+	abandoned []string
+	hostFacts int
+}
 
 func (p *stubPlanner) Next(context.Context, PlannerInput) (*IntentRef, error) {
 	p.activated++
@@ -854,6 +861,13 @@ func (p *stubPlanner) Next(context.Context, PlannerInput) (*IntentRef, error) {
 func (p *stubPlanner) Activate(*IntentRef)            {}
 func (p *stubPlanner) Settle(*IntentRef, RoundResult) {}
 func (p *stubPlanner) ObserveEvent(Event, int)        {}
+func (p *stubPlanner) HostFacts() int                 { return p.hostFacts }
+func (p *stubPlanner) Abandon(it *IntentRef) {
+	if it == nil {
+		return
+	}
+	p.abandoned = append(p.abandoned, it.ID)
+}
 
 type stubRenderer struct{}
 
@@ -912,7 +926,7 @@ func (g *stubGate) NewAll() []Candidate {
 	return out
 }
 
-func (g *stubGate) Mark(flag string, res SubmitResult, err error) {
+func (g *stubGate) Mark(flag string, res Evaluation, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	c, ok := g.seen[flag]
@@ -920,7 +934,10 @@ func (g *stubGate) Mark(flag string, res SubmitResult, err error) {
 		return
 	}
 	c.Submitted = true
-	c.Correct = res.Correct
+	c.Correct = res.Accepted
+	// Duplicate 的派生与 gate.Gate 保持一致（Accepted && !Progress）：两份实现
+	// 在这里漂移的话，编排测试断言的「重复计入确认」就会与生产行为不符。
+	c.Duplicate = res.Accepted && !res.Progress
 	g.seen[flag] = c
 }
 

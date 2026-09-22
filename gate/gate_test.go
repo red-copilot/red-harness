@@ -130,7 +130,7 @@ func TestMarkRemovesFromNew(t *testing.T) {
 	if n := len(g.New()); n != 1 {
 		t.Fatalf("同一 flag 应只产出一个候选，got %d", n)
 	}
-	g.Mark("flag{submit_once}", harness.SubmitResult{Correct: true}, nil)
+	g.Mark("flag{submit_once}", harness.Evaluation{Accepted: true, Progress: true}, nil)
 
 	if n := len(g.New()); n != 0 {
 		t.Fatalf("Mark 后 New() 不得再返回它，got %d 条", n)
@@ -140,7 +140,7 @@ func TestMarkRemovesFromNew(t *testing.T) {
 		t.Errorf("回填统计不对: %+v", st)
 	}
 	// 重复 Mark 不应重复计数（harvest 在每轮末都会调一次）。
-	g.Mark("flag{submit_once}", harness.SubmitResult{Correct: true}, nil)
+	g.Mark("flag{submit_once}", harness.Evaluation{Accepted: true, Progress: true}, nil)
 	if st := g.Stats(); st.Submitted != 1 {
 		t.Errorf("重复 Mark 不应重复计数: %+v", st)
 	}
@@ -150,7 +150,7 @@ func TestMarkRemovesFromNew(t *testing.T) {
 func TestMarkDuplicateCountsAsCorrect(t *testing.T) {
 	g := gateFor(t)
 	toolEnd(g, "a", "bash", "curl -s http://t/", "flag{dup}\n")
-	g.Mark("flag{dup}", harness.SubmitResult{Duplicate: true}, nil)
+	g.Mark("flag{dup}", harness.Evaluation{Accepted: true}, nil)
 
 	for _, c := range g.Candidates() {
 		if c.Flag == "flag{dup}" {
@@ -165,7 +165,7 @@ func TestMarkDuplicateCountsAsCorrect(t *testing.T) {
 func TestMarkErrorStillMarksSubmitted(t *testing.T) {
 	g := gateFor(t)
 	toolEnd(g, "a", "bash", "curl -s http://t/", "flag{net_fail}\n")
-	g.Mark("flag{net_fail}", harness.SubmitResult{}, errors.New("connection reset"))
+	g.Mark("flag{net_fail}", harness.Evaluation{}, errors.New("connection reset"))
 
 	if n := len(g.New()); n != 0 {
 		t.Errorf("提交出错后不得重提，got %d 条", n)
@@ -179,7 +179,7 @@ func TestMarkErrorStillMarksSubmitted(t *testing.T) {
 func TestMarkRejectedRecordsReason(t *testing.T) {
 	g := gateFor(t)
 	toolEnd(g, "a", "bash", "curl -s http://t/", "flag{wrong_guess}\n")
-	g.Mark("flag{wrong_guess}", harness.SubmitResult{Correct: false}, nil)
+	g.Mark("flag{wrong_guess}", harness.Evaluation{}, nil)
 
 	st := g.Stats()
 	if st.Rejected != 1 || st.Correct != 0 {
@@ -197,7 +197,7 @@ func TestMarkRejectedRecordsReason(t *testing.T) {
 // 未提交过的候选不会被 Mark 影响（Mark 一个不存在的 flag 不应 panic）。
 func TestMarkUnknownFlagIsNoop(t *testing.T) {
 	g := gateFor(t)
-	g.Mark("flag{never_seen}", harness.SubmitResult{Correct: true}, nil)
+	g.Mark("flag{never_seen}", harness.Evaluation{Accepted: true, Progress: true}, nil)
 	if st := g.Stats(); st.Submitted != 0 {
 		t.Errorf("Mark 未知 flag 应为 no-op: %+v", st)
 	}
@@ -227,7 +227,7 @@ func TestNilGateIsSafe(t *testing.T) {
 	if n := len(g.New()); n != 0 {
 		t.Errorf("nil Gate 的 New() 应为空")
 	}
-	g.Mark("flag{x}", harness.SubmitResult{}, nil)
+	g.Mark("flag{x}", harness.Evaluation{}, nil)
 	if st := g.Stats(); st.Observed != 0 {
 		t.Errorf("nil Gate 的 Stats() 应为零值")
 	}
@@ -256,7 +256,7 @@ func TestConcurrentObserveAndHarvest(t *testing.T) {
 				_ = g.New()
 				_ = g.Candidates()
 				_ = g.Stats()
-				g.Mark("flag{concurrent}", harness.SubmitResult{Correct: true}, nil)
+				g.Mark("flag{concurrent}", harness.Evaluation{Accepted: true, Progress: true}, nil)
 			}
 		}(i)
 	}
@@ -307,7 +307,7 @@ func TestSetProvenanceIsMonotonic(t *testing.T) {
 func TestSetProvenanceIgnoresSubmitted(t *testing.T) {
 	g := gateFor(t)
 	g.Observe(harness.Event{Kind: harness.EventText, Text: "flag{submitted_first}"})
-	g.Mark("flag{submitted_first}", harness.SubmitResult{Correct: true}, nil)
+	g.Mark("flag{submitted_first}", harness.Evaluation{Accepted: true, Progress: true}, nil)
 	g.SetProvenance("flag{submitted_first}", ProvenanceObserved)
 	if p := provOf(t, g, "flag{submitted_first}"); p != ProvenanceFabricated {
 		t.Errorf("已提交候选不得改判，got %q", p)
@@ -422,12 +422,12 @@ func TestHarvestSemanticsAcrossThreeToolEnds(t *testing.T) {
 	// 第一轮末
 	for _, c := range g.New() {
 		submits++
-		g.Mark(c.Flag, harness.SubmitResult{Correct: true}, nil)
+		g.Mark(c.Flag, harness.Evaluation{Accepted: true, Progress: true}, nil)
 	}
 	// 第二轮末（同一候选）
 	for _, c := range g.New() {
 		submits++
-		g.Mark(c.Flag, harness.SubmitResult{Correct: true}, nil)
+		g.Mark(c.Flag, harness.Evaluation{Accepted: true, Progress: true}, nil)
 	}
 	if submits != 1 {
 		t.Fatalf("同一 flag 只应提交一次，got %d 次", submits)
@@ -446,7 +446,7 @@ func TestLedgerBlocksResubmission(t *testing.T) {
 		if l.Has(c.Flag) {
 			continue
 		}
-		g.Mark(c.Flag, harness.SubmitResult{Correct: false}, nil)
+		g.Mark(c.Flag, harness.Evaluation{}, nil)
 		l.Record(c.Flag, "platform_rejected")
 	}
 	if !l.Has("flag{wrong_once}") {

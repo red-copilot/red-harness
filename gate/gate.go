@@ -538,12 +538,17 @@ func (g *Gate) NewAll() []harness.Candidate {
 	return append([]harness.Candidate(nil), out...)
 }
 
-// Mark 回填提交结果。
+// Mark 用平台无关的 Evaluation 回填一次提交的判定。
 //
 // 无论对错都置 Submitted —— 「同一答案永不重提」是硬规矩（前身：重提只是白烧
 // 平台配额）。注意 err != nil 时也置 Submitted 是刻意的：网络抖动下重提的
 // 收益远小于风险（重复提交会被平台记幂等，但连续重试会打光配额）。
-func (g *Gate) Mark(flag string, res harness.SubmitResult, err error) {
+//
+// **Duplicate 是从通用 Evaluation 派生的**，不是平台字段的直传：平台确认了
+// （Accepted）但没有让进度前进（!Progress），等价于「这个答案此前已被确认过」。
+// 派生放在这里而不是调用方，是为了让「什么算重复」只有一个定义——两处各写一遍
+// 必然漂移，而漂移的表现是幂等命中被记成新增确认，通过率系统性偏高。
+func (g *Gate) Mark(flag string, res harness.Evaluation, err error) {
 	if g == nil {
 		return
 	}
@@ -558,6 +563,7 @@ func (g *Gate) Mark(flag string, res harness.SubmitResult, err error) {
 	}
 	c.Submitted = true
 	g.stats.Submitted++
+	duplicate := res.Accepted && !res.Progress
 	switch {
 	case err != nil:
 		// 传输/平台错误：记在 SubmitError，**不动 RejectReason**——族别归因
@@ -565,15 +571,21 @@ func (g *Gate) Mark(flag string, res harness.SubmitResult, err error) {
 		// 合并会永久丢掉前一个答案（这是根包契约把 Reject 拆成
 		// RejectReason/SubmitError 两个字段的原因）。
 		c.SubmitError = err.Error()
-	case res.Duplicate:
+	case duplicate:
 		c.Duplicate = true
 		c.Correct = true
 		g.stats.Correct++
-	case res.Correct:
+	case res.Accepted:
 		c.Correct = true
 		g.stats.Correct++
 	default:
+		// 判错的说明用平台原样返回的文本（已被 Scenario 折进 Message 的
+		// 安全子集）；为空时退回一个固定标识，不留空串——空串与「没有判错」
+		// 同形，报告会把一次判错读成成功。
 		c.SubmitError = "platform_rejected"
+		if res.Message != "" {
+			c.SubmitError = res.Message
+		}
 		g.stats.Rejected++
 	}
 }

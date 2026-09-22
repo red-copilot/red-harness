@@ -745,10 +745,10 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		used.MaxCostUSD = stats.CostUSD
 		planner.Settle(it, res)
 		progressed := false
-		candidates := gate.New()
-		if v04Gate, ok := gate.(interface{ NewAll() []Candidate }); ok {
-			candidates = v04Gate.NewAll()
-		}
+		// NewAll 是 v0.4 的可提交集合（observed + derived）。它现在是接口方法，
+		// 不再靠运行时断言取用——断言失败会静默回落到 observed-only，表现为
+		// 「推导族的正确答案再也提交不出去」而所有测试全绿。
+		candidates := gate.NewAll()
 		for _, c := range candidates {
 			if c.Provenance == ProvenanceFabricated || !spec.Submit {
 				continue
@@ -757,7 +757,7 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 			if evalErr != nil {
 				// 平台写超时后，总进度不足以证明这一条候选的状态。记录本次
 				// 提交，读取权威总进度，然后以不确定终态结束本题，禁止盲目重试。
-				gate.Mark(c.Flag, SubmitResult{}, evalErr)
+				gate.Mark(c.Flag, Evaluation{}, evalErr)
 				if obj, reconcileErr := h.scenario.Reconcile(ctx, ch); reconcileErr == nil {
 					cr.Outcome.ProgressConfirmed, cr.Outcome.ProgressTotal = obj.Got, obj.Want
 				}
@@ -766,7 +766,9 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 				cr.EndedAt = h.now()
 				return cr, Ef(KindPlatform, "harness.evaluate", "提交结果不确定", evalErr)
 			}
-			gate.Mark(c.Flag, SubmitResult{Correct: eval.Accepted, Awarded: eval.Score, Duplicate: eval.Accepted && !eval.Progress, Message: eval.Message}, nil)
+			// 判定原样交给 gate：把 Evaluation 映射成账本字段（含 Duplicate 的
+			// 派生）是 gate 的职责，放在这里等于让每个调用方各抄一份映射。
+			gate.Mark(c.Flag, eval, nil)
 			if eval.Progress {
 				progressed = true
 			}
