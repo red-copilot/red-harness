@@ -188,11 +188,16 @@ func (d *Docker) Exec(ctx context.Context, h harness.ExecHandle, cmd []string, o
 
 	argv := execArgv(h, cmd, opts, p, d.cfg)
 	start := time.Now()
-	out, err := d.run(runCtx, opts.Stdin, argv[1:]...)
+	// ⚠️ **必须用分开返回 stdout/stderr 的那个变体**：容器内命令的 stderr 是
+	// 排障与报告的第一手材料（「为什么写 / 失败」只有 stderr 说得清），而
+	// `res.Stderr = stderrOf(ee)` 这条路**恒为空**——只要显式设过 cmd.Stderr，
+	// Go 就不会再填 ExitError.Stderr。之前这里拿到的永远是空串。
+	out, errOut, err := runCmdStdinSplit(runCtx, d.cfg.Binary, opts.Stdin, argv[1:]...)
 	elapsed := time.Since(start)
 
 	res := harness.ExecResult{
 		Stdout:   out,
+		Stderr:   errOut,
 		Duration: elapsed,
 	}
 	if err == nil {
@@ -208,8 +213,8 @@ func (d *Docker) Exec(ctx context.Context, h harness.ExecHandle, cmd []string, o
 	var ee *exec.ExitError
 	if errors.As(err, &ee) && runCtx.Err() == nil {
 		// 容器内命令自己退出的码：docker exec 透传的退出码就是它。
+		// stderr 已经在 res 里了（见上面的 split 变体），这里不再赋值。
 		res.ExitCode = ee.ExitCode()
-		res.Stderr = stderrOf(ee)
 		return res, nil
 	}
 	if runCtx.Err() != nil && ctx.Err() == nil {
@@ -364,6 +369,29 @@ func runCmd(ctx context.Context, bin string, args ...string) (string, error) {
 }
 
 func runCmdStdin(ctx context.Context, bin string, stdin io.Reader, args ...string) (string, error) {
+	out, errOut, err := runCmdStdinSplit(ctx, bin, stdin, args...)
+	if err != nil {
+		msg := strings.TrimSpace(errOut)
+		if msg == "" {
+			msg = err.Error()
+		}
+		return out, fmt.Errorf("%w: %s", err, msg)
+	}
+	return out, nil
+}
+
+// runCmdStdinSplit 与 runCmdStdin 相同，但把 stdout 与 stderr **分开**返回。
+//
+// 为什么必须有这个变体：`Exec` 要把容器内命令的 stderr 原样交给调用方——写只读
+// 文件系统为什么失败、工具为什么报错，只有 stderr 说得清。而 `runCmdStdin` 把它
+// 折进了 error 的文本里，且只在**失败**路径上；成功路径上那条 stderr 会被直接
+// 丢掉（例如工具退出 0 但打了警告）。折进 error 还有个更硬的问题：调用方要拿到
+// 它就得去解析错误字符串，而 errors.go 明令禁止按消息文本做判断。
+//
+// 也**不要**改用 `ExitError.Stderr`：它只在走 `cmd.Output()` 时才会被填充，而这里
+// 显式设了 cmd.Stderr（为了与 stdout 分开），于是它恒为 nil——那正是本函数要修的
+// 那个缺陷。
+func runCmdStdinSplit(ctx context.Context, bin string, stdin io.Reader, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -371,15 +399,11 @@ func runCmdStdin(ctx context.Context, bin string, stdin io.Reader, args ...strin
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}
+	// 环境变量刻意**不继承**：docker CLI 会读 DOCKER_HOST / DOCKER_CONFIG /
+	// DOCKER_CONTEXT，继承会让「本机 Docker」的语义随调用方的 shell 变化而变。
 	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return stdout.String(), fmt.Errorf("%w: %s", err, msg)
-	}
-	return stdout.String(), nil
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
 }
 
 func wrapOut(err error, out string) error {
@@ -390,26 +414,38 @@ func wrapOut(err error, out string) error {
 	return fmt.Errorf("%w: %s", err, out)
 }
 
-func stderrOf(ee *exec.ExitError) string {
-	if ee == nil {
-		return ""
-	}
-	return string(ee.Stderr)
-}
-
 // killInContainer 在超时路径上补一刀，杀掉容器里可能残留的进程。
 //
 // 为什么需要它：`docker exec` 被 ctx 杀掉时，容器内那条命令**不会**跟着死——
 // 它会变成孤儿继续跑（`--init` 只保证它被收割，不保证它被杀）。残留的 nmap /
 // ffuf 会在下一轮与新的命令抢 CPU 与网络，让「这一轮为什么慢」变得无法解释。
+//
+// ⚠️ **PID 1 必须排除。** 这里曾经是 `pkill -f -- <cmd[0]>`，只按**第一个词**匹配
+// 命令行：一条 `sleep 60` 超时后它会执行 `pkill -f sleep`，而容器的 PID 1 正是
+// `sleep infinity`（见 spec.go 的主进程命令）——于是被杀掉的不是那条残留命令，
+// 而是容器本身，后续所有 Exec 全部失败。这不是理论风险：集成用例
+// `TestIntegrationWallClockTimeout` 就是被它咬住的。
+//
+// 所以改成两步且两条判据都收紧：
+//   - 匹配**整条命令行**（不只是第一个词），`sleep 60` 不会再命中 `sleep infinity`；
+//   - 逐个 PID 判断，显式跳过 PID 1（容器主进程）与自身（`sh -c` 的 argv 里也带着
+//     那个待匹配的字符串，不排除就会把自己杀掉，循环提前中断）。
+//
+// 命令用 sh -c 传参而不是拼字符串：待匹配的行是**工具命令**（可能含引号、分号、
+// 重定向），拼进脚本等于把一条工具命令当成 shell 代码执行。
 func (d *Docker) killInContainer(containerID string, cmd []string) {
 	if containerID == "" || len(cmd) == 0 {
 		return
 	}
-	// 用 pkill -f 匹配命令行。失败无所谓（进程可能已经退了），所以忽略错误。
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _ = d.run(ctx, nil, "exec", containerID, "pkill", "-f", "--", cmd[0])
+	const script = `for p in $(pgrep -f -- "$1"); do
+  [ "$p" = 1 ] && continue
+  [ "$p" = "$$" ] && continue
+  kill -9 "$p" 2>/dev/null
+done`
+	// 失败无所谓（进程可能已经退了），所以忽略错误。
+	_, _ = d.run(ctx, nil, "exec", containerID, "sh", "-c", script, "sh", strings.Join(cmd, " "))
 }
 
 func (d *Docker) release(runID harness.RunID) {
