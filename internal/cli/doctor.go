@@ -34,6 +34,24 @@ func (a *app) doctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	// json 输出给机器读（CI 门禁），默认的人读格式给终端。
 	jsonOut := fs.Bool("json", false, "以 JSON 打印体检结果")
+	// provider 决定 `provider_credentials` 那一项去查哪个环境变量名（不同 provider
+	// 的 API key 名字不同）。
+	//
+	// ⚠️ **没有它这一项永远不可能通过**：装配层要靠 provider 名字才知道查什么，
+	// 而体检此前只传零值 RunSpec ⇒ 该项恒 FAIL 且是 Fatal ⇒ `doctor` 这条命令
+	// **永远非零退出**。一条永远不过的检查比没有检查更糟：它教会使用者忽略体检
+	// 输出，于是真正该看的那几项也一起被忽略。
+	//
+	// 它**不是**凭据本身：这里只传 provider 的**名字**，值仍只从环境/.env 读，
+	// 且只回答「有没有」、绝不打印值（见 model.go 的 DoctorCheck 注释）。
+	provider := fs.String("provider", "", "要体检凭据的 provider 名（如 opencode-go）")
+	// scenario 决定体检**查哪些项**：platform 侧的检查（VPN 连通、平台 token）
+	// 只在真实场景下存在，而 fake 场景不碰网络。
+	//
+	// ⚠️ 没有它，`doctor` 永远只体检 fake 那一套 ⇒ **平台侧的两项检查从不运行**。
+	// 而 doctor 的文档定位正是「在任何平台写操作之前体检环境」——一个从不检查
+	// VPN 与 token 的预检，恰好漏掉它唯一存在的理由。
+	scenario := fs.String("scenario", "", "要体检的场景（fake / tsecbench）；给 tsecbench 才会查 VPN 与平台 token")
 	help, err := a.parseFlags("doctor", fs, args)
 	if help || err != nil {
 		return err
@@ -46,9 +64,12 @@ func (a *app) doctor(args []string) error {
 	// ⚠️ **不要再注册 `--store`**：它会被解析、然后被丢掉，用户看到 --help 里
 	// 有这个 flag 就会以为体检是针对某个 store 做的。
 	//
-	// 第二个参数（RunSpec）传零值：体检与本次运行的配置无关，而 spec 一旦参与
-	// 装配就会被写进公开面。装配层不得要求它非空。
-	ports, err := a.ports("", harness.RunSpec{})
+	// spec **只填 provider 与 scenario**：体检其余各项与本次运行的配置无关，
+	// 而 spec 一旦参与装配就会被写进公开面。装配层不得要求别的字段非空。
+	ports, err := a.ports("", harness.RunSpec{
+		Scenario: *scenario,
+		Agent:    harness.AgentSpec{Provider: *provider},
+	})
 	if err != nil {
 		return err
 	}

@@ -1182,3 +1182,45 @@ func TestDeployFromEnvReadsOnlyPath(t *testing.T) {
 		t.Fatalf("空白值应当读成「没给」：%q", got.FakeChallenges)
 	}
 }
+
+// TestDoctorPassesProviderAndScenarioToAssembly 钉住 `doctor` 的两个 flag 真的传到了
+// 装配层。
+//
+// 回归：体检此前只传零值 RunSpec，于是有两处形同虚设：
+//
+//   - `provider_credentials` 要靠 provider 名字才知道查哪个环境变量名 ⇒ 恒 FAIL 且
+//     是 Fatal ⇒ **`doctor` 永远非零退出**。一条永远不过的检查比没有检查更糟：
+//     它教会使用者忽略体检输出，于是真正该看的那几项也一起被忽略。
+//   - 场景名恒为空 ⇒ 装配层按 fake 处理 ⇒ **平台侧的检查（VPN 连通、平台 token）
+//     从不运行**。而 doctor 的文档定位正是「在任何平台写操作之前体检环境」——
+//     一个从不检查 VPN 与 token 的预检，恰好漏掉它唯一存在的理由。
+//
+// 这里断言的是「传进去了」，不是「判对了」——判据在 wire 的 credentialCheck 与
+// 场景装配那边。
+func TestDoctorPassesProviderAndScenarioToAssembly(t *testing.T) {
+	var gotSpec harness.RunSpec
+	a := newTestApp()
+	a.Wire = func(_ string, spec harness.RunSpec, _ DeployOptions) (Ports, error) {
+		gotSpec = spec
+		return Ports{Doctor: &fakeDoctor{rep: harness.DoctorReport{OK: true,
+			Checks: []harness.DoctorCheck{{Name: "docker", OK: true, Fatal: true}}}}}, nil
+	}
+	var out, errb bytes.Buffer
+	a.stdout, a.stderr = &out, &errb
+	if code := dispatch([]string{"doctor", "--provider", "opencode-go", "--scenario", "tsecbench"}, *a); code != exitOK {
+		t.Fatalf("doctor = %d，期望 0（stderr=%q）", code, errb.String())
+	}
+	if gotSpec.Agent.Provider != "opencode-go" {
+		t.Errorf("装配层收到的 provider = %q，期望 opencode-go（不给它这项体检必然 FAIL）",
+			gotSpec.Agent.Provider)
+	}
+	if gotSpec.Scenario != "tsecbench" {
+		t.Errorf("装配层收到的 scenario = %q，期望 tsecbench（为空时按 fake 处理，平台侧检查不会运行）",
+			gotSpec.Scenario)
+	}
+	// provider 的名字不是凭据，但 spec 会进公开面：不能因为多加这两个 flag 就把
+	// 别的东西（模型、目标、预算）也顺带塞进去。
+	if gotSpec.Agent.Model != "" || len(gotSpec.Targets) != 0 {
+		t.Errorf("doctor 只该传 provider 与 scenario，实际传了 %+v / %+v", gotSpec.Agent, gotSpec.Targets)
+	}
+}
