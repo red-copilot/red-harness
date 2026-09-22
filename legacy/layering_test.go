@@ -45,20 +45,22 @@ var sharedLeaves = map[string]bool{"answer": true, "legacy": true}
 
 // assemblyPkgs 是**允许**「同时 import ≥2 个实现包」的那一个装配点。
 //
-// 为什么是集合而不是一个字面量：N0.1 把装配实现从 `internal/wire` 搬到了
-// `local/`（搬家的理由见 `local/wire.go` 的包文档：Go 的 internal 可见性规则
-// 让 `internal/wire` 只能被本模块 import，于是仓库内的示例证明不了「外部可用」），
-// 而 `internal/wire` 作为薄转发层还要留一轮迁移窗口。于是「装配点在哪」在迁移
-// 期间有两个合法取值——但这条断言要钉住的从来不是某个路径字符串，而是
-// **「装配点只有一个」**：多一个就意味着「谁把 X 交给 Y」这件事有两个地方会做，
-// 而两个地方迟早会不一致。
+// 保留成集合而不是一个字面量，是因为它曾经有两个合法取值：N0.1 把装配实现从
+// `internal/wire` 搬到了 `local/`（搬家的理由见 `local/wire.go` 的包文档：Go 的
+// internal 可见性规则让 `internal/wire` 只能被本模块 import，于是仓库内的示例
+// 证明不了「外部可用」），而 `internal/wire` 作为薄转发层留了一轮迁移窗口。
 //
-// ⚠️ 两个名字都**不**属于 implPkgs，也**不**属于 sharedLeaves：前者会让
+// ⚠️ **那个窗口已经关了**（N0.1 的 CLI 侧在 `ed6f7af` 落地：`cli.Main` 收显式的
+// 装配函数参数，`cmd/red-harness/main.go` 改 import `local`，包级 `SetWire` 删除）。
+// 于是 `internal/wire` 现在**没有任何 import 方**，集合收紧回单个 `local`。
+// 这条断言要钉住的从来不是某个路径字符串，而是**「装配点只有一个」**：多一个就
+// 意味着「谁把 X 交给 Y」这件事有两个地方会做，而两个地方迟早会不一致。
+//
+// ⚠️ 它**不**属于 implPkgs，也**不**属于 sharedLeaves：前者会让
 // `TestLayeringImplementationPackagesAreDisjoint` 把装配点自己的 import 当成
 // 违规（放行它正是本条断言的内容），后者会让「没有实现包 import 它」这件事
-// 变成一条没人检查的假设。迁移窗口结束、`internal/wire` 删掉之后，这里应当
-// 收紧回单个 `local`（那是一次**收紧**，不是等价改写）。
-var assemblyPkgs = map[string]bool{"local": true, "internal/wire": true}
+// 变成一条没人检查的假设。
+var assemblyPkgs = map[string]bool{"local": true}
 
 // pkgImports 扫描 moduleRoot 下所有包的生产代码（跳过 _test.go），返回
 // 「包相对路径 → 它 import 的本模块包路径集合」。
@@ -163,7 +165,10 @@ func TestLayeringImplementationPackagesAreDisjoint(t *testing.T) {
 	}
 }
 
-func TestLayeringOnlyWireAssemblesMultipleImplPackages(t *testing.T) {
+// 名字里的 `OnlyLocal` 是**订正过的**：它曾经叫 `…OnlyWire…`，而装配点早已不是
+// `internal/wire`。一个断言「装配点只有一个」的测试顶着旧装配点的名字，会让读的
+// 人以为装配还在那个包——而那正好是这条断言要防的「两处会漂移」的认知形态。
+func TestLayeringOnlyLocalAssemblesMultipleImplPackages(t *testing.T) {
 	graph := pkgImports(t, "..")
 	var multi []string
 	for from, imps := range graph {
@@ -181,6 +186,6 @@ func TestLayeringOnlyWireAssemblesMultipleImplPackages(t *testing.T) {
 	// **恰好一个**：不是「至少一个」，也不是「都在白名单里就行」。两个装配点
 	// 意味着同一份接线有两份实现，而它们只会在某次运行的行为差异里被发现。
 	if len(multi) != 1 || !assemblyPkgs[multi[0]] {
-		t.Fatalf("同时 import ≥2 个实现包的包 = %v，期望恰好只有 local 或 internal/wire 中的一个", multi)
+		t.Fatalf("同时 import ≥2 个实现包的包 = %v，期望恰好只有 local 一个（装配点只有一个）", multi)
 	}
 }

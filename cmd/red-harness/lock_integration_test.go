@@ -139,15 +139,26 @@ func TestIntegrationTwoStoresContendForTheRunLock(t *testing.T) {
 	p2 := startCLI(t, buildDir, bin, env,
 		"run", "--scenario", "fake", "--store", storeB, "--image", image, "--lock", lockPath)
 
-	// 先看它有没有**动手**：真抢到锁的话它会在几秒内起第二个 sandbox（同一个夹具、
-	// 同一个题目，容器标签一模一样，所以集合的差异就是最直接的证据）。
+	// 先看它有没有**动手**：集合的任何变化都是最直接的证据（同一个夹具、同一个题目，
+	// 容器标签一模一样）。
+	//
+	// ⚠️ **变化有两个方向，都要报**（实测两种都出现过，见本函数末尾那段）：
+	//   - 集合**变大**：第二个进程起了自己的 sandbox（它抢到了锁）；
+	//   - 集合**变空**：第二个进程在启动时把第一个进程正在跑的容器**回收掉了**。
+	// 后者是 executor 的扫描修好之后才出现的形态，而它比前者严重得多——那条路径是
+	// `docker rm --force`。只报「多了一个」会让这种红看起来像「起了两个容器」，
+	// 而实际发生的是「一个正在跑的进攻性工具进程被连容器删掉了」。
 	// 这段轮询也是非空性实验的落点：把第二个进程的锁路径改掉，它就会在这里红。
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if now := containersForChallenge(t, ctx, cid); len(now) != len(before) || !sameObjects(before, now) {
 			p2.kill()
-			t.Fatalf("第二个进程进到了起 sandbox 那一步（它抢到了锁或根本没抢）："+
-				"容器集合从 %v 变成 %v（stderr=%q）", before, now, p2.stderr())
+			what := "起了自己的 sandbox（它抢到了锁或根本没抢）"
+			if len(now) < len(before) {
+				what = "**删掉了**第一个进程正在跑的容器（它把对方当成了崩溃遗留）"
+			}
+			t.Fatalf("第二个进程动手了——它%s：容器集合从 %v 变成 %v（stderr=%q）",
+				what, before, now, p2.stderr())
 		}
 		if p2.exited() {
 			break
@@ -200,19 +211,30 @@ func TestIntegrationTwoStoresContendForTheRunLock(t *testing.T) {
 
 	// ── 唯一理由：第一个进程的资源**一个不少、原样在跑** ──
 	//
-	// ⚠️ 读这条断言时要清楚它的**边界**（否则会把它当成它证明不了的东西）：本机
-	// （Docker 29.8）上 `ReclaimStale` 目前是空转——`staleScanArgv` 取
-	// `{{json .Labels}}`，而 `ps` / `network ls` 的模板上下文里 Labels 是**逗号拼接
-	// 的字符串**（`"k=v,k=v"`），`parseScan` 却按 JSON **对象**解析，于是每个对象都
-	// 落进 Pending(unparsable)、一个都不删。这一点由非空性实验佐证：破坏锁路径之后
-	// 第二个进程真的进去了、起了自己的容器，而第一个进程的容器照样活着。
+	// 这条断言是**真正的防线**，而且它管的方向比上面几条都要紧。
 	//
-	// 所以「资源还在」**单独**不足以证明「锁保护了它们」。这条断言的意义在**组合**
-	// 里：上面几条已经钉住第二个进程根本没走到 Prepare/Reclaim（非 0 退出、配置类
-	// 的锁错误、stdout 为空、没起第二个容器），这一条则钉住「它没有动别人的东西」
-	// 这个方向没有被反证。等 executor 的扫描格式修好（那是 executor 的文件），这里
-	// 会自动变成真正的防线，而非空性实验的形态也会变：破坏锁路径后，红从「容器多了
-	// 一个」变成「第一个的容器被删了」。
+	// ⚠️ 写这条用例时（基线 `d5497f4`）它还不是：那时 `ReclaimStale` 在生产路径上
+	// 是**空转**的——`staleScanArgv` 取 `{{json .Labels}}`，而 `ps` / `network ls`
+	// 的模板上下文里 Labels 是逗号拼接的**字符串**（`"k=v,k=v"`），解析却按 JSON
+	// **对象**走，于是每个对象都落进 Pending(unparsable)、一个都不删。扫描格式在
+	// `3d3d299` 修好之后，这条断言的前提才成立。
+	//
+	// **失效形态随之变了，而且是变严重**（两次非空性实验实测，破坏方式是给第二个
+	// 进程换一条 `--lock` 路径）：
+	//   - 修好之前：容器集合 1 → 2。第二个进程起了自己的 sandbox，第一个的照样活着。
+	//     讨厌，但**不破坏任何东西**——因为那时回收根本删不掉东西。
+	//   - 修好之后：容器集合 1 → **空**。第二个进程在启动时按「owner 匹配 且 runID
+	//     不在本次 live 集合里」判定，把第一个进程**正在跑**的容器 `docker rm --force`
+	//     掉了。这正是 N0.2 那一类事故：两个 run 互相删资源。
+	//
+	// 所以「资源还在」现在**确实**证明了锁保护了它们：第二个进程已经拿到了它的
+	// live 集合（只装它自己的 runID），如果锁没拦住它，它会立刻把别人的资源收掉。
+	// 上面几条钉住「它没走到 Prepare/Reclaim」，这一条钉住「即使走到了，别人的东西
+	// 也没有被它动」——两条合起来才排除掉「锁只是让它晚了几秒失败」这种解释。
+	//
+	// ⚠️ 这条断言**不能**单独读：它在本机以外的 owner 域（别的用户、别的 daemon）上
+	// 不成立——跨用户互斥是明令不做的（见 `local/lock.go`），那时两个进程的 owner
+	// 不同，回收本来就够不到对方的资源。
 	after := containersForChallenge(t, ctx, cid)
 	if !sameObjects(before, after) {
 		t.Fatalf("第二个进程动了第一个进程的容器：before=%v after=%v", before, after)
