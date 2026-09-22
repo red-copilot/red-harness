@@ -28,7 +28,10 @@ v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`�
 **实测状态（2026-09-22，本机 Docker 29.8 / root / runner 镜像在位）**：
 `go test -tags integration ./cmd/red-harness/... -count=1` 14.3s 全绿，覆盖了上面第 1、3 条与第 2 条里的**生命周期**部分——同容器身份（stub pi 与其子工具回报同一个 hostname，且等于 `Probe` 的容器 ID）、provider key 不进任何一次 docker argv、正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
 
-**尚未覆盖**：只读 rootfs、有界 tmpfs、非 root、CPU/内存/PID/墙钟限制这四项**性质**本身。它们在 `executor` 侧是按配置下发的，但集成用例只是「跑通了」，没有对运行中的容器逐项取证。在这四项补齐之前，M1 标为「出口门已通过、交付范围部分覆盖」。
+**尚未覆盖**：只读 rootfs、有界 tmpfs、非 root、CPU/内存/PID/墙钟限制这四项**性质**。
+它们在 `executor` 侧是按配置下发的，但**本阶段新增的**集成用例只证明「跑通了」，没有对
+运行中的容器逐项取证；而旧 `Executor` 端口里那两条**试图**取证的用例目前是失败的
+（见 M2 的实测状态表）。所以在这四项补齐之前，M1 标为「出口门已通过、交付范围部分覆盖」。
 
 ## M2：上线前隔离与凭据门
 
@@ -36,6 +39,25 @@ v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`�
 - `SandboxSession.Probe` 必须从运行所用镜像取得 `ProbeResult.PiVersion` 并核对支持区间；空值或无法核验时拒绝进入真实平台运行。镜像 tag、digest 和实测版本应可追溯。
 - 从 `Scenario.Prepare` 的目标生成 IP:port 白名单，测试目标可达、非目标、宿主监听端口及公网默认不可达，provider 仅经白名单代理可达。明确记录同一 Docker bridge 内流量不经过当前 iptables 规则的边界，避免将其误报为已隔离。
 - 任一凭据、版本或隔离检查失败，即停止在离线阶段，不执行授权平台冒烟。
+
+**实测状态（2026-09-22）**：前两条已落地并实测——provider key 走 0600 的
+`--env-file` 而非 `-e KEY=value`（argv canary 有集成回归，实测通过），`Probe` 在运行所用
+镜像里跑 `pi --version` 并回报 `PiVersion`，空值拒绝启动。
+
+**⚠️ 第三条「隔离测试全绿」尚未满足**：`go test -tags integration ./executor/... -count=1`
+当前有 **2 个失败**，且都是**先于本轮改动**就存在的（在改动前的 `8d40807` 上逐条复现，
+非本轮引入）。两者都在**旧 `Executor` 端口**（`executor/docker.go`），v0.4 的同步入口
+不走这条路径（它用 `SandboxSession.Launch` + `ManagedProcess`），但 M2 的出口门写着
+「隔离测试全绿」，所以这里如实记为未通过：
+
+| 用例 | 现象 | 已定位的原因 |
+|---|---|---|
+| `TestIntegrationReadOnlyRootfs` | 容器内写 `/` 确实失败（退出码非 0），但 `ExecResult.Stderr` 恒为空，断言「失败原因含 read-only」永远不成立 | `docker.go:212` 用 `stderrOf(ee)` 取 stderr，而 `runCmdStdin` 把 stderr 收进了局部 buffer（`cmd.Stderr = &stderr`）——Go 只在走 `Output()` 时才填 `ExitError.Stderr`，所以它恒为 nil。真正的消息在返回的 error 里，但 `Exec` 在「命令非零退出」这条分支上把它丢了 |
+| `TestIntegrationWallClockTimeout` | `sleep 60` 超时后容器**没了**，后续 `echo alive` 失败（退出码 1、无输出） | `docker.go:412` 的超时补刀是 `pkill -f -- <cmd[0]>`，对本例即 `pkill -f sleep`——它同时匹配容器的 PID 1（`sleep infinity`），把容器本身杀掉。这正是历史记录里那条「pkill-kills-exec-session」猜想 |
+
+容器与 `docker exec` 本身在这个环境里是正常的（用同样的
+`--read-only --user 65534:65534 -v <host>:/work --workdir /work` 手工复现，两条命令的
+输出与退出码都符合预期）。所以这两个失败是**旧端口自身的缺陷**，不是环境问题。
 
 ## M3：运行可靠性
 
