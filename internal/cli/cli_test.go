@@ -582,6 +582,109 @@ func TestRunNeverPrintsCandidatePlaintext(t *testing.T) {
 	}
 }
 
+// TestRunSummaryPrintsTerminalState 钉住摘要行的**运行终态**。
+//
+// 为什么必须打它：`Reason` 与 `State` 回答的是两个不同的问题（见 printRunResult
+// 的注释）。少了终态，操作员在终端上分不出「正常跑完但一道题都没解出来」与
+// 「跑到一半被取消」——两者的 Reason 可以长得一模一样，而下一步动作正好相反
+// （前者要调题目或阈值，后者只要重跑一趟）。
+func TestRunSummaryPrintsTerminalState(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		state harness.RunState
+		want  string
+	}{
+		{"正常结束", harness.RunFinished, "正常结束"},
+		{"失败", harness.RunFailed, "失败"},
+		{"被取消", harness.RunCancelled, "被取消"},
+		// 空串是「未记录」，不是「不认识的值」：混成同一个输出就没法区分
+		// 「这份结果没带终态」与「根包加了 CLI 还不认识的终态」。
+		{"未记录", "", "未记录"},
+		// 未识别的值原样打印——与 reasonText 同一条约定（RunState 是公开 API，
+		// 旧值不改、新值可能加，回显原始串比「未知」更有用）。
+		{"未知值原样打印", harness.RunState("quarantined"), "quarantined"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := newTestApp()
+			a.Wire = wirePorts(Ports{Harness: &fakeRunner{res: harness.RunResult{
+				RunID: "r-1", Scenario: "fake",
+				Reason: harness.ReasonNoProgress, State: c.state,
+				Challenges: []harness.ChallengeResult{{
+					Challenge: harness.Challenge{Code: "demo-1"},
+					Outcome:   harness.OutcomeView{Reason: harness.ReasonNoIntent},
+				}},
+			}}})
+			var out, errb bytes.Buffer
+			a.stdout, a.stderr = &out, &errb
+
+			dispatch([]string{"run", "--store", "/tmp/rh"}, *a)
+			got := out.String()
+			if !strings.Contains(got, "终态 "+c.want) {
+				t.Fatalf("摘要未打出终态 %q：%q", c.want, got)
+			}
+			// 终态这一栏**永远**不得退化成「未知」：那正是 stateText 存在的理由。
+			if strings.Contains(got, "终态 未知") {
+				t.Errorf("终态被打成了「未知」，未识别的值应原样打印：%q", got)
+			}
+		})
+	}
+}
+
+// TestRunChallengeLinePrintsBranchesAbandonedOnlyWhenNonZero 钉住换支列的
+// **条件打印**，两个方向都要钉：
+//
+//   - 为 0 时**不许出现**：常规运行里它恒为 0，无条件加一列会让每行都变宽，
+//     也会悄悄改掉既有摘要的形状（既有测试正是靠形状在钉别的东西）；
+//   - 非 0 时**必须出现**：一次 `no_intent` 收场时，「方向都做完了」与
+//     「编排层把几个方向判成停滞扔掉了」指向完全不同的改法，这一列是唯一的
+//     现场证据（见 model.go 的 BranchesAbandoned 注释）。
+//
+// 打印的仍然只是**计数**，不是候选明文。
+func TestRunChallengeLinePrintsBranchesAbandonedOnlyWhenNonZero(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		abandoned int
+		wantCol   bool
+	}{
+		{"没有换支", 0, false},
+		{"换过支", 3, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := newTestApp()
+			a.Wire = wirePorts(Ports{Harness: &fakeRunner{res: harness.RunResult{
+				RunID: "r-1", Scenario: "fake",
+				Reason: harness.ReasonNoProgress, State: harness.RunFinished,
+				Challenges: []harness.ChallengeResult{{
+					Challenge: harness.Challenge{Code: "demo-1"},
+					Outcome: harness.OutcomeView{
+						Reason: harness.ReasonNoIntent, BranchesAbandoned: c.abandoned,
+						ProgressConfirmed: 1, ProgressTotal: 4, Submitted: 1, Rounds: 3,
+					},
+				}},
+			}}})
+			var out, errb bytes.Buffer
+			a.stdout, a.stderr = &out, &errb
+
+			dispatch([]string{"run", "--store", "/tmp/rh"}, *a)
+			got := out.String()
+			if c.wantCol {
+				if !strings.Contains(got, "换支 3") {
+					t.Fatalf("换支非 0 时必须打出这一列：%q", got)
+				}
+				return
+			}
+			if strings.Contains(got, "换支") {
+				t.Fatalf("换支为 0 时不得出现这一列（常规摘要的形状不能变）：%q", got)
+			}
+			// 逐字钉住常规摘要行：这条断言就是「输出形状不变」这句话本身。
+			const want = "  demo-1\t意图耗尽\t进度 1/4\t确认 1\t重复 0\t判错 0\t轮次 3\t耗时 0s\n"
+			if !strings.Contains(got, want) {
+				t.Errorf("常规摘要行变了：\n得到 %q\n期望含 %q", got, want)
+			}
+		})
+	}
+}
+
 // TestListOnlyCompletedByDefault 钉住 list 的默认过滤：默认只列**已完成**的运行，
 // 要看得显式 --all。
 //

@@ -250,22 +250,37 @@ func runSolved(res harness.RunResult) bool {
 // ⚠️ **只打印公开字段**：`OutcomeView.Flags` 是候选明文，它虽然在返回值里
 // （契约允许），但打印出来会进终端 scrollback、工单与 CI 日志。所以这里刻意
 // 不碰它，只打计数与指纹级别的信息。
+//
+// 摘要行同时带 `Reason` 与 `State`，因为两者回答的是**不同的问题**：
+// `Reason` 是「为什么停的」（超时 / 预算耗尽 / 无进展……），`State` 是
+// 「运行怎么结束的」（finished / failed / cancelled）。少了 State，操作员在
+// 终端上分不出「正常跑完但一道题没解出来」与「跑到一半被 Ctrl-C 掉」——
+// 而这两者的下一步动作完全相反（前者要调题目/阈值，后者只要重跑）。
 func printRunResult(w io.Writer, res harness.RunResult) {
 	if res.RunID == "" {
 		// 装配/取锁阶段就失败了：没有任何可打印的运行信息。
 		return
 	}
-	fmt.Fprintf(w, "run %s：%s（场景 %s）\n", res.RunID, reasonText(res), res.Scenario)
+	fmt.Fprintf(w, "run %s：%s（场景 %s，终态 %s）\n",
+		res.RunID, reasonText(res), res.Scenario, stateText(res.State))
 	for _, c := range res.Challenges {
 		// ⚠️ 这里的字段全部是**计数**：`Submitted` 是去重后的确认数，
 		// `ProgressConfirmed/Total` 是平台权威进度。**绝不**打印
 		// `Outcome.Flags` / `Outcome.Candidates`——它们是候选明文，会进
 		// 终端 scrollback、工单与 CI 日志。
-		fmt.Fprintf(w, "  %s\t%s\t进度 %d/%d\t确认 %d\t重复 %d\t判错 %d\t轮次 %d\t耗时 %s\n",
+		fmt.Fprintf(w, "  %s\t%s\t进度 %d/%d\t确认 %d\t重复 %d\t判错 %d\t轮次 %d\t耗时 %s",
 			c.Challenge.Code, outcomeReasonText(c.Outcome.Reason),
 			c.Outcome.ProgressConfirmed, c.Outcome.ProgressTotal,
 			c.Outcome.Submitted, c.Outcome.Duplicates, c.Outcome.Rejected,
 			c.Outcome.Rounds, c.Outcome.Duration().Round(time.Second))
+		if c.Outcome.BranchesAbandoned > 0 {
+			// **只在非 0 时加这一列**：常规运行里它恒为 0，无条件打出来只会让
+			// 摘要变宽；而一旦非 0，它就是解释「为什么停」的关键——题目做不动
+			// 到底是方向都做完了，还是编排层把几个方向判成停滞扔掉了，改法
+			// 完全不同（见 model.go 的 BranchesAbandoned 注释）。
+			fmt.Fprintf(w, "\t换支 %d", c.Outcome.BranchesAbandoned)
+		}
+		fmt.Fprintln(w)
 	}
 	if res.Err != "" {
 		// res.Err 是根包折叠过的分类串（`%T`），不含响应体/路径/凭据。
@@ -306,6 +321,43 @@ func reasonText(res harness.RunResult) string {
 		return "未知（无 Reason）"
 	}
 	return res.Reason
+}
+
+// stateText 把运行终态翻成中文。
+//
+// 未识别的值**原样打印**，与 reasonText 同一条理由：`RunState` 是公开 API
+// （旧值永不改动、新值可能增加），把原始串打出来比打「未知」更有用——后者会
+// 让一次「根包新增终态」的升级看起来像 CLI 出了 bug。
+//
+// 空串单独处理：它表示**未记录**（例如由装配层直接构造、或从 v0.3 的旧数据
+// 读回来的结果），与「记录了一个我们不认识的值」是两回事。
+//
+// 这里把根包 `RunState` 的**全部**常量都映射了，尽管 `RunResult.State` 只会
+// 是终态那三个（finished / failed / cancelled）：映射表是这个类型的完整翻译，
+// 留几个洞反而会让下一次改动分不清「故意不映射」与「忘了」。
+func stateText(s harness.RunState) string {
+	switch s {
+	case harness.RunFinished:
+		return "正常结束"
+	case harness.RunFailed:
+		return "失败"
+	case harness.RunCancelled:
+		return "被取消"
+	case harness.RunCompleted:
+		// v0.3 的旧终态值：新运行不再产生它，但旧快照的读取路径仍在。
+		return "已完成"
+	case harness.RunCreated:
+		return "已创建"
+	case harness.RunPreparing:
+		return "准备中"
+	case harness.RunRunning:
+		return "运行中"
+	case harness.RunPaused:
+		return "已暂停"
+	case "":
+		return "未记录"
+	}
+	return string(s)
 }
 
 // outcomeReasonText 把题级 Reason 翻成中文（只覆盖题级会出现的几个）。
