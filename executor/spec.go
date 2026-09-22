@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path"
 	"regexp"
 	"sort"
@@ -23,11 +24,37 @@ import (
 // ── 常量 ──
 
 const (
-	// LabelRun 是**回收的唯一依据**（PLAN.md:54）。容器、网络、iptables 规则
+	// LabelRun 是**回收判据之一**（PLAN.md:54）。容器、网络、iptables 规则
 	// 全部带它，Reclaim 按它精确匹配，宿主重启后的孤儿扫描也按它走。
+	//
+	// ⚠️ 它**不再是唯一依据**：判据是 **run + owner 两条**（owner 见 LabelOwner）。
+	// 只按 run 删的失效模式是一个已核实的真实事故——两个用不同 `--store` 的进程
+	// 各自把对方正在用的资源认成孤儿，然后 `docker rm --force` 掉它们。run 标签
+	// 只说「这是哪次运行」，不回答「这次运行是不是我的」。
 	//
 	// 为什么不用容器名做依据：名字可以被复用/抢注，label 是 run 身份的直接投影。
 	LabelRun = "red-harness.run"
+	// LabelOwner 标识资源属于**哪个部署主体**（见 harness.OwnerID）。
+	//
+	// 宿主级的 Docker 与 netfilter 是全局的，而 run 标签只在一个部署内部唯一：
+	// 两台机器上的两个进程可以各自开一个 run-1。owner 是「这条资源是不是我的」
+	// 的判据，缺了它，「只删自己的」就退化成「谁的都删」。
+	//
+	// ⚠️ 值必须来自 harness.ResolveOwner 的派生结果，**不得**由调用方随便填：
+	// 回收是删除闸门，一个假的 owner 会让两条判据同时失效。缺失 / 为空的资源
+	// 一律**只报告、不删除**（harness.StaleOwnerUnknown）。
+	LabelOwner = "red-harness.owner"
+	// LabelChallenge 把资源关联回**题目**（值是 harness.ChallengeIDFor 的产物）。
+	//
+	// 为什么容器要带而网络不带：网络是 per-run 的（一个 run 一张网），没有题目
+	// 维度；而同一个 run 里可能轮转着多道题，题目归属只有容器这一层才有意义。
+	LabelChallenge = "red-harness.challenge"
+	// LabelAttempt 是题目内部的第几次尝试（值恒为 harness.FirstAttempt）。
+	//
+	// 与 LabelChallenge 同理，只打在容器上。当前它恒为 1——**这不是一个计数器**，
+	// 见 harness.FirstAttempt 的说明。留着它是因为「一题一容器」将来会变成
+	// 「一题多容器」，那时再补标签意味着要把历史资源按缺失处理。
+	LabelAttempt = "red-harness.attempt"
 	// LabelRole 区分同一 run 下的容器角色（v1 只有 runner，留位给后续的
 	// 代理边车或靶场边车）。
 	LabelRole = "red-harness.role"
@@ -84,6 +111,24 @@ type DockerConfig struct {
 	// opencontainers、grpc 一大串依赖拖进来。CLI 的接口是稳定的文本，且
 	// 出问题时人可以直接复制那条命令复现。
 	Binary string
+
+	// Owner 是资源标签 LabelOwner 的值（见 harness.OwnerID）。
+	//
+	// **空 ⇒ normalize 时回落到 harness.ResolveOwner(hostname, uid)**，也就是
+	// 「本机 + 当前 uid」这个部署主体。显式指定它只为一件事：让同一个宿主上的
+	// 两个部署**故意**互相可见。默认回落是有意的——绝大多数调用方根本不该关心
+	// owner 是什么，而它一旦算错，回收就会删掉别人的容器。
+	//
+	// 与 Binary 一样属于**运维配置**，不进 RunSpec 摘要。
+	Owner string
+
+	// Endpoint 是规范化后的 daemon 身份（见 harness.DockerEndpoint）。
+	//
+	// **零值 ⇒ normalize 时回落到 DefaultDockerEndpoint()**（本机
+	// /var/run/docker.sock），于是 `NewDocker(DefaultDockerConfig())` 这条既有
+	// 路径的行为完全不变。它的两个消费者是子进程环境里的 DOCKER_HOST
+	// （见 subprocessEnv）与装配层的锁路径。
+	Endpoint harness.DockerEndpoint
 
 	// RunUser 是容器的 uid:gid。默认 "65534:65534"（nobody:nogroup）。
 	//
@@ -207,6 +252,24 @@ func (c DockerConfig) normalize() (DockerConfig, error) {
 	if c.Binary == "" {
 		c.Binary = "docker"
 	}
+	// 身份（owner / endpoint）在这里补默认值，与上面的标量缺省同一个道理：
+	// 两者都是**删除与互斥判据**的输入，缺一个就等于把判据换成「谁都能删」。
+	//
+	// ⚠️ 这里刻意**不**补 bool 开关（见 DefaultDockerConfig 的注释：零值的 bool
+	// 全是「关掉隔离」，由 normalize 悄悄打开会让「显式关闭」变成不可表达）。
+	// 身份字段没有这个问题：它们的零值不是「关掉判据」而是「还没解析」。
+	if c.Owner == "" {
+		owner, err := harness.ResolveOwner(hostnameOrEmpty(), os.Getuid())
+		if err != nil {
+			return c, err
+		}
+		c.Owner = string(owner)
+	}
+	// DockerEndpoint 的字段全是私有的，所以「零值」只能整体比较。零值不是一个
+	// 合法端点（它的 ID 是 "://"），回落成默认端点是唯一说得通的行为。
+	if c.Endpoint == (harness.DockerEndpoint{}) {
+		c.Endpoint = harness.DefaultDockerEndpoint()
+	}
 	if c.RunUser == "" {
 		c.RunUser = "65534:65534"
 	}
@@ -226,6 +289,20 @@ func (c DockerConfig) normalize() (DockerConfig, error) {
 		c.StopTimeout = defaultStopTimeout
 	}
 	return c, nil
+}
+
+// hostnameOrEmpty 取宿主 hostname；取不到时返回空串，交给 harness.ResolveOwner
+// 按 fail closed 处理（空 hostname ⇒ KindConfig）。
+//
+// 为什么不在这里兜一个假值：归属是删除闸门，一个编造出来的 owner 会让「只删
+// 自己的」静默退化成「谁的都删」——而那种失败的表现是「别人的容器不见了」，
+// 现场完全无法归因。
+func hostnameOrEmpty() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
 }
 
 var userRe = regexp.MustCompile(`^[0-9]+:[0-9]+$`)
@@ -259,6 +336,11 @@ type runPlan struct {
 	RunID   harness.RunID
 	Image   string
 	Network string
+	// Owner 是资源归属（LabelOwner 的值，来自 DockerConfig.Owner）；ChallengeID
+	// 是题目归属（LabelChallenge 的值）。两者都必须进 argv，否则容器在宿主上
+	// 就只剩 run 一条线索——那正是「两个部署互相删对方资源」的成因。
+	Owner       harness.OwnerID
+	ChallengeID harness.ChallengeID
 	// ContainerName 是确定性的容器名。确定性的理由：崩溃恢复时同一 run 重起
 	// 容器，名字必须可预测；而**回收**仍然只按 label（名字只是给人看的）。
 	ContainerName string
@@ -301,6 +383,16 @@ func planRun(spec harness.ExecSpec, cfg DockerConfig) (runPlan, error) {
 		// 没有 RunID 就没有 label，也就没有回收依据：容器会变成永久孤儿。
 		return runPlan{}, harness.Ef(harness.KindConfig, "executor.plan",
 			"ExecSpec.RunID 为空：回收按 label 走，没有 RunID 的容器无法被回收", nil)
+	}
+	// 题目编号在这里就折成 ChallengeID（唯一真源是 harness.ChallengeIDFor）。
+	//
+	// **报错即拒绝起容器**（fail closed），与上面 RunID 为空同一档处理：平台下发的
+	// code 不得成为路径段/标签值，而一个空编号会让 challenge 标签退化成空串——
+	// 那是「有标签但值不可用」，比没有标签更糟（看标签的人会以为归属是已知的）。
+	// 拒绝的代价是这道题起不来；放行的代价是资源归属静默失真，后者无法归因。
+	challengeID, err := harness.ChallengeIDFor(spec.Target.Code)
+	if err != nil {
+		return runPlan{}, err
 	}
 	wd := spec.Workdir
 	if strings.TrimSpace(wd) == "" {
@@ -350,8 +442,13 @@ func planRun(spec harness.ExecSpec, cfg DockerConfig) (runPlan, error) {
 	}
 
 	p := runPlan{
-		RunID:         spec.RunID,
-		Image:         image,
+		RunID: spec.RunID,
+		Image: image,
+		Owner: harness.OwnerID(cfg.Owner),
+		// ChallengeID 与 Owner 一起在这里定下来：两者都只来自「这次运行是谁、在
+		// 解哪道题」，之后不再变（Launch 只覆盖 Command/Env）。把标签值在渲染期
+		// 算好，argv 才是同一份 spec 的确定性函数。
+		ChallengeID:   challengeID,
 		NetworkName:   networkName(spec),
 		ContainerName: containerName(spec),
 		User:          cfg.RunUser,
@@ -485,7 +582,14 @@ func runArgv(p runPlan) []string {
 	argv := []string{
 		"docker", "run", "--detach",
 		"--name", p.ContainerName,
+		// 标签顺序有意固定为 run → owner → challenge → attempt → role：前两条是
+		// **回收判据**，后三条是归属说明。⚠️ `session.go` 的 Launch 会检查
+		// argv[1]=="run" && argv[2]=="--detach" 再切 `docker create`，所以前三个
+		// 元素的位置是契约，不能在 --detach 之前插任何东西。
 		"--label", LabelRun + "=" + string(p.RunID),
+		"--label", LabelOwner + "=" + string(p.Owner),
+		"--label", LabelChallenge + "=" + string(p.ChallengeID),
+		"--label", LabelAttempt + "=" + itoa(int(harness.FirstAttempt)),
 		"--label", LabelRole + "=" + roleRunner,
 	}
 
@@ -661,13 +765,33 @@ func shortHash(s string) string {
 	return hex.EncodeToString(sum[:5])
 }
 
+// unknownOwnerCommentToken 是没有 owner 时占掉指纹那一段的常量。
+//
+// 它不是十六进制，所以**不可能**与任何真实指纹撞上（harness.OwnerID.Fingerprint
+// 只会产出 8 位小写十六进制）。正常路径下它不可达（normalize 保证 owner 已解析），
+// 留着是为了让「配置被绕过」时得到的是一条**归属明确为无主**的注释，而不是
+// `red-harness-run--<runID>` 这种看不出少了什么的串。
+const unknownOwnerCommentToken = "noowner"
+
 // commentFor 返回 iptables 规则的注释（≤256 字符、无引号空白换行）。
-func commentFor(runID harness.RunID) string {
+//
+// 形态是 `<前缀><owner 指纹>-<runID>`。**为什么必须带 owner**：netfilter 表是
+// 宿主全局的，而删除路径（uninstallRulesByRun）是按注释里的子串找规则的——不带
+// owner 的注释让「按注释删规则」无法区分「我的 run-1」与「别人的 run-1」，于是
+// 拆掉对方正在用的默认拒绝规则。用指纹而不是 owner 原值：owner 来自 hostname，
+// 可能很长（iptables 注释上限 256 字符），而同一个身份的第二处截断必然与第一处
+// 漂移（与 harness.OwnerID.Fingerprint 是同一条纪律）。
+func commentFor(owner harness.OwnerID, runID harness.RunID) string {
+	fp := owner.Fingerprint()
+	if fp == "" {
+		fp = unknownOwnerCommentToken
+	}
 	s := sanitizeName(string(runID))
 	if len(s) > 200 {
 		s = s[:200]
 	}
-	return iptablesCommentPrefix + s
+	// 长度核算：16（前缀）+ 8（指纹）+ 1（连字符）+ ≤200 = ≤225 < 256。
+	return iptablesCommentPrefix + fp + "-" + s
 }
 
 // ── 小工具 ──

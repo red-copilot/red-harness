@@ -114,7 +114,11 @@ func buildStubImage(t *testing.T) string {
 	tag := testStubImage()
 
 	// 已经建好就直接复用（重复跑不重复构建，2 核机器上这一步要几十秒）。
-	if out, err := runCmd(context.Background(), "docker", "image", "inspect", tag); err == nil && strings.TrimSpace(out) != "" {
+	// 环境用与执行器同源的那一份（见 Docker.subprocessEnv）：这里是测试自己调
+	// docker，但「连哪个 daemon」的口径不该与生产路径不同，否则一个设了
+	// DOCKER_CONTEXT 的 shell 会让测试检查 A 端点、跑到 B 端点。
+	if out, err := runCmd(context.Background(), "docker",
+		subprocessEnvFor(harness.DefaultDockerEndpoint()), "image", "inspect", tag); err == nil && strings.TrimSpace(out) != "" {
 		return tag
 	}
 
@@ -426,7 +430,9 @@ func assertNoLeftovers(t *testing.T, d *Docker, runID harness.RunID) {
 	if !d.cfg.ManageIptables {
 		return
 	}
-	comment := commentFor(runID)
+	// 注释里带 owner（见 commentFor）：残留检查要按**本部署**的注释查，
+	// 否则两个部署各有一个同名 run 时，这里会把别人的规则报成「我的残留」。
+	comment := commentFor(harness.OwnerID(d.cfg.Owner), runID)
 	for _, chain := range []string{chainForward, chainInput} {
 		out, err := d.iptablesOut(ctx, "-S", chain)
 		if err != nil {

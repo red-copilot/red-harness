@@ -58,6 +58,17 @@ func NewDocker(cfg DockerConfig) (*Docker, error) {
 			return nil, err
 		}
 	}
+	// 只支持本机 daemon：宿主级锁无法跨主机互斥，而**归属判据**里的 owner 也只在
+	// 一台机器上有意义。normalize 已经把零值回落成本机端点，所以这条断言针对的是
+	// 一个显式指定的非本机端点——fail closed，而不是「尽力而为」。
+	//
+	// 为什么放在构造期而不是第一次 Prepare：Sandbox 是公开端口，直接调 SDK 的
+	// 调用方可能手工拼一个 DockerConfig。构造时炸出来的是一条配置错误，等到起
+	// 容器时才炸则是一条执行器故障（现场已经不在手里了）。
+	if !ncfg.Endpoint.IsLocal() {
+		return nil, harness.Ef(harness.KindConfig, "executor.config",
+			"只支持本机 docker daemon（unix socket）：远程 daemon 下宿主级锁与资源归属判据都不成立", nil)
+	}
 	return &Docker{cfg: ncfg, proxies: map[harness.RunID]*providerProxy{}}, nil
 }
 
@@ -194,7 +205,7 @@ func (d *Docker) Exec(ctx context.Context, h harness.ExecHandle, cmd []string, o
 	// 排障与报告的第一手材料（「为什么写 / 失败」只有 stderr 说得清），而
 	// `res.Stderr = stderrOf(ee)` 这条路**恒为空**——只要显式设过 cmd.Stderr，
 	// Go 就不会再填 ExitError.Stderr。之前这里拿到的永远是空串。
-	out, errOut, err := runCmdStdinSplit(runCtx, d.cfg.Binary, opts.Stdin, argv[1:]...)
+	out, errOut, err := runCmdStdinSplit(runCtx, d.cfg.Binary, opts.Stdin, d.subprocessEnv(), argv[1:]...)
 	elapsed := time.Since(start)
 
 	res := harness.ExecResult{
@@ -241,6 +252,13 @@ func (d *Docker) Exec(ctx context.Context, h harness.ExecHandle, cmd []string, o
 // 它是**幂等**的：正常结束、取消、宿主重启恢复三条路径都会调它，重复调用必须
 // 无害（第二次调用时对象已经不存在了）。
 func (d *Docker) Reclaim(ctx context.Context, runID harness.RunID) error {
+	// owner 必须在**任何副作用之前**解析出来：这条路径会删容器、网络与 iptables
+	// 规则，而 run 标签在宿主上不唯一（两个部署可以各有一个 run-1）。
+	// 拿不到 owner 就不删（fail closed），否则「只删自己的」会退化成「谁的都删」。
+	self, err := d.selfOwner()
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(ctx, d.cfg.PrepareTimeout)
 	defer cancel()
 
@@ -252,13 +270,15 @@ func (d *Docker) Reclaim(ctx context.Context, runID harness.RunID) error {
 	var errs []error
 
 	// 1) 容器（按 label，覆盖本 run 的全部容器，不只是句柄里那一个）。
+	//    定位参数里带 owner（见 reclaim.go 的 ownerFilter）——那不是「多一层
+	//    保险」，而是让外来的同名 run 根本不出现在结果里。
 	if err := d.removeContainersByRun(ctx, runID); err != nil {
 		errs = append(errs, err)
 	}
 
-	// 2) iptables 规则（按注释归属）。
+	// 2) iptables 规则（按注释归属，注释里带 owner）。
 	if d.cfg.ManageIptables {
-		if err := d.uninstallRulesByRun(ctx, runID); err != nil {
+		if err := d.uninstallRulesByRun(ctx, self, runID); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -274,36 +294,47 @@ func (d *Docker) Reclaim(ctx context.Context, runID harness.RunID) error {
 	return joinErrors(errs)
 }
 
-// ReclaimStale 扫描带 run label 的容器与网络，把**不属于任何活跃 run** 的对象
-// 回收掉（PLAN.md:54 的宿主重启恢复路径）。
+// ReclaimStale 扫描带 run label 的容器与网络，把**属于本部署、且不属于任何活跃
+// run** 的对象回收掉（PLAN.md:54 的宿主重启恢复路径）。
 //
-// 判据是「label 存在」而不是「名字像我们的」：名字可以被抢注，label 是 run
-// 身份的直接投影。live 是当前仍应存在的 runID 集合（由引擎从 store 里读出来）。
+// 判据是 **run + owner 两条**（见 reclaim.go 的 judgeStale，那里的表是权威）：
+// 名字可以被抢注，而 run 标签在宿主上**不唯一**——两个用不同 `--store` 的进程
+// 各自开一个 run-1 是合法的。所以「label 存在」本身不足以成为删除依据。
+//
+// live 是当前仍应存在的 runID 集合（由引擎从 store 里读出来）。
+//
+// ⚠️ **Pending 在本轮被丢弃**：ReclaimStale 的签名（harness.Sandbox 端口）还没
+// 切到 harness.ReclaimReport，所以「发现了但不该删」这件事暂时没有通道。这是
+// 有意的中间态，且严格比切之前安全——切之前那些对象会被直接删掉。
 //
 // 为什么必须有它：宿主重启后内存里的 run 列表没了，只有磁盘上的 run 目录还在。
 // 没有这个扫描，重启前起的容器会永久占着网段与内存，而它们跑的 agent 已经
 // 没有任何人在看了——那是一个无人监督的进攻性工具进程。
 func (d *Docker) ReclaimStale(ctx context.Context, live map[harness.RunID]bool) ([]harness.RunID, error) {
+	// owner 在任何副作用之前解析（判据的输入，缺了它一律不删）。
+	self, err := d.selfOwner()
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, d.cfg.PrepareTimeout)
 	defer cancel()
 
-	ids, err := d.scanLabeled(ctx, "container")
-	if err != nil {
-		return nil, err
-	}
-	nids, err := d.scanLabeled(ctx, "network")
-	if err != nil {
-		return nil, err
-	}
-	all := append(ids, nids...)
-
-	seen := map[harness.RunID]bool{}
-	var reclaimed []harness.RunID
-	for _, id := range all {
-		if id == "" || seen[id] || live[id] {
-			continue
+	// 扫描面：容器 + 网络。两种对象一次扫完再判定，而不是「边扫边删」——
+	// 判据要先看全（比如同一个 run 的容器与网络必须得到同一个结论）。
+	var objs []scanObject
+	for _, kind := range []string{"container", "network"} {
+		part, err := d.scanLabeled(ctx, kind)
+		if err != nil {
+			return nil, err
 		}
-		seen[id] = true
+		objs = append(objs, part...)
+	}
+
+	rep := judgeStale(objs, self, live)
+	// 删除逐个走 Reclaim（它自己有 owner 闸门），失败时返回**已删的那批**加错误——
+	// 与切之前同形：调用方拿到的是「这次实际删掉了什么」，而不是一个空集合。
+	reclaimed := make([]harness.RunID, 0, rep.ReclaimedTotal())
+	for _, id := range rep.Reclaimed {
 		if err := d.Reclaim(ctx, id); err != nil {
 			return reclaimed, err
 		}
@@ -312,42 +343,34 @@ func (d *Docker) ReclaimStale(ctx context.Context, live map[harness.RunID]bool) 
 	return reclaimed, nil
 }
 
-// scanLabeled 返回宿主上带 LabelRun 标签的对象所归属的 runID 列表。
+// scanLabeled 扫描宿主上带 LabelRun 标签的对象，返回**逐个对象**的归属信息
+// （run 标签 + owner 标签 + 种类）。解析交给纯函数 parseScan。
 //
-// 解析**两种**输出形态：`{{.Label "x"}}` 只会打印标签的**值**，而某些 Docker
-// 版本/对象类型下会打印 `key=value`。只认其中一种的后果是静默的：扫不到任何
-// run，ReclaimStale 报「无事可做」——而宿主上明明躺着重启前的孤儿容器，
-// 里面的进攻性工具还在跑，没有任何人在看它们的输出。
-func (d *Docker) scanLabeled(ctx context.Context, kind string) ([]harness.RunID, error) {
+// 为什么输出形态固定成 `{{json .Labels}}`：`{{.Label "x"}}` 只会打印一个标签的
+// **值**，某些 Docker 版本/对象类型下会退化成打印 `key=value`（甚至多个标签用逗号
+// 拼成 `k=v,k=v`）——而「只认其中一种」的后果是静默的：扫不到任何 run，
+// ReclaimStale 报「无事可做」，宿主上却躺着重启前的孤儿容器。JSON 没有这个歧义，
+// 而且一次调用就带回 owner。见 parseScan 里为什么不用「模板 + 分隔符」。
+func (d *Docker) scanLabeled(ctx context.Context, kind string) ([]scanObject, error) {
 	out, err := d.run(ctx, nil, d.staleScanArgv(kind)[1:]...)
 	if err != nil {
 		return nil, harness.Ef(harness.KindExecutor, "executor.reclaim",
 			fmt.Sprintf("扫描 %s 标签失败", kind), err)
 	}
-	var ids []harness.RunID
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// 取最后一个 `=` 之后的片段：既兼容纯值，也兼容 `key=value`。
-		if _, v, ok := strings.Cut(line, "="); ok {
-			line = v
-		}
-		if line = strings.TrimSpace(line); line != "" {
-			ids = append(ids, harness.RunID(line))
-		}
-	}
-	return ids, nil
+	return parseScan(kind, out), nil
 }
 
 // staleScanArgv 渲染「按 label 列出对象」的 argv。
+//
+// `--filter label=<LabelRun>`（只给键、不给值）是**存在性**过滤：任何带 run 标签的
+// 对象都要被看见，因为「看见了但不该删」要能进 Pending，而看不见就无法报告。
 func (d *Docker) staleScanArgv(kind string) []string {
+	const format = "{{json .Labels}}"
 	switch kind {
 	case "network":
-		return []string{d.cfg.Binary, "network", "ls", "--filter", "label=" + LabelRun, "--format", "{{.Label \"" + LabelRun + "\"}}"}
+		return []string{d.cfg.Binary, "network", "ls", "--filter", "label=" + LabelRun, "--format", format}
 	default:
-		return []string{d.cfg.Binary, "ps", "--all", "--filter", "label=" + LabelRun, "--format", "{{.Label \"" + LabelRun + "\"}}"}
+		return []string{d.cfg.Binary, "ps", "--all", "--filter", "label=" + LabelRun, "--format", format}
 	}
 }
 
@@ -358,20 +381,52 @@ func (d *Docker) staleScanArgv(kind string) []string {
 // 统一入口的理由：每条 docker 调用都必须带 ctx（否则宿主网络卡住时永久挂起）、
 // 都必须把 stderr 收进错误消息（否则失败只有一句 "exit status 1"）。
 func (d *Docker) run(ctx context.Context, stdin io.Reader, args ...string) (string, error) {
-	return runCmdStdin(ctx, d.cfg.Binary, stdin, args...)
+	return runCmdStdin(ctx, d.cfg.Binary, stdin, d.subprocessEnv(), args...)
 }
 
-// runCmd 执行一条宿主命令。
+// subprocessEnv 是本执行器交给**每一个**子进程的环境变量。
 //
-// 环境变量刻意**不继承**：docker CLI 会读 DOCKER_HOST / DOCKER_CONFIG /
-// DOCKER_CONTEXT，继承会让「本机 Docker」的语义随调用方的 shell 变化而变——
-// 而这条执行器唯一的强假设就是「我操作的是本机 Docker」。
-func runCmd(ctx context.Context, bin string, args ...string) (string, error) {
-	return runCmdStdin(ctx, bin, nil, args...)
+// ⚠️ 它是「我操作的是本机 daemon」这句话的**结构属性**，而不只是一句注释：
+// docker CLI 会读 DOCKER_HOST / DOCKER_CONTEXT / DOCKER_CONFIG，而 `$HOME` 缺失
+// 时它还会退回 /etc/passwd 里的家目录去读 `~/.docker/config.json` 的
+// currentContext —— 于是「连哪个 daemon」会随调用方的 shell 与宿主用户变化，
+// 而锁身份与资源归属判据都建立在「本机 daemon」这个假设上。
+//
+// 三项都显式钉死（空值是**有意义**的：它表示「不解析 context 文件 / 不读用户
+// 配置」，而不是「继承」）：
+//
+//	DOCKER_HOST    生效端点，不是硬编码的默认值（默认端点只是回落值）
+//	DOCKER_CONTEXT 空 ⇒ 不解析 context 文件
+//	DOCKER_CONFIG  空 ⇒ 不读 ~/.docker 配置
+//
+// 对 iptables 这类子进程多出来的 DOCKER_* 是惰性的（它们只认自己的环境变量），
+// 所以只保留一条环境构造路径，不再为「谁需要哪个变量」分叉。
+func (d *Docker) subprocessEnv() []string {
+	return subprocessEnvFor(d.cfg.Endpoint)
 }
 
-func runCmdStdin(ctx context.Context, bin string, stdin io.Reader, args ...string) (string, error) {
-	out, errOut, err := runCmdStdinSplit(ctx, bin, stdin, args...)
+// subprocessEnvFor 是 subprocessEnv 的纯函数形态（同样的三个变量，同样的理由）。
+// 拆出来是为了让**不属于本执行器**的子进程调用（测试直接调 docker、将来别处
+// 复用）也走同一份口径，而不是各写一份各自漂移。
+func subprocessEnvFor(ep harness.DockerEndpoint) []string {
+	return []string{
+		"PATH=" + subprocessPath,
+		"DOCKER_HOST=" + ep.ID(),
+		"DOCKER_CONTEXT=",
+		"DOCKER_CONFIG=",
+	}
+}
+
+// subprocessPath 是子进程的 PATH。docker CLI 与 iptables 都靠它找到自己。
+const subprocessPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// runCmd 执行一条宿主命令（env 由调用方给出，理由见 subprocessEnv）。
+func runCmd(ctx context.Context, bin string, env []string, args ...string) (string, error) {
+	return runCmdStdin(ctx, bin, nil, env, args...)
+}
+
+func runCmdStdin(ctx context.Context, bin string, stdin io.Reader, env []string, args ...string) (string, error) {
+	out, errOut, err := runCmdStdinSplit(ctx, bin, stdin, env, args...)
 	if err != nil {
 		msg := strings.TrimSpace(errOut)
 		if msg == "" {
@@ -393,7 +448,7 @@ func runCmdStdin(ctx context.Context, bin string, stdin io.Reader, args ...strin
 // 也**不要**改用 `ExitError.Stderr`：它只在走 `cmd.Output()` 时才会被填充，而这里
 // 显式设了 cmd.Stderr（为了与 stdout 分开），于是它恒为 nil——那正是本函数要修的
 // 那个缺陷。
-func runCmdStdinSplit(ctx context.Context, bin string, stdin io.Reader, args ...string) (string, string, error) {
+func runCmdStdinSplit(ctx context.Context, bin string, stdin io.Reader, env []string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -401,9 +456,9 @@ func runCmdStdinSplit(ctx context.Context, bin string, stdin io.Reader, args ...
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}
-	// 环境变量刻意**不继承**：docker CLI 会读 DOCKER_HOST / DOCKER_CONFIG /
-	// DOCKER_CONTEXT，继承会让「本机 Docker」的语义随调用方的 shell 变化而变。
-	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+	// 环境变量刻意**不继承**（env 的内容与理由见 Docker.subprocessEnv）：
+	// 继承会让「本机 Docker」的语义随调用方的 shell 变化而变。
+	cmd.Env = env
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
 }

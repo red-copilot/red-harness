@@ -368,6 +368,83 @@ func TestSpecNetworkIsPerRunAndLabeled(t *testing.T) {
 	}
 }
 
+// TestSpecContainerCarriesOwnershipLabels 钉住容器的三个归属标签。
+//
+// 为什么三个都要断言「值」而不只是「标签在」：这三条正是资源归属的**全部**信息
+// （见 reclaim.go 的判据表）。owner 缺失/写错会让孤儿永远回收不掉（只报告不删）；
+// challenge 与 attempt 是把「宿主上这一堆容器」对回某次运行的唯一线索——它们的
+// 值错了不会让任何东西报错，只会让现场无法解释。
+func TestSpecContainerCarriesOwnershipLabels(t *testing.T) {
+	spec := testSpec()
+	cfg := defaultDockerConfig()
+	p := mustPlan(t, spec, cfg)
+	argv := runArgv(p)
+
+	// challenge 值的唯一真源是 harness.ChallengeIDFor——这里再算一遍是在断言
+	// 「argv 里的那一串确实是这个函数的输出」，而不是把实现抄第二遍。
+	wantChallenge, err := harness.ChallengeIDFor(spec.Target.Code)
+	if err != nil {
+		t.Fatalf("ChallengeIDFor(%q): %v", spec.Target.Code, err)
+	}
+	want := map[string]string{
+		LabelRun + "=" + string(spec.RunID):                  "run 标签（回收的定位依据）",
+		LabelOwner + "=" + string(p.Owner):                   "owner 标签（回收的归属依据）",
+		LabelChallenge + "=" + string(wantChallenge):         "challenge 标签（题目身份的派生值）",
+		LabelAttempt + "=" + itoa(int(harness.FirstAttempt)): "attempt 标签",
+	}
+	for i, a := range argv {
+		if a != "--label" || i+1 >= len(argv) {
+			continue
+		}
+		delete(want, argv[i+1])
+	}
+	for kv, why := range want {
+		t.Errorf("容器 argv 缺少 %s（%s）: %s", kv, why, argvString(argv))
+	}
+	// owner 必须来自配置（normalize 之后），不得是空串：空值时判据会退化成
+	// 「无主 ⇒ 只报告」，孤儿从此回收不掉。
+	if p.Owner == harness.OwnerUnknown {
+		t.Errorf("plan.Owner 不得为空（空 = 无主 = 永不回收）")
+	}
+}
+
+// TestSpecNetworkCarriesOwnerNotChallenge 钉住网络的标签集合**刻意更小**。
+//
+// 网络是 per-run 的，没有题目维度：给它贴 challenge/attempt 会造出一个
+// 「看起来参与判据、实际没人读」的字段，而下一个人会照它推断归属逻辑。
+func TestSpecNetworkCarriesOwnerNotChallenge(t *testing.T) {
+	spec := testSpec()
+	cfg := defaultDockerConfig()
+	p := mustPlan(t, spec, cfg)
+	argv := networkFor(p, cfg).createArgv()
+	joined := argvString(argv)
+
+	if !strings.Contains(joined, "--label "+LabelOwner+"="+string(p.Owner)) {
+		t.Errorf("网络必须带 owner 标签（只按 run 删会拆掉别的部署的同名 run）: %s", joined)
+	}
+	for _, l := range []string{LabelChallenge, LabelAttempt} {
+		if strings.Contains(joined, l+"=") {
+			t.Errorf("网络不该带 %s（网络是 per-run 的，没有题目维度）: %s", l, joined)
+		}
+	}
+}
+
+// TestPlanRejectsMissingTargetCode 钉住 challenge 的 fail closed。
+//
+// 空编号会让 challenge 标签退化成空串——「有标签但值不可用」比「没有标签」更糟：
+// 看标签的人会以为归属已知。所以宁可这道题起不来。
+func TestPlanRejectsMissingTargetCode(t *testing.T) {
+	for _, code := range []string{"", "   ", "\t"} {
+		spec := testSpec()
+		spec.Target.Code = code
+		if _, err := planRun(spec, defaultDockerConfig()); err == nil {
+			t.Errorf("Target.Code=%q 必须被拒绝（否则 challenge 标签是空串）", code)
+		} else if !harness.IsKind(err, harness.KindConfig) {
+			t.Errorf("Target.Code=%q 应报 KindConfig, got %v", code, err)
+		}
+	}
+}
+
 // 目标白名单：只有 TSecBench 返回的 IP:port 被放行，其余出站默认拒绝。
 //
 // 规则分两条链落地（本机实测结论，见 network.go 文件头）：
@@ -770,7 +847,11 @@ func TestSpecReadOnlyIsNonNegotiable(t *testing.T) {
 func TestSpecDefaultsAreSafe(t *testing.T) {
 	cfg := defaultDockerConfig()
 	p := mustPlan(t, harness.ExecSpec{
-		RunID:    "run-1",
+		RunID: "run-1",
+		// Target.Code 是**必须**给的：它是容器上 challenge 标签的来源，而空编号
+		// 在渲染期就被拒（fail closed，见 planRun）。这里用一个最小合法值，
+		// 因为本用例验的是「零值 ExecutorSpec 的缺省是否安全」。
+		Target:   harness.Target{Code: "web-01"},
 		Executor: harness.ExecutorSpec{Image: "img"},
 		Workdir:  "/tmp/w",
 	}, cfg)
@@ -866,6 +947,11 @@ func TestReclaimUsesRunLabel(t *testing.T) {
 }
 
 // ReclaimStale 的扫描 argv 也必须按 label 走（宿主重启恢复路径）。
+//
+// 并且**输出格式是冻结的**：`{{json .Labels}}`。理由是那个已知的解析坑——
+// `{{.Label "x"}}` 在某些 Docker 版本/对象类型下会退化成打印 `key=value`
+// （多个标签时甚至拼成 `k=v,k=v`），而解析歧义的方向是「把别人的归属读成自己的」。
+// 换回单值模板或换成「模板 + 分隔符」都会让 parseScan 的那条防线失效。
 func TestReclaimStaleScansByLabel(t *testing.T) {
 	c := &Docker{cfg: defaultDockerConfig()}
 	argv := c.staleScanArgv("container")
@@ -874,6 +960,18 @@ func TestReclaimStaleScansByLabel(t *testing.T) {
 	}
 	if argv := c.staleScanArgv("network"); !strings.Contains(argvString(argv), "label="+LabelRun) {
 		t.Errorf("网络扫描也必须按 label: %v", argv)
+	}
+	// 过滤只给键、不给值：owner 不匹配的资源也要被**看见**（它们进 Pending，
+	// 而看不见就无法报告）。
+	for _, kind := range []string{"container", "network"} {
+		joined := argvString(c.staleScanArgv(kind))
+		if !strings.Contains(joined, "--filter label="+LabelRun+" ") &&
+			!strings.HasSuffix(joined, "--filter label="+LabelRun) {
+			t.Errorf("%s 扫描的过滤条件必须是「标签存在」: %s", kind, joined)
+		}
+		if !strings.Contains(joined, "{{json .Labels}}") {
+			t.Errorf("%s 扫描的输出格式必须是 {{json .Labels}}（单值模板有 `key=value` 的歧义）: %s", kind, joined)
+		}
 	}
 }
 
@@ -891,11 +989,15 @@ func TestIptablesRulesAreCommentTagged(t *testing.T) {
 	if len(all) == 0 {
 		t.Fatal("默认配置必须产生规则")
 	}
+	// 注释的期望值：owner 指纹 + runID。**指纹必须在里面**——netfilter 是宿主
+	// 全局的，只带 runID 的注释让「按注释删规则」无法区分「我的 run-1」与
+	// 「别人的 run-1」，而正是这条路径会拆掉对方正在用的默认拒绝规则。
+	wantComment := commentFor(p.Owner, p.RunID)
 	seenChain := map[string]bool{}
 	for _, r := range all {
 		seenChain[r.chain] = true
-		if !strings.Contains(r.String(), commentFor(p.RunID)) {
-			t.Errorf("规则缺少 run 注释 %q: %q", commentFor(p.RunID), r)
+		if !strings.Contains(r.String(), wantComment) {
+			t.Errorf("规则缺少 run 注释 %q: %q", wantComment, r)
 		}
 		// 注释必须挂在 -m comment --comment 上，否则 iptables 不认。
 		if !strings.Contains(r.String(), "-m comment --comment") {
@@ -905,8 +1007,16 @@ func TestIptablesRulesAreCommentTagged(t *testing.T) {
 	if !seenChain[chainForward] || !seenChain[chainInput] {
 		t.Errorf("规则必须同时覆盖 FORWARD 与 INPUT 两条链（漏一条的失败是静默的）: %v", seenChain)
 	}
-	if !strings.HasPrefix(commentFor("run-1"), "red-harness-run-") {
-		t.Errorf("注释前缀必须是可扫描的常量, got %q", commentFor("run-1"))
+	if !strings.HasPrefix(commentFor(p.Owner, "run-1"), "red-harness-run-") {
+		t.Errorf("注释前缀必须是可扫描的常量, got %q", commentFor(p.Owner, "run-1"))
+	}
+	// 不同 owner 的注释必须不同：否则「按注释删规则」会误伤。
+	other, err := harness.ResolveOwner("other-box", 0)
+	if err != nil {
+		t.Fatalf("ResolveOwner: %v", err)
+	}
+	if commentFor(other, p.RunID) == wantComment {
+		t.Errorf("两个不同 owner 的 run-1 得到同一条注释 %q（按注释删规则会误伤）", wantComment)
 	}
 
 	// 规则参数里不得出现「本该是独立参数、却被拼进上一个值里」的空格。
@@ -964,7 +1074,12 @@ func TestProxyEnvAbsentWhenDisabled(t *testing.T) {
 func TestDockerCLIUsesContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	c := &Docker{cfg: defaultDockerConfig()}
+	cfg := defaultDockerConfig()
+	// owner 必须显式给：Reclaim 在碰任何东西之前先解析 owner（fail closed），
+	// 不给的话它会在那个闸门上失败——同样是 error，但本用例的本意是「已取消的
+	// ctx 让子进程立刻失败」，会在一个不相干的理由上绿掉。
+	cfg.Owner = "ctx-test-host/0"
+	c := &Docker{cfg: cfg}
 	if err := c.Available(ctx); err == nil {
 		t.Error("已取消的 ctx 必须让 Available 立刻失败")
 	}
@@ -1000,13 +1115,27 @@ func TestPlanRunIsDeterministic(t *testing.T) {
 }
 
 func TestCommentForIsIptablesSafe(t *testing.T) {
-	// iptables 注释最长 256 字符且不能含引号/换行；runID 可能很长。
-	long := harness.RunID(strings.Repeat("x", 400))
-	c := commentFor(long)
-	if len(c) > 256 {
-		t.Errorf("注释超长会被 iptables 拒绝: %d", len(c))
+	// iptables 注释最长 256 字符且不能含引号/换行；runID 与 owner 都可能很长。
+	//
+	// owner 这一维是新增的：owner 的值来自 hostname（可以很长、可以含任意字符），
+	// 而它在注释里只以 8 位指纹出现——同一条纪律见 harness.OwnerID.Fingerprint。
+	longOwner, err := harness.ResolveOwner(strings.Repeat("host-", 200), 12345)
+	if err != nil {
+		t.Fatalf("ResolveOwner: %v", err)
 	}
-	if strings.ContainsAny(c, "\"' \n\t") {
-		t.Errorf("注释不得含引号/空白/换行: %q", c)
+	long := harness.RunID(strings.Repeat("x", 400))
+	for _, o := range []harness.OwnerID{longOwner, harness.OwnerUnknown} {
+		c := commentFor(o, long)
+		if len(c) > 256 {
+			t.Errorf("注释超长会被 iptables 拒绝: %d (%q)", len(c), c)
+		}
+		if strings.ContainsAny(c, "\"' \n\t") {
+			t.Errorf("注释不得含引号/空白/换行: %q", c)
+		}
+	}
+	// owner 未知时也不得退化成 `red-harness-run--<runID>` 这种看不出少了什么的串：
+	// 归属不明必须写在注释里，读规则的人才知道这条规则不该被自己删。
+	if c := commentFor(harness.OwnerUnknown, "run-1"); !strings.Contains(c, unknownOwnerCommentToken) {
+		t.Errorf("owner 未知时注释必须显式标明归属不明, got %q", c)
 	}
 }

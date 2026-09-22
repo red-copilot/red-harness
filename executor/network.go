@@ -87,8 +87,14 @@ func (r ruleSpec) String() string { return strings.Join(r.args, " ") }
 
 // network 是一次运行的网络边界。
 type network struct {
-	Name    string
+	Name string
+	// RunID + Owner 是这条资源的**回收判据**（见 spec.go 的 LabelOwner）。网络
+	// 也要带 owner：孤儿网络与孤儿容器一样占宿主资源（网段），而只按 run 删会让
+	// 另一个部署的同名 run 的网络被拆掉——那会连带掐断正在跑的 agent 的全部流量。
+	//
+	// 网络**不带** challenge：网络是 per-run 的，没有题目维度。
 	RunID   harness.RunID
+	Owner   harness.OwnerID
 	Subnet  string
 	Gateway string
 	// Bridge 是本网络的宿主网桥接口名（br-<网络 ID 前 12 位>）。只有在网络
@@ -111,8 +117,13 @@ type network struct {
 // networkFor 由 runPlan + 配置构造网络描述。
 func networkFor(p runPlan, cfg DockerConfig) network {
 	n := network{
-		Name:           p.NetworkName,
-		RunID:          p.RunID,
+		Name:  p.NetworkName,
+		RunID: p.RunID,
+		// owner 取自 **plan** 而不是 cfg：plan 的 owner 一定是 normalize 之后的
+		// 值，而 networkFor 的 cfg 参数可能是没走过 normalize 的原样配置。
+		// 更重要的一点：容器与网络必须拿到**同一个** owner——两者判据不一致时，
+		// 「同一个 run 的容器被删、网络留下」这类半截回收现场无法解释。
+		Owner:          p.Owner,
 		Subnet:         p.NetworkSubnet,
 		Gateway:        p.NetworkGateway,
 		Internal:       cfg.InternalNetwork,
@@ -131,6 +142,7 @@ func (n network) createArgv() []string {
 	argv := []string{
 		"docker", "network", "create",
 		"--label", LabelRun + "=" + string(n.RunID),
+		"--label", LabelOwner + "=" + string(n.Owner),
 		"--label", LabelRole + "=" + "network",
 	}
 	if n.Internal {
@@ -236,7 +248,10 @@ func (n network) rule(chain, dstFlag, dstHost, dstPort, action string) ruleSpec 
 	args = append(args, "-j", action)
 	// 注释是必须的：宿主重启后残留规则只能靠它归属到某个 run，
 	// 否则要么删不掉，要么得靠猜（而猜错的代价是掐掉别人的网络）。
-	args = append(args, "-m", "comment", "--comment", commentFor(n.RunID))
+	//
+	// ⚠️ 注释里必须带 owner（见 commentFor）：netfilter 表是宿主全局的，只带
+	// runID 的注释在「两个部署各有一个 run-1」时无法区分彼此。
+	args = append(args, "-m", "comment", "--comment", commentFor(n.Owner, n.RunID))
 	return ruleSpec{chain: chain, args: args}
 }
 

@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -36,18 +37,32 @@ import (
 // 用 `--all`（含已停止的）而不是默认的只列运行中：崩溃恢复时容器往往已经是
 // Exited 状态，只列运行中的会把它漏掉，留下一个永远不会被回收的容器。
 func reclaimContainerArgv(cfg DockerConfig, runID harness.RunID) []string {
-	return []string{
+	return append([]string{
 		binaryOr(cfg), "ps", "--all", "--quiet",
 		"--filter", "label=" + LabelRun + "=" + string(runID),
-	}
+	}, ownerFilter(cfg)...)
 }
 
 // reclaimNetworkArgv 渲染「按 run label 找出本 run 的网络」的 argv。
 func reclaimNetworkArgv(cfg DockerConfig, runID harness.RunID) []string {
-	return []string{
+	return append([]string{
 		binaryOr(cfg), "network", "ls", "--quiet",
 		"--filter", "label=" + LabelRun + "=" + string(runID),
-	}
+	}, ownerFilter(cfg)...)
+}
+
+// ownerFilter 返回「只要我自己那批」的查询参数。
+//
+// **为什么是第二道闸而不是可选的收紧**：run 标签在宿主上**不唯一**——两个用不同
+// `--store` 的进程各自开一个 run-1 是合法的。只按 run 定位的失效模式是一次已核实
+// 的真实事故：两边各自拿到锁、各自把对方认成孤儿，然后 `docker rm --force` 掉对方
+// **正在用**的容器、网络与 iptables 规则。
+//
+// ⚠️ owner 为空时**仍然渲染这一条**，不省略：`label=<key>=` 在 docker 里是
+// 「带这个标签且值为空」，而本执行器写下的 owner 永远非空，所以它匹配不到任何
+// 东西（fail closed）。省略它才会退化成「谁的都删」。
+func ownerFilter(cfg DockerConfig) []string {
+	return []string{"--filter", "label=" + LabelOwner + "=" + cfg.Owner}
 }
 
 func binaryOr(cfg DockerConfig) string {
@@ -206,14 +221,16 @@ func (d *Docker) uninstallNetworkRules(ctx context.Context, n network) error {
 // 为什么靠注释而不是靠网段：重启后网段是从磁盘上的 run 目录重算的，理论上能
 // 算出来，但「算出来的网段」与「当时实际用的网段」一旦不一致（比如改了
 // NetworkSupernet），规则就永远删不掉。注释是写在规则里的原文，不依赖任何重算。
-func (d *Docker) uninstallRulesByRun(ctx context.Context, runID harness.RunID) error {
+func (d *Docker) uninstallRulesByRun(ctx context.Context, owner harness.OwnerID, runID harness.RunID) error {
 	if !d.cfg.ManageIptables {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	comment := commentFor(runID)
+	// 注释里带 owner（见 commentFor）：netfilter 是宿主全局的，「按注释删规则」
+	// 必须能区分「我的 run-1」与「别人的 run-1」。
+	comment := commentFor(owner, runID)
 	var errs []error
 	for _, chain := range []string{chainForward, chainInput} {
 		out, err := d.iptablesOut(ctx, "-S", chain)
@@ -309,8 +326,138 @@ func (d *Docker) iptablesOut(ctx context.Context, args ...string) (string, error
 }
 
 // runBinary 执行任意宿主机二进制（iptables），与 run 的区别只是可换二进制。
+//
+// 用的是同一份被钉死的环境（见 subprocessEnv）：iptables 对多出来的 DOCKER_*
+// 是惰性的，但**不继承环境**这条性质对所有子进程都成立，不按二进制分叉。
 func (d *Docker) runBinary(ctx context.Context, bin string, args ...string) (string, error) {
-	return runCmd(ctx, bin, args...)
+	return runCmd(ctx, bin, d.subprocessEnv(), args...)
+}
+
+// ── 回收判定（纯函数） ──
+//
+// 这一节是**纯函数**：不碰 daemon、不读全局状态。理由不是洁癖——回收是本包里
+// 唯一会**删除别人资源**的代码路径，它的判据必须能逐条离线钉住。上一版的判据
+// （`runID ∉ live`）只写在 ReclaimStale 的循环里，于是「哪些情况不该删」既不可读、
+// 也无法单独测试，而漏掉的那几条恰恰是删错对象的成因。
+//
+// 分层：parseScan 只负责「把扫描输出变成对象」，judgeStale 只负责「该不该删」，
+// 执行删除留在 ReclaimStale。三者分开之后，「解析歧义」与「归属不匹配」这两种
+// 完全不同的失败不会被混成同一件事。
+
+// scanObject 是一次 label 扫描读到的**单个**对象。
+type scanObject struct {
+	// Kind 是资源种类（"container" / "network"），由扫描命令决定，解析失败时
+	// 仍然有效——「有个网络解析不出来」比「有个东西解析不出来」可操作得多。
+	Kind string
+	// Parsed 为假表示这一行**无法归属**（扫描输出里读不出 run 标签）。此时
+	// RunID / Owner 都无意义，判定函数必须把它归到 Pending(unparsable)。
+	//
+	// 为什么解析歧义要「只报告」而不是当作空：当作空 = 扫不到东西，而扫不到的
+	// 表现是「ReclaimStale 报无事可做，宿主上却躺着孤儿容器」——里面的进攻性工具
+	// 还在跑，没有任何人在看它的输出。
+	Parsed bool
+	RunID  harness.RunID
+	Owner  harness.OwnerID
+}
+
+// parseScan 把一次 label 扫描的原始输出解析成对象列表。
+//
+// **为什么是 JSON 而不是「复合模板 + 分隔符」**：runID 由调用方提供，取值域不设
+// 限，分隔符一旦出现在它里面，`{{.Label "run"}}|{{.Label "owner"}}` 就会把字段切
+// 错——而切错的方向是「把别人的 owner 读成自己的」，也就是删除。`{{json .Labels}}`
+// 没有这个问题：JSON 的转义是完备的，取值域再大也不会与结构混淆。
+//
+// ⚠️ 解析不出来的一行**绝不能被丢掉**（见 scanObject.Parsed）：它变成一条
+// Parsed=false 的对象，最终进 Pending(unparsable)。
+//
+// ⚠️ owner 的值**不做任何规范化**（不 trim、不大小写折叠）：规范化只会把两个
+// 不同的 owner 合并成一个，而合并的方向恰好是「外来的看起来像我的」。
+func parseScan(kind, out string) []scanObject {
+	var objs []scanObject
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var labels map[string]string
+		if err := json.Unmarshal([]byte(line), &labels); err != nil {
+			objs = append(objs, scanObject{Kind: kind})
+			continue
+		}
+		runID := strings.TrimSpace(labels[LabelRun])
+		if runID == "" {
+			// 扫描命令带了 `--filter label=red-harness.run`，所以「有标签」是前置
+			// 条件；这里为空只可能是格式变了或标签值真的是空串。两种情况都无法
+			// 归属，归到 unparsable，而不是「一个没有 run 的资源」。
+			objs = append(objs, scanObject{Kind: kind})
+			continue
+		}
+		objs = append(objs, scanObject{
+			Kind:   kind,
+			Parsed: true,
+			RunID:  harness.RunID(runID),
+			Owner:  harness.OwnerID(labels[LabelOwner]),
+		})
+	}
+	return objs
+}
+
+// judgeStale 把扫描到的对象按回收判据分类：该删的进 Reclaimed，不该删的进 Pending。
+//
+// 判据逐条照 harness.ReclaimReport 的注释（那里是权威）：
+//
+//	owner 匹配 且 runID ∉ live ⇒ 删除，进 Reclaimed
+//	owner 匹配 且 runID ∈  live ⇒ 保留，两条都不进
+//	owner 不匹配                ⇒ 保留，进 Pending(owner_mismatch)
+//	无 owner 标签               ⇒ 保留，进 Pending(owner_unknown)
+//	解析不出 run 标签           ⇒ 保留，进 Pending(unparsable)
+//
+// 它**只回答「该不该删」**，不执行删除——那是 ReclaimStale 的事。「保留」的含义
+// 是**绝不删除**，不是「稍后重试」。
+//
+// self 必须是已解析的 owner（DockerConfig.normalize 保证非空）。若它是
+// OwnerUnknown，判定会退化成「全部 Pending」：这是有意的 fail closed——「我是谁」
+// 不可判定时，「谁都不像我的」不能当成「可以删」，否则这次修复就被原样取消了。
+func judgeStale(objs []scanObject, self harness.OwnerID, live map[harness.RunID]bool) harness.ReclaimReport {
+	var rep harness.ReclaimReport
+	seen := map[harness.RunID]bool{}
+	for _, o := range objs {
+		switch {
+		case !o.Parsed:
+			rep.Pending = append(rep.Pending, harness.StaleObject{
+				Kind: o.Kind, Reason: harness.StaleUnparsable,
+			})
+		case o.Owner == harness.OwnerUnknown:
+			rep.Pending = append(rep.Pending, harness.StaleObject{
+				Kind: o.Kind, RunID: o.RunID, Owner: o.Owner, Reason: harness.StaleOwnerUnknown,
+			})
+		case o.Owner != self:
+			rep.Pending = append(rep.Pending, harness.StaleObject{
+				Kind: o.Kind, RunID: o.RunID, Owner: o.Owner, Reason: harness.StaleOwnerMismatch,
+			})
+		case live[o.RunID]:
+			// 活跃 run：正常的资源，不是遗留。两条都不进。
+		default:
+			if !seen[o.RunID] {
+				seen[o.RunID] = true
+				rep.Reclaimed = append(rep.Reclaimed, o.RunID)
+			}
+		}
+	}
+	return rep
+}
+
+// selfOwner 返回本执行器**已解析**的 owner，未解析时报 KindConfig。
+//
+// **为什么是错误而不是「空 owner 就少删一点」**：回收是删除闸门，闸门少一道时正确
+// 的行为是**不删**并说出来，而不是删得少一点——「删得少一点」在现场看起来与「今天
+// 没有孤儿」完全一样，而孤儿是宿主上无人监督的进攻性工具进程。
+func (d *Docker) selfOwner() (harness.OwnerID, error) {
+	if d.cfg.Owner == "" {
+		return harness.OwnerUnknown, harness.Ef(harness.KindConfig, "executor.reclaim",
+			"DockerConfig.Owner 未解析（所有者未知）：无法判定资源归属，拒绝回收", nil)
+	}
+	return harness.OwnerID(d.cfg.Owner), nil
 }
 
 // ── 小工具 ──

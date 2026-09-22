@@ -279,6 +279,11 @@ func (s *dockerSession) Launch(ctx context.Context, ps harness.ProcessSpec) (har
 		return nil, harness.Ef(harness.KindExecutor, "sandbox.launch", "docker 未返回容器 ID", nil)
 	}
 	attach := exec.CommandContext(ctx, s.docker.cfg.Binary, "start", "--attach", "--interactive", id)
+	// ⚠️ 这一条**绕过了 docker.run**（它要长期持有 stdin/stdout 管道，不能等
+	// 子进程结束），所以环境必须在这里单独钉死——否则它会继承宿主的 DOCKER_HOST /
+	// DOCKER_CONTEXT，而「docker create 连的是 A 端点、docker start 连的是 B 端点」
+	// 的失败形态是「容器起了但 attach 到一个不存在的容器」，与别处的行为不一致。
+	attach.Env = s.docker.subprocessEnv()
 	in, err := attach.StdinPipe()
 	if err != nil {
 		_, _ = s.docker.run(context.Background(), nil, "rm", "-f", id)

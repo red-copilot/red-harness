@@ -647,6 +647,153 @@ func TestIntegrationReclaimStale(t *testing.T) {
 	}
 }
 
+// liveRunsOnHost 扫出宿主上当前带 run 标签的全部 runID。
+//
+// 负例需要一张「除了被测对象之外，别的都算活跃」的 live 表：这样即使判定有 bug、
+// 把外来的对象判成了「本部署的孤儿」，也只有被测对象会被删——不会误伤同一台宿主
+// 上另一个 worktree 里同时在跑的集成门留下的容器。
+func liveRunsOnHost(t *testing.T, ctx context.Context, d *Docker) map[harness.RunID]bool {
+	t.Helper()
+	live := map[harness.RunID]bool{}
+	for _, kind := range []string{"container", "network"} {
+		objs, err := d.scanLabeled(ctx, kind)
+		if err != nil {
+			t.Fatalf("扫描 %s: %v", kind, err)
+		}
+		for _, o := range objs {
+			if o.Parsed {
+				live[o.RunID] = true
+			}
+		}
+	}
+	return live
+}
+
+// TestIntegrationReclaimStaleKeepsForeignObjects 是回收判定的**负例**。
+//
+// 它对着那个已被核实的事故：扫描面是宿主全局的，而 run 标签在宿主上**不唯一**
+// （两个用不同 `--store` 的进程各有一个 run-1 是合法的）。所以「有 run 标签、
+// 且不在 live 里」**不足以**成为删除依据——旧版本正是这样把另一个部署正在用的
+// 容器、网络与 iptables 规则删掉的。
+//
+// 这里手工造出「别人的」两种对象（用 `docker create` / `docker network create`，
+// 刻意不经过本执行器，所以它们带什么标签完全由本用例决定）：
+//
+//  1. 只有 run 标签、没有 owner 标签（升级前的旧资源）⇒ Pending(owner_unknown)
+//  2. run 标签 + 另一个 owner 标签（同宿主上的另一个部署）⇒ Pending(owner_mismatch)
+//
+// 两条都必须**原样留着**。
+func TestIntegrationReclaimStaleKeepsForeignObjects(t *testing.T) {
+	d, ctx := newTestDocker(t)
+
+	const (
+		// 同一个 run ID 同时有容器与网络：真实遗留现场就是这样成对出现的。
+		noOwnerRun = harness.RunID("it-neg-noowner")
+		otherRun   = harness.RunID("it-neg-other")
+		otherOwner = "another-host/0"
+		noOwnerNet = "rh-neg-noowner-net"
+	)
+
+	// 1) 只有 run 标签的旧容器。
+	if _, err := d.run(ctx, nil, "create",
+		"--name", string(noOwnerRun),
+		"--label", LabelRun+"="+string(noOwnerRun),
+		"--label", LabelRole+"="+roleRunner,
+		testImage(), "sleep", "infinity"); err != nil {
+		t.Fatalf("造无 owner 的容器: %v", err)
+	}
+	// 2) 只有 run 标签的旧网络。
+	if _, err := d.run(ctx, nil, "network", "create",
+		"--label", LabelRun+"="+string(noOwnerRun),
+		"--label", LabelRole+"="+"network",
+		noOwnerNet); err != nil {
+		t.Fatalf("造无 owner 的网络: %v", err)
+	}
+	// 3) 带另一个 owner 的容器。
+	if _, err := d.run(ctx, nil, "create",
+		"--name", string(otherRun),
+		"--label", LabelRun+"="+string(otherRun),
+		"--label", LabelOwner+"="+otherOwner,
+		"--label", LabelRole+"="+roleRunner,
+		testImage(), "sleep", "infinity"); err != nil {
+		t.Fatalf("造他人的容器: %v", err)
+	}
+
+	// 清理走**原始 docker**，不走 Reclaim：Reclaim 按 owner 过滤，本来就够不到
+	// 这三个对象——那正是本用例要断言的结论，用它来清理会把结论当前提。
+	t.Cleanup(func() {
+		if os.Getenv("RH_TEST_KEEP") == "1" && t.Failed() {
+			t.Logf("RH_TEST_KEEP=1 且用例已失败：保留 %s / %s 供排查", noOwnerRun, otherRun)
+			return
+		}
+		_, _ = d.run(context.Background(), nil, "rm", "-f", string(noOwnerRun), string(otherRun))
+		_, _ = d.run(context.Background(), nil, "network", "rm", noOwnerNet)
+	})
+
+	exists := func(args ...string) bool {
+		out, err := d.run(ctx, nil, args...)
+		return err == nil && strings.TrimSpace(out) != ""
+	}
+
+	// live = 宿主上除这三个对象之外的全部 run（见 liveRunsOnHost 的理由）。
+	live := liveRunsOnHost(t, ctx, d)
+	delete(live, noOwnerRun)
+	delete(live, otherRun)
+
+	// ── 判定面 ──
+	var objs []scanObject
+	for _, kind := range []string{"container", "network"} {
+		part, err := d.scanLabeled(ctx, kind)
+		if err != nil {
+			t.Fatalf("扫描 %s: %v", kind, err)
+		}
+		objs = append(objs, part...)
+	}
+	rep := judgeStale(objs, harness.OwnerID(d.cfg.Owner), live)
+
+	for _, id := range rep.Reclaimed {
+		if id == noOwnerRun || id == otherRun {
+			t.Fatalf("外来的 run %s 被判成可回收——这就是那个删错对象的事故", id)
+		}
+	}
+	// Pending 必须逐个对象地报告，而不是被同一个 runID 去重掉。
+	pending := map[string]harness.StaleReason{}
+	for _, o := range rep.Pending {
+		pending[o.Kind+"/"+string(o.RunID)] = o.Reason
+	}
+	if got := pending["container/"+string(noOwnerRun)]; got != harness.StaleOwnerUnknown {
+		t.Errorf("无 owner 的容器应是 %q, got %q（Pending=%+v）", harness.StaleOwnerUnknown, got, rep.Pending)
+	}
+	if got := pending["network/"+string(noOwnerRun)]; got != harness.StaleOwnerUnknown {
+		t.Errorf("无 owner 的网络应是 %q, got %q（Pending=%+v）", harness.StaleOwnerUnknown, got, rep.Pending)
+	}
+	if got := pending["container/"+string(otherRun)]; got != harness.StaleOwnerMismatch {
+		t.Errorf("他人 owner 的容器应是 %q, got %q（Pending=%+v）", harness.StaleOwnerMismatch, got, rep.Pending)
+	}
+
+	// ── 删除面 ──
+	// Pending 当前被 ReclaimStale 丢弃（签名未切），所以这里不只看返回值，
+	// 而是**回宿主上确认对象还在**。
+	reclaimed, err := d.ReclaimStale(ctx, live)
+	if err != nil {
+		t.Fatalf("ReclaimStale: %v", err)
+	}
+	for _, id := range reclaimed {
+		if id == noOwnerRun || id == otherRun {
+			t.Fatalf("ReclaimStale 返回了外来的 run %s: %v", id, reclaimed)
+		}
+	}
+	if !exists("ps", "--all", "--filter", "label="+LabelRun+"="+string(noOwnerRun), "--format", "{{.ID}}") {
+		t.Errorf("无 owner 的容器被删了（它可能是升级前的孤儿，但也可能是别人的资源）")
+	}
+	if !exists("network", "ls", "--filter", "label="+LabelRun+"="+string(noOwnerRun), "--format", "{{.ID}}") {
+		t.Errorf("无 owner 的网络被删了")
+	}
+	if !exists("ps", "--all", "--filter", "label="+LabelRun+"="+string(otherRun), "--format", "{{.ID}}") {
+		t.Errorf("他人 owner 的容器被删了")
+	}
+}
+
 // 挂载面：宿主状态目录**绝不**出现在容器里。这条断言在真容器上再验一遍——
 // argv 断言保证「没写进去」，这里保证「即使写了也没生效」（比如具名卷的坑）。
 func TestIntegrationNoHostStateVisibleInContainer(t *testing.T) {
