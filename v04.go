@@ -354,6 +354,101 @@ type RunResult struct {
 	Completed bool
 	Reason    string
 	Err       string
+	// Manifest 是本次运行**实际生效的配置与产物身份**。
+	Manifest RunManifest
+}
+
+// RunManifest 是冻结下来的运行清单。
+//
+// 为什么需要它：RunResult 此前只有 16 个十六进制字符的 ProfileDigest，而摘要
+// **不可逆**——它能证明「两次运行不一样」，却无法回答「差在哪」。于是
+// 「这次跑的是 2 轮还是 5 轮停滞阈值」「用的是哪个镜像」这类问题在落盘之后
+// 一律无解，而它们恰恰是复现一次实验所必需的。清单把「请求值」与「生效值」
+// 分开记账：两者不同才是常态（回落链、tag 漂移）。
+//
+// ⚠️ **这是公开产物**：每一个字段都必须过 store 的白名单闸（见
+// store/results.go 的 publicManifest）。不许放路径、明文或凭据。
+type RunManifest struct {
+	// PlannerDryRounds 是**回落链的终点**：本次运行实际生效的停滞阈值。
+	// 与 SolverProfile.Planner.DryRoundsBeforeHint 的区别正是「请求值 vs 生效值」。
+	PlannerDryRounds int
+	// PromptMaxFacts / PromptMaxNegative 是配置值。
+	//
+	// 0 表示「由渲染层的默认值决定」（dag.DefaultMaxFacts / DefaultMaxNegative）
+	// ——那两份默认值在 dag 包里，根包看不到，所以这里**不折算**，如实记 0。
+	PromptMaxFacts    int
+	PromptMaxNegative int
+	// HintPolicy 是实际生效的提示策略（空串已折成 HintAuto）。
+	HintPolicy string
+	// RequestedImage 是配置里请求的镜像，通常是一个 tag——**tag 会漂移**。
+	// 空串表示「由装配层/执行器的默认值决定」。
+	RequestedImage string
+	// Image 是 Probe 解析出的镜像 ID（`sha256:…`）。
+	//
+	// 与 RequestedImage 并列而不是取代它：「tag 没变但内容变了」只有把两者
+	// 放在一起才看得出来，而那正是「换了次实验却以为是同一次」的成因。
+	// 空串表示**未核验**（例如 Fake sandbox 不解析镜像 ID），语义与
+	// ProbeResult.PiVersion 一致：不得读成「没问题」。
+	Image string
+	// PiVersion 是镜像内实测的 pi 版本。空串表示**未核验**。
+	PiVersion string
+	// ImageMismatch 为真表示同一 run 内 Probe 报了不同的镜像 ID。
+	//
+	// 既不静默覆盖（那会让「这次用的哪个镜像」变成**最后一道题**的答案），
+	// 也不当成运行失败（镜像一致性是 executor 层的性质，由它自己拒绝启动），
+	// 只记账——与 GraphSaveFailures 同一档处置。
+	ImageMismatch bool
+}
+
+// resolveManifest 冻结本次运行实际生效的配置。
+//
+// 它必须在任何题目起跑**之前**跑，且结果只算一次：清单要在事后回答「当时生效
+// 的是什么」，而不是「跑到一半被人改成了什么」。
+func resolveManifest(spec RunSpec) RunManifest {
+	m := RunManifest{
+		PromptMaxFacts:    spec.Profile.PromptPolicy.MaxFacts,
+		PromptMaxNegative: spec.Profile.PromptPolicy.MaxNegative,
+		HintPolicy:        spec.HintPolicy,
+		RequestedImage:    spec.Sandbox.Image,
+	}
+	// 与轮循环用的回落链**是同一段逻辑**：清单不另算一遍，否则两处一旦漂移，
+	// 清单记的就不是真正生效的那个值——而清单的全部意义就在于它记的是生效值。
+	m.PlannerDryRounds = resolveDryRounds(spec)
+	if m.HintPolicy == "" {
+		m.HintPolicy = HintAuto
+	}
+	if m.RequestedImage == "" {
+		// 与 runChallenge 里 sb.Image 的回落同源。
+		m.RequestedImage = spec.Executor.Image
+	}
+	return m
+}
+
+// resolveDryRounds 是「连续无进展多少轮后允许请求提示」的回落链。
+//
+// 单独一个函数是为了让清单与轮循环用**同一份**判定：两处各写一遍的话，
+// 清单会记一个值、实际生效另一个值，而两者都看起来正常。
+func resolveDryRounds(spec RunSpec) int {
+	if n := spec.Policy.DryRoundsBeforeHint; n > 0 {
+		return n
+	}
+	if n := spec.Profile.Planner.DryRoundsBeforeHint; n > 0 {
+		return n
+	}
+	return DefaultDryRoundsBeforeHint
+}
+
+// observeProbe 把一次 Probe 的结果记进清单。
+//
+// 第一次成功 Probe 冻结镜像身份，后续题只做一致性核对。
+func (m *RunManifest) observeProbe(p ProbeResult) {
+	if m.Image == "" {
+		m.Image, m.PiVersion = p.Image, p.PiVersion
+		return
+	}
+	if p.Image != "" && p.Image != m.Image {
+		m.ImageMismatch = true
+	}
 }
 
 // Harness is the synchronous v0.4 façade. It intentionally contains no pause,
@@ -548,6 +643,10 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	started := h.now()
 	runID := RunID(fmt.Sprintf("run-%d", started.UnixNano()))
 	result := RunResult{RunID: runID, Scenario: spec.Scenario, ProfileDigest: spec.Profile.Digest(), Model: spec.Agent.Model, StartedAt: started}
+	// 运行清单在起跑前冻结。`&result.Manifest` 会一路交给 runChallenge——它在那里
+	// 记 Probe 解析出的镜像身份，所以清单是**跑到哪记到哪**的一份（其余字段在
+	// 这里就定了）。
+	result.Manifest = resolveManifest(spec)
 	// 扩展包内容摘要在**任何副作用之前**算并冻结：它要描述的是本次运行实际
 	// 挂载的那份 bundle，而不是跑到一半被人替换后的样子。算不出来就 fail closed
 	// ——一份「摘要未知」的 profile 无法与别的运行分组比较，而分组错了会让整个
@@ -597,7 +696,7 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 		if len(spec.Targets) > 0 && !contains(spec.Targets, ch.Code) {
 			continue
 		}
-		cr, runErr := h.runChallenge(ctx, runID, spec, ch)
+		cr, runErr := h.runChallenge(ctx, runID, spec, ch, &result.Manifest)
 		result.Challenges = append(result.Challenges, cr)
 		if runErr != nil && firstErr == nil {
 			firstErr = runErr
@@ -695,7 +794,9 @@ func runState(r RunResult, firstErr error) RunState {
 	return RunFinished
 }
 
-func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, ch Challenge) (cr ChallengeResult, runErr error) {
+// manifest 是本次运行共享的运行清单，本函数负责把 Probe 解析出的镜像身份记进去
+// （第一次成功 Probe 冻结，后续只做一致性核对）。题目串行，所以不需要加锁。
+func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, ch Challenge, manifest *RunManifest) (cr ChallengeResult, runErr error) {
 	cr = ChallengeResult{Challenge: ch, StartedAt: h.now()}
 	// ⚠️ **必须回填进 OutcomeView**：耗时（CLI 摘要、公开结果的 durationSeconds、
 	// stats 的累计耗时）全部走 `OutcomeView.Duration()`，而它读的是 OutcomeView 自己
@@ -770,9 +871,13 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		cr.EndedAt = h.now()
 		return cr, err
 	}
-	if _, err := ss.Probe(ctx); err != nil {
+	// Probe 的返回值此前被 `_` 丢弃——镜像 ID 与 pi 版本因此从来没有进过任何落盘
+	// 产物，而「这次跑的到底是哪个镜像」恰恰是复现一次实验的前提。现在它进运行清单。
+	if pr, err := ss.Probe(ctx); err != nil {
 		cr.EndedAt = h.now()
 		return cr, err
+	} else {
+		manifest.observeProbe(pr)
 	}
 	var planner Planner
 	var renderer Renderer
@@ -916,7 +1021,12 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 				previousCost = cr.Outcome.Stats.CostUSD
 				ss, err = h.sandbox.NewSession(ctx, sb)
 				if err == nil {
-					_, err = ss.Probe(ctx)
+					// 重启后的 Probe 同样进清单：它走的是同一次核对，不是
+					// 「顺手看一眼」——换了镜像的会话不该被当成本来的那个。
+					var pr ProbeResult
+					if pr, err = ss.Probe(ctx); err == nil {
+						manifest.observeProbe(pr)
+					}
 				}
 				if err == nil {
 					ag, err = h.agents.New(spec.Agent, ss, sink)
@@ -1053,15 +1163,12 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		} else {
 			dryRounds++
 		}
-		// 回落链：PolicySpec → profile.Planner → 内置默认。三级都是「0 = 没配」，
-		// 与 Validate 的约定一致（Validate 只拒越界值，不拒 0）。
-		threshold := spec.Policy.DryRoundsBeforeHint
-		if threshold <= 0 {
-			threshold = spec.Profile.Planner.DryRoundsBeforeHint
-		}
-		if threshold <= 0 {
-			threshold = DefaultDryRoundsBeforeHint
-		}
+		// 阈值直接取自运行清单，而**不是**在这里再算一遍回落链。
+		//
+		// 为什么这很重要：清单的全部意义是「它记的是生效值」。若轮循环自己算一份、
+		// 清单另算一份，两处一旦漂移，公开结果里那个数就只是「另一个算过一遍的数」
+		// ——看起来正常，却与实际行为无关。取同一份来源，这条漂移就不存在。
+		threshold := manifest.PlannerDryRounds
 		// 提示**每题最多一次**。HintAlways 也受这条守卫——v0.2 的文档写着
 		// 「每轮都提示」而代码里没有守卫，那会让提示额度被瞬间打光。
 		shouldHint := hintUsed == 0 && (hintPolicy == HintAlways ||

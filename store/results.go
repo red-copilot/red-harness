@@ -35,14 +35,22 @@ const (
 	// 结果文件没有这个字段），把一次坏值折成空就等于对外宣称「这次运行没有终态
 	// 记录」；而真实情况是「有个值，但它不是任何已知终态」。两者必须能分开。
 	stateUnrecognized = "unrecognized"
-	// minBundleDigestLen / maxBundleDigestLen 是扩展包摘要串的长度区间。
+	// minDigestLen / maxDigestLen 是公开面所有摘要串的长度区间。
 	//
 	// 今天的摘要恰好 16 个十六进制字符（sha256 的 hex[:8]，见 v04.go 的
 	// bundleDigest）；下界取 8、上界取完整 sha256 的 64，是**区间而不是定长**：
 	// 将来根包把截断口径改长改短时，store 只是转发的下游，定长校验会让所有摘要
 	// 静默变成空串（看起来像「本题没配扩展包」），比不校验更难查。
-	minBundleDigestLen = 8
-	maxBundleDigestLen = 64
+	//
+	// 一份规则服务三个字段（ProfileDigest / BundleDigest / 清单里的摘要）：它们
+	// 是同一个东西（sha256 截断）落了三个位置，各写一份校验必然漂移。
+	minDigestLen = 8
+	maxDigestLen = 64
+	// maxImageRefLen 是镜像引用（tag 或 digest）的长度上限。
+	// sha256 digest 是 71 字符（"sha256:" + 64 位十六进制），tag 更短。
+	maxImageRefLen = 128
+	// maxPiVersionLen 是 pi 版本串的长度上限（形如 "0.85.1"，实测 6 字符）。
+	maxPiVersionLen = 32
 )
 
 // ResultFileStore persists only public aggregate metrics. It never marshals
@@ -97,6 +105,34 @@ type publicResult struct {
 	Reason        string            `json:"reason,omitempty"`
 	Err           string            `json:"errorClass,omitempty"`
 	Challenges    []publicChallenge `json:"challenges,omitempty"`
+	// Manifest 是本次运行实际生效的配置与产物身份。
+	//
+	// 用 omitzero：直接构造的 RunResult（测试、旧调用方）没有清单，不该在文件里
+	// 留下一片零值字段——那会让「没记录」与「记了一堆 0」看起来一样。
+	Manifest publicManifest `json:"manifest,omitzero"`
+}
+
+// publicManifest 是运行清单的公开形态。
+//
+// 它是**存储层自己的**结构，不是根包契约的直接序列化（理由同 publicResult）：
+// 根包的 RunManifest 加一个字段，不应该自动出现在公开文件里——每一个字段都得
+// 在这里显式决定怎么脱敏。镜像引用与版本号都过各自的字符集闸。
+type publicManifest struct {
+	// PlannerDryRounds 是实际生效的停滞阈值（回落链的终点）。
+	PlannerDryRounds int `json:"plannerDryRounds,omitempty"`
+	// PromptMaxFacts / PromptMaxNegative 是配置值；0 表示由渲染层默认值决定。
+	PromptMaxFacts    int `json:"promptMaxFacts,omitempty"`
+	PromptMaxNegative int `json:"promptMaxNegative,omitempty"`
+	// HintPolicy 是实际生效的提示策略（空串已折成 auto）。
+	HintPolicy string `json:"hintPolicy,omitempty"`
+	// RequestedImage 是配置里请求的镜像（通常是 tag，会漂移）。
+	RequestedImage string `json:"requestedImage,omitempty"`
+	// Image 是 Probe 解析出的镜像 ID（sha256:…）。空串表示未核验。
+	Image string `json:"image,omitempty"`
+	// PiVersion 是镜像内实测的 pi 版本。空串表示未核验。
+	PiVersion string `json:"piVersion,omitempty"`
+	// ImageMismatch 记录同一 run 内 Probe 报了不同镜像 ID。
+	ImageMismatch bool `json:"imageMismatch,omitempty"`
 }
 
 // publicChallenge 是一道题的公开指标。
@@ -139,11 +175,15 @@ type publicChallenge struct {
 }
 
 func toPublic(r harness.RunResult) publicResult {
-	p := publicResult{RunID: string(r.RunID), Scenario: r.Scenario, ProfileDigest: r.ProfileDigest,
-		BundleDigest: sanitizeBundleDigest(r.BundleDigest), Model: r.Model,
+	// 两个摘要过**同一份**规则：它们此前一个脱敏、一个原样落盘，同一个文件里
+	// 同性质的两个字段待遇不同是漏了一处，不是设计。
+	p := publicResult{RunID: string(r.RunID), Scenario: r.Scenario,
+		ProfileDigest: sanitizeHexDigest(r.ProfileDigest),
+		BundleDigest:  sanitizeHexDigest(r.BundleDigest), Model: r.Model,
 		StartedAt: r.StartedAt, EndedAt: r.EndedAt, Completed: r.Completed,
 		State:  sanitizeState(r.State),
-		Reason: sanitizeReason(r.Reason), Err: sanitizeErrorClass(r.Err)}
+		Reason: sanitizeReason(r.Reason), Err: sanitizeErrorClass(r.Err),
+		Manifest: toPublicManifest(r.Manifest)}
 	for _, c := range r.Challenges {
 		p.Challenges = append(p.Challenges, publicChallenge{Code: c.Challenge.Code,
 			Category: c.Challenge.Category, StartedAt: c.StartedAt, EndedAt: c.EndedAt,
@@ -158,6 +198,54 @@ func toPublic(r harness.RunResult) publicResult {
 			DurationSeconds:   c.Outcome.Duration().Seconds()})
 	}
 	return p
+}
+
+// toPublicManifest 逐字段构造公开清单。
+//
+// 逐字段而不是直接嵌根包的结构：公开面是**白名单**，新字段必须在这里被显式
+// 决定去留。直接嵌会让根包（或任何调用方）往 RunManifest 里加一个字段就自动
+// 出现在公开文件上——那正是这条纪律要防的事。
+func toPublicManifest(m harness.RunManifest) publicManifest {
+	return publicManifest{
+		PlannerDryRounds:  sanitizeCount(m.PlannerDryRounds),
+		PromptMaxFacts:    sanitizeCount(m.PromptMaxFacts),
+		PromptMaxNegative: sanitizeCount(m.PromptMaxNegative),
+		HintPolicy:        sanitizeHintPolicy(m.HintPolicy),
+		RequestedImage:    sanitizeImageRef(m.RequestedImage),
+		Image:             sanitizeImageRef(m.Image),
+		PiVersion:         sanitizePiVersion(m.PiVersion),
+		ImageMismatch:     m.ImageMismatch,
+	}
+}
+
+func fromPublicManifest(p publicManifest) harness.RunManifest {
+	return harness.RunManifest{
+		PlannerDryRounds:  p.PlannerDryRounds,
+		PromptMaxFacts:    p.PromptMaxFacts,
+		PromptMaxNegative: p.PromptMaxNegative,
+		HintPolicy:        p.HintPolicy,
+		RequestedImage:    p.RequestedImage,
+		Image:             p.Image,
+		PiVersion:         p.PiVersion,
+		ImageMismatch:     p.ImageMismatch,
+	}
+}
+
+// sanitizeHintPolicy 把提示策略折成公开面允许的三个值之一。
+//
+// 为什么不复用 sanitizeReason（同样是小写标识符形态）：这两处的值域不同，而
+// 提示策略是有**穷举**的三个值（HintOff/HintAuto/HintAlways）。用一个宽松的
+// 形态检查放行任意小写串，会让一个拼错的策略在公开面里看起来合法——而它恰恰
+// 是我们要在 RunSpec.Validate 里拒掉的东西。
+//
+// 取值直接比对根包常量，不在这里抄一份字面量：那正是「唯一真源」的反面。
+func sanitizeHintPolicy(s string) string {
+	switch s {
+	case harness.HintOff, harness.HintAuto, harness.HintAlways:
+		return s
+	default:
+		return ""
+	}
 }
 
 func sanitizeCleanupFailures(failures []string) []string {
@@ -199,7 +287,8 @@ func fromPublic(p publicResult) harness.RunResult {
 	r := harness.RunResult{RunID: harness.RunID(p.RunID), Scenario: p.Scenario,
 		ProfileDigest: p.ProfileDigest, BundleDigest: p.BundleDigest, Model: p.Model,
 		StartedAt: p.StartedAt, EndedAt: p.EndedAt, State: harness.RunState(p.State),
-		Completed: p.Completed, Reason: p.Reason, Err: p.Err}
+		Completed: p.Completed, Reason: p.Reason, Err: p.Err,
+		Manifest: fromPublicManifest(p.Manifest)}
 	for _, c := range p.Challenges {
 		r.Challenges = append(r.Challenges, harness.ChallengeResult{
 			Challenge: harness.Challenge{Code: c.Code, Category: c.Category},
@@ -325,27 +414,82 @@ func sanitizeState(s harness.RunState) string {
 	return stateUnrecognized
 }
 
-// sanitizeBundleDigest 把扩展包内容摘要折成一个**可进公开结果**的十六进制串。
+// sanitizeHexDigest 把摘要串折成一个**可进公开结果**的十六进制串。
 //
-// 为什么要卡死字符集：它与 ProfileDigest 并列落进公开文件，调用方会拿它判断
-// 「两次运行挂的是不是同一份扩展包」。摘要本身由 v04.go 的 bundleDigest 产生
-// （sha256 的 hex[:8]，即 16 个十六进制字符），但 store 不能假定调用方一定走了
-// 那条路：一个自由串写进来，既可能让两份不同的 bundle 看起来相同（伪造核验），
-// 也可能把明文带进公开面。所以只放行纯 [0-9a-f] 且长度落在
-// [minBundleDigestLen, maxBundleDigestLen] 区间内的串（空串天然落进「太短」）。
+// 三个字段共用它：ProfileDigest、BundleDigest、以及运行清单里的同形摘要。它们
+// 是同一个东西（sha256 的 hex[:8]）落在三个位置——此前只有 BundleDigest 有闸，
+// ProfileDigest 原样落盘，同一个文件里两个同性质的字段待遇不同。那不是「两者
+// 本来就不一样」，是漏了一处。
 //
-// 不合法一律折成**空串**：空串在这个字段上的语义是「未核验」，对坏值来说它是
-// 诚实的答案——store 不知道这份内容摘要是什么，就不能给出一个看起来已核验的串。
+// 为什么要卡死字符集：调用方会拿这些串判断「两次运行是不是同一组配置」。摘要
+// 由根包产生，但 store 不能假定调用方一定走了那条路：一个自由串写进来，既可能
+// 让两份不同的东西看起来相同（伪造核验），也可能把明文带进公开面。所以只放行
+// 纯 [0-9a-f] 且长度落在 [minDigestLen, maxDigestLen] 区间内的串（空串天然落进
+// 「太短」）。
+//
+// 不合法一律折成**空串**：空串在这些字段上的语义是「未核验」，对坏值来说它是
+// 诚实的答案——store 不知道这份摘要是什么，就不能给出一个看起来已核验的串。
 //
 // 已知取舍：折空会丢掉「调用方传了个坏值」这个信息（与「本题没配扩展包」同形）。
-// 这里不折成一个显式的坏值常量，是因为这个字段的消费方式是**内容比对**——放一个
+// 这里不折成一个显式的坏值常量，是因为这些字段的消费方式是**内容比对**——放一个
 // 常量进去，会让两次无关的运行看起来挂了同一份 bundle，比少一点信息有害得多。
-func sanitizeBundleDigest(s string) string {
-	if len(s) < minBundleDigestLen || len(s) > maxBundleDigestLen {
+func sanitizeHexDigest(s string) string {
+	if len(s) < minDigestLen || len(s) > maxDigestLen {
 		return ""
 	}
 	for _, r := range s {
 		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return ""
+		}
+	}
+	return s
+}
+
+// sanitizeImageRef 放行镜像引用（tag 或 digest），其余一律折成空串。
+//
+// 为什么镜像字段也要过闸：RequestedImage 与 Image 会被原样落盘，来源是配置与
+// docker 的输出。公开结果会被拷进工单、贴进聊天——一个能装任意文本的字段就是
+// 一条明文/凭据泄漏通道（与 sanitizeReason 同一条理由）。
+//
+// 放行的字符集是镜像引用**实际会用到**的那些：digest 需要 `:`，registry 路径
+// 需要 `/`、`.`、`-`、`_`，按 digest 拉取还要 `@`。空串的语义是「未记录 /
+// 未核验」，对坏值来说它是诚实的答案。
+func sanitizeImageRef(s string) string {
+	if s == "" || len(s) > maxImageRefLen {
+		return ""
+	}
+	for _, r := range s {
+		if !isImageRefRune(r) {
+			return ""
+		}
+	}
+	return s
+}
+
+func isImageRefRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	case r == '.', r == '_', r == '-', r == ':', r == '/', r == '@':
+		return true
+	default:
+		return false
+	}
+}
+
+// sanitizePiVersion 放行 pi 的版本串（如 "0.85.1"）。
+//
+// 与 sanitizeImageRef 分开写而不是复用：两者值域不同（版本串不含 `/`、`:`、
+// `@`），混用会让其中一个悄悄接受不属于它的东西。字符集取 semver 常见形态。
+func sanitizePiVersion(s string) string {
+	if s == "" || len(s) > maxPiVersionLen {
+		return ""
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		case r == '.', r == '-', r == '+':
+		default:
 			return ""
 		}
 	}

@@ -26,6 +26,10 @@ const canaryFlag = "flag{canary-not-a-real-flag}"
 // 内容的摘要。
 const bundleDigestSample = "0123456789abcdef"
 
+// profileDigestSample 同理，但用一个**不同**的值：两个摘要字段在往返断言里
+// 各占一个位置，取同值会让「有没有串位」这类缺陷测不出来。
+const profileDigestSample = "fedcba9876543210"
+
 // baseTime 是固定的起跑时间。用 time.Date 而不是 time.Now：往返断言要求时间戳
 // 逐位相等，而 time.Now 带单调时钟读数（JSON 里不会保留它）。
 var baseTime = time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
@@ -182,7 +186,11 @@ func TestNewResultStoreCreatesPrivateDir(t *testing.T) {
 func TestResultRoundTripKeepsMetricsAndDropsPlaintext(t *testing.T) {
 	rs := newResultStore(t)
 	ended := baseTime.Add(90 * time.Second)
-	run := harness.RunResult{RunID: "run-rt", Scenario: "sc", ProfileDigest: "pd", Model: "m",
+	// ProfileDigest 用**真实形态**（digestJSON 的 sha256 hex[:8]，16 个十六进制
+	// 字符）。此前这里填的是 "pd" 这类占位串，而公开面现在与 BundleDigest 走
+	// 同一份字符集校验——占位串会被折成空串，于是「往返一致」这条断言测的就不再
+	// 是它要测的东西。
+	run := harness.RunResult{RunID: "run-rt", Scenario: "sc", ProfileDigest: profileDigestSample, Model: "m",
 		BundleDigest: bundleDigestSample,
 		StartedAt:    baseTime, EndedAt: ended, Completed: true, Reason: harness.ReasonCompleted,
 		State: harness.RunFinished,
@@ -355,18 +363,18 @@ func TestBundleDigestSanitized(t *testing.T) {
 	}{
 		{"空串保持空（未核验）", "", ""},
 		{"十六进制摘要放行", bundleDigestSample, bundleDigestSample},
-		{"完整 sha256 放行", strings.Repeat("abcdef0123456789", maxBundleDigestLen/16), strings.Repeat("abcdef0123456789", maxBundleDigestLen/16)},
+		{"完整 sha256 放行", strings.Repeat("abcdef0123456789", maxDigestLen/16), strings.Repeat("abcdef0123456789", maxDigestLen/16)},
 		{"明文折叠成空", canaryFlag, ""},
 		{"大写 hex 折叠", "0123456789ABCDEF", ""},
 		{"非 hex 折叠", "0123456789abcdez", ""},
 		{"带空格折叠", " 0123456789abcdef", ""},
 		{"太短折叠", "abc", ""},
-		{"太长折叠", strings.Repeat("a", maxBundleDigestLen+1), ""},
+		{"太长折叠", strings.Repeat("a", maxDigestLen+1), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := sanitizeBundleDigest(tc.in); got != tc.want {
-				t.Fatalf("sanitizeBundleDigest(%q) = %q，期望 %q", tc.in, got, tc.want)
+			if got := sanitizeHexDigest(tc.in); got != tc.want {
+				t.Fatalf("sanitizeHexDigest(%q) = %q，期望 %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -382,7 +390,13 @@ func TestNewResultFieldsSanitizedOnDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	saveRun(t, rs, harness.RunResult{RunID: "run-bad", StartedAt: baseTime,
-		State: canaryFlag, BundleDigest: canaryFlag,
+		State: canaryFlag, BundleDigest: canaryFlag, ProfileDigest: canaryFlag,
+		// 清单里的字段同样走白名单：镜像与版本是**自由串**（来源是配置与 docker
+		// 输出），明文顺着它们漏进公开面与顺着 Reason 漏进去是同一条通道。
+		Manifest: harness.RunManifest{
+			HintPolicy: canaryFlag, RequestedImage: canaryFlag, Image: canaryFlag,
+			PiVersion: canaryFlag, PlannerDryRounds: -1,
+		},
 		Challenges: []harness.ChallengeResult{{
 			Challenge: harness.Challenge{Code: "c1"},
 			Outcome:   harness.OutcomeView{BranchesAbandoned: -3},
@@ -405,17 +419,93 @@ func TestNewResultFieldsSanitizedOnDisk(t *testing.T) {
 	if p.BundleDigest != "" {
 		t.Fatalf("落盘 bundleDigest = %q，期望空串", p.BundleDigest)
 	}
+	// ProfileDigest 与 BundleDigest 是公开文件里并列的两个摘要字段，走同一份
+	// 字符集校验——此前只有后者有闸，同性质的两个字段待遇不同是漏了一处。
+	if p.ProfileDigest != "" {
+		t.Fatalf("落盘 profileDigest = %q，期望空串", p.ProfileDigest)
+	}
 	if len(p.Challenges) != 1 || p.Challenges[0].BranchesAbandoned != 0 {
 		t.Fatalf("落盘 branchesAbandoned = %+v，期望被钳到 0", p.Challenges)
+	}
+	bad := p.Manifest
+	if bad.HintPolicy != "" || bad.RequestedImage != "" || bad.Image != "" || bad.PiVersion != "" {
+		t.Fatalf("清单里的坏值没有被折叠: %+v", bad)
+	}
+	if bad.PlannerDryRounds != 0 {
+		t.Fatalf("清单里的负数没有被钳到 0: %d", bad.PlannerDryRounds)
 	}
 	got, err := rs.Get(context.Background(), "run-bad")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != stateUnrecognized || got.BundleDigest != "" ||
+	if got.State != stateUnrecognized || got.BundleDigest != "" || got.ProfileDigest != "" ||
 		got.Challenges[0].Outcome.BranchesAbandoned != 0 {
-		t.Fatalf("读回的值不是折叠后的值: state=%q digest=%q abandoned=%d",
-			got.State, got.BundleDigest, got.Challenges[0].Outcome.BranchesAbandoned)
+		t.Fatalf("读回的值不是折叠后的值: state=%q digest=%q profile=%q abandoned=%d",
+			got.State, got.BundleDigest, got.ProfileDigest, got.Challenges[0].Outcome.BranchesAbandoned)
+	}
+	if got.Manifest.Image != "" || got.Manifest.PiVersion != "" || got.Manifest.HintPolicy != "" {
+		t.Fatalf("读回的清单不是折叠后的值: %+v", got.Manifest)
+	}
+}
+
+// TestManifestRoundTripAndSanitizers 钉住运行清单的两件事：
+//
+//  1. 合法值能完整往返（清单的全部意义是事后可读，往返丢了就等于没记）；
+//  2. 每个自由串字段都过自己的字符集闸——镜像引用与版本号的值域不同，各自一份
+//     规则，混用会让其中一个悄悄接受不属于它的东西。
+func TestManifestRoundTripAndSanitizers(t *testing.T) {
+	m := harness.RunManifest{
+		PlannerDryRounds: 3, PromptMaxFacts: 8, PromptMaxNegative: 4,
+		HintPolicy: harness.HintAuto,
+		// 镜像引用要能吃下 digest 与 registry 路径两种形态。
+		RequestedImage: "red-harness-runner:v0.3.0",
+		Image:          "sha256:4e08f9133cd2f36d30fe26011d3a4308d6f7eef5ebbcdc203867608c37b66e98",
+		PiVersion:      "0.85.1", ImageMismatch: true,
+	}
+	got := fromPublicManifest(toPublicManifest(m))
+	if got != m {
+		t.Fatalf("清单往返不一致:\n got %+v\nwant %+v", got, m)
+	}
+
+	// 逐字段的值域边界。每一条都是「这个字段不该接受的东西」。
+	cases := []struct {
+		name string
+		in   string
+		got  string
+	}{
+		{"镜像引用接受 digest", m.Image, m.Image},
+		{"镜像引用接受 registry 路径", "registry.example.com:5000/a/b@sha256:abcd", "registry.example.com:5000/a/b@sha256:abcd"},
+		{"镜像引用拒绝空格", "evil image", ""},
+		{"镜像引用拒绝明文", canaryFlag, ""},
+		{"镜像引用拒绝换行", "a\nb", ""},
+		{"版本接受 semver", "0.85.1", "0.85.1"},
+		{"版本接受预发布标记", "1.2.3-rc.1+build", "1.2.3-rc.1+build"},
+		{"版本拒绝斜杠", "0.85.1/x", ""},
+		{"版本拒绝明文", canaryFlag, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			if strings.Contains(tc.name, "版本") {
+				got = sanitizePiVersion(tc.in)
+			} else {
+				got = sanitizeImageRef(tc.in)
+			}
+			if got != tc.got {
+				t.Fatalf("sanitize(%q) = %q，期望 %q", tc.in, got, tc.got)
+			}
+		})
+	}
+
+	// 提示策略是**穷举**的三个值，不是「小写标识符形态」——一个拼错的策略必须
+	// 折掉，否则它在公开面里看起来合法，而 RunSpec.Validate 恰恰要拒掉它。
+	for _, ok := range []string{harness.HintOff, harness.HintAuto, harness.HintAlways} {
+		if got := sanitizeHintPolicy(ok); got != ok {
+			t.Errorf("合法策略 %q 被折成 %q", ok, got)
+		}
+	}
+	if got := sanitizeHintPolicy("alwayss"); got != "" {
+		t.Errorf("拼错的策略应折成空串，得到 %q", got)
 	}
 }
 
@@ -433,8 +523,10 @@ func TestNewResultFieldsEmptyStayEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// omitempty：旧形状的文件里根本不该出现这两个键（读旧文件靠 json 零值兜底）。
-	for _, key := range []string{`"state"`, `"bundleDigest"`} {
+	// omitempty/omitzero：旧形状的文件里根本不该出现这几个键（读旧文件靠 json
+	// 零值兜底）。清单用 omitzero：没有清单的运行不该留下一片零值字段——那会让
+	// 「没记录」与「记了一堆 0」看起来一样。
+	for _, key := range []string{`"state"`, `"bundleDigest"`, `"manifest"`} {
 		if strings.Contains(string(b), key) {
 			t.Fatalf("空值不该落盘成 %s: %s", key, b)
 		}
@@ -590,18 +682,29 @@ func TestRecallDeltaEdgeCases(t *testing.T) {
 
 // ── 过滤维度 ──
 
+// 过滤维度用的四份摘要。全部是**合法形态**（16 个十六进制字符）：
+// profile/bundle 两个维度现在走同一份字符集校验，占位串（"pd-a" 之类）会被折成
+// 空串，于是「按 profile 过滤」这条断言会因为**格式**而不是**语义**失败——
+// 那种失败指向不了任何真实缺陷。
+const (
+	profileA = "aaaa000011112222"
+	profileB = "bbbb000011112222"
+	bundleA  = "0123456789abcdef"
+	bundleB  = "fedcba9876543210"
+)
+
 // seedFilterRuns 建两份结果，覆盖全部过滤维度。
 func seedFilterRuns(t *testing.T, rs *ResultFileStore) {
 	t.Helper()
-	saveRun(t, rs, harness.RunResult{RunID: "run-a", Scenario: "sc-a", ProfileDigest: "pd-a",
-		BundleDigest: "0123456789abcdef", Model: "m-a", StartedAt: baseTime, Completed: true,
+	saveRun(t, rs, harness.RunResult{RunID: "run-a", Scenario: "sc-a", ProfileDigest: profileA,
+		BundleDigest: bundleA, Model: "m-a", StartedAt: baseTime, Completed: true,
 		Challenges: []harness.ChallengeResult{{
 			Challenge: harness.Challenge{Code: "c-a", Category: "cat-a"},
 			Outcome: harness.OutcomeView{ProgressTotal: 10, ProgressConfirmed: 7,
 				RemainingAtStart: 5, Score: 10, Stats: harness.Stats{CostUSD: 0.5}, HintUsed: 1},
 		}}})
-	saveRun(t, rs, harness.RunResult{RunID: "run-b", Scenario: "sc-b", ProfileDigest: "pd-b",
-		BundleDigest: "fedcba9876543210", Model: "m-b", StartedAt: baseTime.Add(2 * time.Hour),
+	saveRun(t, rs, harness.RunResult{RunID: "run-b", Scenario: "sc-b", ProfileDigest: profileB,
+		BundleDigest: bundleB, Model: "m-b", StartedAt: baseTime.Add(2 * time.Hour),
 		Challenges: []harness.ChallengeResult{{
 			Challenge: harness.Challenge{Code: "c-b", Category: "cat-b"},
 			Outcome: harness.OutcomeView{ProgressTotal: 4, ProgressConfirmed: 1,
@@ -620,16 +723,16 @@ func TestStatsFilters(t *testing.T) {
 		wantConfirmed int
 		wantRemaining int
 	}{
-		{"ProfileDigest 命中", harness.StatsQuery{ProfileDigest: "pd-a"}, 1, 2, 5},
-		{"ProfileDigest 不命中", harness.StatsQuery{ProfileDigest: "pd-z"}, 0, 0, 0},
-		{"BundleDigest 命中", harness.StatsQuery{BundleDigest: "0123456789abcdef"}, 1, 2, 5},
+		{"ProfileDigest 命中", harness.StatsQuery{ProfileDigest: profileA}, 1, 2, 5},
+		{"ProfileDigest 不命中", harness.StatsQuery{ProfileDigest: "cccc000011112222"}, 0, 0, 0},
+		{"BundleDigest 命中", harness.StatsQuery{BundleDigest: bundleA}, 1, 2, 5},
 		{"BundleDigest 不命中", harness.StatsQuery{BundleDigest: "ffffffffffffffff"}, 0, 0, 0},
 		// 这两个维度是**独立**的：ProfileDigest 里存的只是 bundle 的**路径**，
 		// 同一个路径换了内容它不会变。所以「profile 命中但 bundle 不命中」必须
 		// 过滤掉——不这么做，两次不同的扩展包会被算作同一次实验，而输出上
 		// 完全看不出来。
-		{"Profile+Bundle 同时命中", harness.StatsQuery{ProfileDigest: "pd-a", BundleDigest: "0123456789abcdef"}, 1, 2, 5},
-		{"Profile 命中但 Bundle 不命中", harness.StatsQuery{ProfileDigest: "pd-a", BundleDigest: "fedcba9876543210"}, 0, 0, 0},
+		{"Profile+Bundle 同时命中", harness.StatsQuery{ProfileDigest: profileA, BundleDigest: bundleA}, 1, 2, 5},
+		{"Profile 命中但 Bundle 不命中", harness.StatsQuery{ProfileDigest: profileA, BundleDigest: bundleB}, 0, 0, 0},
 		{"Model 命中", harness.StatsQuery{Model: "m-b"}, 1, 1, 4},
 		{"Model 不命中", harness.StatsQuery{Model: "m-z"}, 0, 0, 0},
 		{"Scenario 命中", harness.StatsQuery{Scenario: "sc-a"}, 1, 2, 5},
