@@ -1,12 +1,15 @@
 package wire
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	harness "github.com/red-copilot/red-harness"
+	"github.com/red-copilot/red-harness/dag"
+	"github.com/red-copilot/red-harness/store"
 )
 
 // 本文件的测试**不碰 Docker、不碰网络、不碰平台**：装配层的可测部分正是
@@ -192,5 +195,141 @@ func TestLoadFakeFixtureRejectsUnsolvable(t *testing.T) {
 	// 「用演示题跑了一遍」，用户拿到的是假的验收结论）。
 	if _, err := loadFakeFixture(filepath.Join(dir, "nope.json")); err == nil {
 		t.Fatal("夹具文件不存在时应当报错，而不是退回内置演示题")
+	}
+}
+
+// ── 图落盘 ──
+
+// TestDagGraphSaverWritesUnderStoreDir 钉落点与权限。
+//
+// 重点是**写在哪**：图属于运行目录（`<StoreDir>/runs/<id>/graph.json`），而公开
+// 指标在结果树（`<ResultDir>/results/<id>.json`）。两者缺省同根，一旦调用方把
+// --results 分开配，写错地方就会让图跑进结果树——而 store 的 PutGraph 是唯一
+// 带 0600 与原子写的路径，绕过它自己 os.WriteFile 会把权限也一起丢掉。
+func TestDagGraphSaverWritesUnderStoreDir(t *testing.T) {
+	dir := t.TempDir()
+	root, err := store.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &dagGraphSaver{root: root, live: map[string]*dag.Graph{}}
+
+	ch := harness.Challenge{Code: "c1", Category: "web",
+		Description: "找 flag{...}", FlagFormat: "flag{...}"}
+	graph := dag.New(ch)
+	if _, err := graph.AddFact(dag.Node{Kind: dag.NodeFact, FactKind: dag.FactService,
+		Content: "nginx/1.18.0", Source: "bash: nmap"}); err != nil {
+		t.Fatal(err)
+	}
+	s.register(ch.Code, graph)
+
+	const runID = harness.RunID("run-1")
+	if err := s.SaveGraph(context.Background(), runID, ch); err != nil {
+		t.Fatalf("SaveGraph: %v", err)
+	}
+
+	path := filepath.Join(dir, "runs", string(runID), "graph.json")
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("图没有落在 <StoreDir>/runs/<runID>/graph.json: %v", err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o600 {
+		t.Errorf("graph.json 权限 = %o，期望 600（图含凭证事实与目标地址）", perm)
+	}
+	// 落盘的必须是一张**能载回来**的图，否则「留下来的是个好图」只是假设。
+	back, err := dag.Load(path)
+	if err != nil {
+		t.Fatalf("落盘的图载不回来: %v", err)
+	}
+	if back.Code != ch.Code {
+		t.Errorf("载回的题目编号 = %q，期望 %q", back.Code, ch.Code)
+	}
+	if len(back.Facts(dag.FactService)) != 1 {
+		t.Errorf("载回的事实数不对: %+v", back.Stats())
+	}
+	// 登记项必须被清掉：Harness 跨 Run 复用，留着会把上一轮的图认成本轮的。
+	s.mu.Lock()
+	left := len(s.live)
+	s.mu.Unlock()
+	if left != 0 {
+		t.Errorf("落盘后登记项应清空，还剩 %d 条", left)
+	}
+}
+
+// TestDagGraphSaverScrubsPlaintextOnWrite：答案明文不得顺着图落盘出去。
+//
+// 这是端到端版的明文防线：语料走**真实写盘路径**（register → SaveGraph →
+// store.PutGraph），而不是直接断言 dag 的序列化。回归背景：`json.Marshal` 曾经
+// 漏擦 `Rejected[].Content`，而那里面装的正是命中答案形状的原文——用
+// json.Marshal 落图是这件事最自然的实现方式，所以这条必须钉在**装配层**上。
+func TestDagGraphSaverScrubsPlaintextOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	root, err := store.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &dagGraphSaver{root: root, live: map[string]*dag.Graph{}}
+
+	ch := harness.Challenge{Code: "c1", Description: "找 flag{...}", FlagFormat: "flag{...}"}
+	graph := dag.New(ch)
+	const secret = "flag{leaked_through_graph_json}"
+	// 这条会被 ErrAnswerShaped 拒收，而拒收审计里带的就是它的原文。
+	if _, err := graph.AddFact(dag.Node{Kind: dag.NodeFact, FactKind: dag.FactArtifact,
+		Content: secret, Source: "bash: cat /tmp/f"}); err == nil {
+		t.Fatal("前置条件：答案形状的事实必须被拒")
+	}
+	s.register(ch.Code, graph)
+
+	const runID = harness.RunID("run-1")
+	if err := s.SaveGraph(context.Background(), runID, ch); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "runs", string(runID), "graph.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), secret) || strings.Contains(string(b), "leaked_through") {
+		t.Fatalf("图落盘泄漏了答案明文:\n%s", b)
+	}
+}
+
+// TestDagGraphSaverSkipsUnregistered：没登记过的题目不是错误。
+//
+// 图落盘是可选面：自定义 Planner 的调用方（或本题根本没建图）走不到 register，
+// 那不是失败，不该记一笔 GraphSaveFailures——那会把「本来就没有图」读成「图坏了」。
+func TestDagGraphSaverSkipsUnregistered(t *testing.T) {
+	root, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &dagGraphSaver{root: root, live: map[string]*dag.Graph{}}
+	ch := harness.Challenge{Code: "never-registered"}
+	if err := s.SaveGraph(context.Background(), "run-1", ch); err != nil {
+		t.Fatalf("未登记的题目不该报错: %v", err)
+	}
+}
+
+// TestNewFakeScenarioWiresGraphSaver：装配层必须真的把图落盘接上。
+//
+// 只断言「Harness 造出来了」不够——可选端口最容易的失败形态就是**没人接**：
+// 所有测试全绿，而每次运行都没有图，且没有任何地方说明为什么。
+func TestNewFakeScenarioWiresGraphSaver(t *testing.T) {
+	r, err := New(Options{StoreDir: t.TempDir(), Scenario: ScenarioFake})
+	if err != nil {
+		t.Fatalf("装配失败: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	var found bool
+	for _, c := range r.h.Doctor(context.Background()).Checks {
+		if c.Name == "graph_saver" {
+			found = true
+			if !c.OK {
+				t.Errorf("装配层没有接上图落盘: %s", c.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("体检里没有 graph_saver 这一项")
 	}
 }

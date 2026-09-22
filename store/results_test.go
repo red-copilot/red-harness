@@ -108,6 +108,53 @@ func TestResultFileStoreNeverPersistsCandidatePlaintext(t *testing.T) {
 	}
 }
 
+// TestGraphSaveFailuresUseTheirOwnWhitelist：图落盘失败走**自己那份**白名单。
+//
+// 回归的形状：这份值曾经会被塞进 CleanupFailures 那条路——而它只放行
+// agent/sandbox/scenario，于是 "write"/"marshal" 被**静默丢弃**，公开面上什么都
+// 看不到。那正是「账记了但看不见」，比不记更糟：它让「图没留下来」无从判断。
+func TestGraphSaveFailuresUseTheirOwnWhitelist(t *testing.T) {
+	root := t.TempDir()
+	rs, err := NewResultStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := harness.RunResult{RunID: "run-1", Challenges: []harness.ChallengeResult{{
+		Challenge: harness.Challenge{Code: "fake"},
+		Outcome: harness.OutcomeView{
+			Reason: harness.ReasonSolved,
+			// 两个合法枚举 + 一个白名单外的值 + 一个明文 canary。
+			GraphSaveFailures: []string{"write", "marshal", "boom", canaryFlag},
+		},
+	}}}
+	if err := rs.Save(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, resultsDirName, "run-1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsBytes(b, []byte(canaryFlag)) {
+		t.Fatalf("结果文件泄漏了候选明文: %s", b)
+	}
+	var p publicResult
+	if err := json.Unmarshal(b, &p); err != nil {
+		t.Fatal(err)
+	}
+	got := p.Challenges[0].GraphSaveFailures
+	if len(got) != 2 || got[0] != "write" || got[1] != "marshal" {
+		t.Fatalf("graphSaveFailures = %v，期望恰好 [write marshal]（白名单外的值必须被丢弃）", got)
+	}
+	// 走一轮往返：公开结构里的值要能读回 OutcomeView（否则 stats 与后续分析看不见）。
+	back, err := rs.Get(context.Background(), "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Challenges) != 1 || len(back.Challenges[0].Outcome.GraphSaveFailures) != 2 {
+		t.Fatalf("往返后 graphSaveFailures 丢了: %+v", back.Challenges)
+	}
+}
+
 // TestNewResultStoreCreatesPrivateDir：private/ 必须在**构造时**就存在。
 //
 // 回归：它原先只由第一次写 trace 惰性创建，而 bridge 在写 trace **之前**启动，

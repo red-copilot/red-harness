@@ -276,6 +276,7 @@ type Harness struct {
 	agents            AgentFactory
 	results           ResultStore
 	locker            RunLocker
+	graphs            GraphSaver
 	gate              func(Challenge) CandidateGate
 	solverWithProfile func(Challenge, SolverProfile) (Planner, Renderer)
 	solver            func(Challenge) (Planner, Renderer)
@@ -294,7 +295,11 @@ type HarnessOptions struct {
 	Agents   AgentFactory
 	Results  ResultStore
 	// Locker is required for all production runs, including direct SDK use.
-	Locker            RunLocker
+	Locker RunLocker
+	// Graphs 为 nil 表示不落盘 DAG。它是**可选**端口：图是研究辅助面，
+	// 直接调 SDK 的调用方可能根本不关心（见 GraphSaver 的注释）。
+	// 缺了它不会静默——Doctor 会报出来，装配层恒提供。
+	Graphs            GraphSaver
 	Gate              func(Challenge) CandidateGate
 	SolverWithProfile func(Challenge, SolverProfile) (Planner, Renderer)
 	// Solver creates a Planner and Renderer over the same per-challenge state.
@@ -347,8 +352,30 @@ func NewHarness(opts HarnessOptions) (*Harness, error) {
 		now = time.Now
 	}
 	return &Harness{scenario: opts.Scenario, sandbox: opts.Sandbox, agents: opts.Agents,
-		results: opts.Results, locker: opts.Locker, gate: opts.Gate, solverWithProfile: opts.SolverWithProfile, solver: opts.Solver, planner: opts.Planner,
+		results: opts.Results, locker: opts.Locker, graphs: opts.Graphs, gate: opts.Gate, solverWithProfile: opts.SolverWithProfile, solver: opts.Solver, planner: opts.Planner,
 		renderer: opts.Renderer, profile: opts.Profile, now: now}, nil
+}
+
+// graphSaverDetail 给体检写一句人话，明确「图会不会落盘」。
+//
+// 写成两句而不是只在失败时报错：Doctor 的输出是给人判断「这次跑出来的东西里
+// 有没有图可看」的，缺席时要能一眼看出是「没接」而不是「接了没写出来」。
+func graphSaverDetail(h *Harness) string {
+	if h == nil || h.graphs == nil {
+		return "未接入：本次运行不会落盘 DAG（<StoreDir>/runs/<runID>/graph.json 不会出现）"
+	}
+	return "已接入：每题终态落盘 DAG"
+}
+
+// graphSaveStage 把图落盘的失败折成公开面允许的枚举值。
+//
+// 为什么要这一步：公开结果里**不能**出现原始错误文本（可能带路径、目标地址、
+// 平台响应片段）。原始错误仍在 err 链上（它不参与序列化），供调用方查日志。
+func graphSaveStage(err error) string {
+	if errors.Is(err, ErrGraphWrite) {
+		return "write"
+	}
+	return "marshal"
 }
 
 func (h *Harness) Doctor(ctx context.Context) DoctorReport {
@@ -360,6 +387,11 @@ func (h *Harness) Doctor(ctx context.Context) DoctorReport {
 		{Name: "renderer", OK: h != nil && (h.renderer != nil || h.solver != nil || h.solverWithProfile != nil), Fatal: true},
 		{Name: "gate", OK: h != nil && h.gate != nil, Fatal: true}}
 	checks = append(checks, DoctorCheck{Name: "locker", OK: h != nil && h.locker != nil, Fatal: true})
+	// 图落盘是**可选**端口，所以这条**不是** Fatal：不接它不影响任何一次运行的
+	// 成败。但它必须出现在体检里——否则「这道题为什么没有图」会变成一次静默的
+	// 缺失，而 open items 那套判据正是拿「有没有人看得见」当标准的。
+	checks = append(checks, DoctorCheck{Name: "graph_saver", OK: h != nil && h.graphs != nil, Fatal: false,
+		Detail: graphSaverDetail(h)})
 	if h != nil && h.sandbox != nil {
 		// Reclaim is deliberately not called here: doctor must not mutate runtime
 		// state. Presence checks are enough at this layer.
@@ -640,11 +672,33 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		cr.EndedAt = h.now()
 		return cr, err
 	}
-	sink := newEventSink(ctx)
-	defer sink.Close()
 	var planner Planner
 	var renderer Renderer
 	var gate CandidateGate
+	sink := newEventSink(ctx)
+	// ⚠️ **Close 与图落盘必须在同一个 defer 里，顺序显式写死**：
+	//
+	//  1. 先 sink.Close() 等事件消费者协程退出。本题的若干错误出口（轮次错误、
+	//     预算耗尽、提交不确定…）**不调 sink.Flush**，那条路上消费者可能仍在
+	//     处理残留事件、也就是仍在写图（ObserveEvent → 图）。序列化要遍历全部
+	//     节点并 marshal，窗口远大于一次计数，撞上就是数据竞争。
+	//  2. 再落盘。
+	//
+	// 不拆成两个 defer 靠 LIFO 定序：那是隐式的，将来有人在中间插一行 defer 就会
+	// 静默翻转——而翻转的表现是数据竞争，不是编译错误。
+	defer func() {
+		sink.Close()
+		if h.graphs == nil {
+			return
+		}
+		// 独立的有界 context：走到这里时 ctx 可能已被取消（取消/超时路径），
+		// 而图恰恰是那些路径上最值得留下的东西。与 cleanup 同一个理由。
+		saveCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := h.graphs.SaveGraph(saveCtx, runID, ch); err != nil {
+			cr.Outcome.GraphSaveFailures = append(cr.Outcome.GraphSaveFailures, graphSaveStage(err))
+		}
+	}()
 	if h.gate != nil && (h.solverWithProfile != nil || h.solver != nil || h.planner != nil && h.renderer != nil) {
 		if h.solverWithProfile != nil {
 			planner, renderer = h.solverWithProfile(ch, spec.Profile)

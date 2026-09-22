@@ -315,6 +315,18 @@ type OutcomeView struct {
 	Err string
 	// CleanupFailures records failed cleanup stages without exposing raw errors.
 	CleanupFailures []string
+	// GraphSaveFailures 记录图落盘的失败阶段（"marshal" / "write"），不携带原始
+	// 错误文本。
+	//
+	// **为什么不复用 CleanupFailures**：它的落盘白名单只放行 agent/sandbox/scenario
+	// （见 store/results.go 的 sanitizeCleanupFailures），别的值会被**静默丢弃**——
+	// 那样「账记了但看不见」，等于没记。
+	//
+	// 为什么图落盘失败只记账、不算本题失败：图是研究辅助面，把它算成失败会把
+	// 「模型解出来了」在公开指标里降级成「跑坏了」，而 Reason 的语义是「为什么停」
+	// （见 Reason* 与 BranchesAbandoned 的注释）。但「没写出去」也绝不能读成
+	// 「写了」，所以失败必须出现在公开结果里。
+	GraphSaveFailures []string
 	// StartedAt / EndedAt 用于报告。
 	StartedAt time.Time
 	EndedAt   time.Time

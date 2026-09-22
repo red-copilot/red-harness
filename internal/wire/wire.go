@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	harness "github.com/red-copilot/red-harness"
@@ -210,6 +211,17 @@ func New(opts Options) (*Runner, error) {
 		return nil, err
 	}
 
+	// 图存储的**根句柄**。图落在 <StoreDir>/runs/<runID>/graph.json，而不是结果树
+	// ——两者缺省同根，但 --results 一旦不同，混用就会把 graph.json 写进结果目录。
+	//
+	// store.New 在构造时就 mkdirAllPrivate：这同时是一次装配期的「这台机器写不写
+	// 得动」探针，失败发生在第 0 秒，而不是第 N 题跑完之后。
+	graphRoot, err := store.New(storeDir)
+	if err != nil {
+		return nil, err
+	}
+	graphs := &dagGraphSaver{root: graphRoot, live: map[string]*dag.Graph{}}
+
 	sc, client, err := buildScenario(name, opts, storeDir)
 	if err != nil {
 		return nil, err
@@ -276,11 +288,16 @@ func New(opts Options) (*Runner, error) {
 		Gate:     func(ch harness.Challenge) harness.CandidateGate { return gate.NewGate(ch.Description) },
 		SolverWithProfile: func(ch harness.Challenge, profile harness.SolverProfile) (harness.Planner, harness.Renderer) {
 			graph := dag.New(ch)
+			// 登记这张图，供 Harness 在本题收尾时落盘。闭包签名里没有 runID
+			// （那是公开面），所以按题目编号登记；`SaveGraph` 拿到 runID 之后再
+			// 取视图写盘。题目串行，因此「登记 → 落盘」之间不会插进别的题目。
+			graphs.register(ch.Code, graph)
 			renderer := &dag.Renderer{G: graph}
 			renderer.MaxFacts = profileLimit(profile.PromptPolicy, "maxFacts")
 			renderer.MaxNegative = profileLimit(profile.PromptPolicy, "maxNegative")
 			return dag.NewScheduler(graph), renderer
 		},
+		Graphs:  graphs,
 		Profile: profile,
 		Now:     opts.Now,
 	})
@@ -799,4 +816,63 @@ func dockerCommand(ctx context.Context, args ...string) dockerResult {
 		return dockerResult{errClass: fmt.Sprintf("%T", err), err: err}
 	}
 	return dockerResult{out: out.String()}
+}
+
+// ── 图落盘 ──
+
+// dagGraphSaver 实现 harness.GraphSaver：把每道题的 DAG 落到
+// <StoreDir>/runs/<runID>/graph.json。
+//
+// **为什么由装配层做**：图的创建者是这里的 SolverWithProfile 闭包，而根包不许
+// import dag（那是并行开发的前提）。装配层同时认识 dag 与 store，是唯一能把这
+// 两端接起来的地方；根包只见 `SaveGraph(runID, ch)` 这一个窄接口。
+//
+// 为什么按题目编号登记而不是按 runID：闭包的签名里没有 runID（它是公开面，
+// 加参数会波及所有 fake），而题目串行执行，「登记 → 落盘」之间不会插进别的题目。
+// 落盘后立刻删掉登记项，避免 Harness 跨 Run 复用时把上一轮的图认成本轮的。
+type dagGraphSaver struct {
+	root *store.FileStore
+
+	mu   sync.Mutex
+	live map[string]*dag.Graph
+}
+
+var _ harness.GraphSaver = (*dagGraphSaver)(nil)
+
+func (s *dagGraphSaver) register(code string, g *dag.Graph) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.live[code] = g
+}
+
+func (s *dagGraphSaver) SaveGraph(ctx context.Context, runID harness.RunID, ch harness.Challenge) error {
+	s.mu.Lock()
+	graph, ok := s.live[ch.Code]
+	delete(s.live, ch.Code)
+	s.mu.Unlock()
+	if !ok {
+		// 没登记过（例如自定义 Planner 的调用方）不是错误：图落盘是可选面。
+		return nil
+	}
+	// ⚠️ 必须走 json.Marshal（它现在与 dag.Graph.Save 共用同一份擦洗，见
+	// dag/store.go 的 document()）。另拼一份序列化会把 Rejected[].Content 里的
+	// 答案明文写出去——那条路曾经真的漏过。
+	blob, err := json.Marshal(graph)
+	if err != nil {
+		return fmt.Errorf("%w: %v", harness.ErrGraphMarshal, err)
+	}
+	if err := ctx.Err(); err != nil {
+		// 端口收 ctx 是有意的：Harness 用一个**独立的有界** context 调它（取消路径
+		// 上主 ctx 已经没了，而图恰恰是那时最值得留下的）。store 的写接口不收 ctx，
+		// 所以这里至少尊重已到期的边界，而不是在取消之后再写一份。
+		return fmt.Errorf("%w: %v", harness.ErrGraphWrite, err)
+	}
+	view, err := s.root.ForRun(runID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", harness.ErrGraphWrite, err)
+	}
+	if err := view.PutGraph(blob); err != nil {
+		return fmt.Errorf("%w: %v", harness.ErrGraphWrite, err)
+	}
+	return nil
 }

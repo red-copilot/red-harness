@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -373,6 +374,40 @@ type GraphBlob = []byte
 type GraphStore interface {
 	PutGraph(blob GraphBlob) error
 	GetGraph() (GraphBlob, error)
+}
+
+// 图落盘的失败阶段。GraphSaver 的实现须用它们包裹失败原因——原始错误留在
+// err 链上（不参与序列化），公开结果只放这两个枚举值。理由与
+// sanitizeCleanupFailures 相同：公开面只能放可比较的枚举，不能放原始错误文本
+// （它可能带路径、目标地址、平台响应片段）。
+var (
+	// ErrGraphMarshal 表示图没能序列化（擦洗/编码阶段）。
+	ErrGraphMarshal = errors.New("图序列化失败")
+	// ErrGraphWrite 表示图没能写出去（落盘阶段）。
+	ErrGraphWrite = errors.New("图落盘失败")
+)
+
+// GraphSaver 把某次运行里某道题的 DAG 落盘。
+//
+// **为什么端口接 runID + Challenge，而不是把 GraphStore 直接挂到 Harness 上**：
+// v0.4 的 runID 在 `Run` 内部才生成，而 store 的句柄是**根句柄**——取某一次运行的
+// 视图需要 id（`store.FileStore.ForRun`）。让端口自己回答「这次运行的这道题的图
+// 存到哪」，runID 就不必穿进 `HarnessOptions.SolverWithProfile` 的签名（那是公开面
+// 变更，会波及所有 fake）。
+//
+// **为什么不由 Planner 交出字节**：图的创建者是装配层（`internal/wire` 的
+// SolverWithProfile 闭包），它同时认识 dag 与 store。由它持有图、并在收到「存这次
+// 运行的这道题」时序列化，是唯一既不需要根包认识 dag、也不需要靠**类型断言**取
+// 可选能力的形状——`NewAll` 那次的教训是「断言失败会静默回落」（见 CandidateGate
+// 的注释），这里不再重复。
+//
+// ⚠️ 实现方序列化时**必须**走 dag 的擦洗路径（`Save` 与 `MarshalJSON` 共用的那份
+// `document()`）：图里不许出现候选明文，而 `Rejected[].Content` 装的恰恰是命中
+// 答案形状的原文。
+//
+// 为 nil 表示不落盘（干跑、离线测试，以及不关心图研究的调用方）。
+type GraphSaver interface {
+	SaveGraph(ctx context.Context, runID RunID, ch Challenge) error
 }
 
 // Store 是运行的持久化端口。

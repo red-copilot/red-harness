@@ -129,6 +129,12 @@ type publicChallenge struct {
 	// 调），而事后只看 Reason 分不出这两者。见 sanitizeCount（负数在这里没有含义）。
 	BranchesAbandoned int      `json:"branchesAbandoned,omitempty"`
 	CleanupFailures   []string `json:"cleanupFailures,omitempty"`
+	// GraphSaveFailures 记录 DAG 落盘的失败阶段（marshal / write）。
+	//
+	// 为什么要落盘：图是研究辅助面，写失败不算本题失败（Reason 不变），所以公开
+	// 指标里**没有别的痕迹**能说明「这次运行的图没留下来」。而「没写出去」被读成
+	// 「写了」的代价是：事后拿不到图，却以为图本来就没有。
+	GraphSaveFailures []string `json:"graphSaveFailures,omitempty"`
 	DurationSeconds   float64  `json:"durationSeconds"`
 }
 
@@ -148,6 +154,7 @@ func toPublic(r harness.RunResult) publicResult {
 			Rounds:  c.Outcome.Rounds, HintUsed: c.Outcome.HintUsed,
 			BranchesAbandoned: sanitizeCount(c.Outcome.BranchesAbandoned),
 			CleanupFailures:   sanitizeCleanupFailures(c.Outcome.CleanupFailures),
+			GraphSaveFailures: sanitizeGraphSaveFailures(c.Outcome.GraphSaveFailures),
 			DurationSeconds:   c.Outcome.Duration().Seconds()})
 	}
 	return p
@@ -158,6 +165,23 @@ func sanitizeCleanupFailures(failures []string) []string {
 	for _, failure := range failures {
 		switch failure {
 		case "agent", "sandbox", "scenario":
+			out = append(out, failure)
+		}
+	}
+	return out
+}
+
+// sanitizeGraphSaveFailures 是图落盘失败的落盘白名单。
+//
+// **为什么必须单列一份而不是复用 CleanupFailures**：那份白名单只放行
+// agent/sandbox/scenario，把 "write" 塞进去会被**静默丢弃**——于是账记了但
+// 公开面看不见，等于没记。两份白名单各自对应各自的值域，混用就是又一次
+// 「失败被静默吞掉」。
+func sanitizeGraphSaveFailures(failures []string) []string {
+	var out []string
+	for _, failure := range failures {
+		switch failure {
+		case "marshal", "write":
 			out = append(out, failure)
 		}
 	}
@@ -181,7 +205,9 @@ func fromPublic(p publicResult) harness.RunResult {
 				RemainingAtStart: c.RemainingAtStart, Score: c.Score,
 				Stats:  harness.Stats{CostUSD: c.CostUSD},
 				Rounds: c.Rounds, HintUsed: c.HintUsed, BranchesAbandoned: c.BranchesAbandoned,
-				CleanupFailures: append([]string(nil), c.CleanupFailures...), StartedAt: c.StartedAt, EndedAt: c.EndedAt},
+				CleanupFailures:   append([]string(nil), c.CleanupFailures...),
+				GraphSaveFailures: append([]string(nil), c.GraphSaveFailures...),
+				StartedAt:         c.StartedAt, EndedAt: c.EndedAt},
 			StartedAt: c.StartedAt, EndedAt: c.EndedAt})
 	}
 	return r

@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1025,6 +1026,192 @@ func TestRunFreezesProfileIntoAgentStart(t *testing.T) {
 	}
 	if res.BundleDigest == "" {
 		t.Error("配了 bundle 就必须冻结内容摘要，空串是「未核验」的意思")
+	}
+}
+
+// ── 图落盘 ──
+
+// recordingGraphSaver 是记账型 GraphSaver：记下「哪次运行的哪道题被要求落盘」。
+type recordingGraphSaver struct {
+	mu    sync.Mutex
+	calls []graphSaveCall
+	err   error
+}
+
+type graphSaveCall struct {
+	runID RunID
+	code  string
+}
+
+func (s *recordingGraphSaver) SaveGraph(_ context.Context, runID RunID, ch Challenge) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, graphSaveCall{runID: runID, code: ch.Code})
+	return s.err
+}
+
+func (s *recordingGraphSaver) snapshot() []graphSaveCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]graphSaveCall(nil), s.calls...)
+}
+
+// newGraphTestHarness 与 newTestHarness 同，但接上记账型 GraphSaver。
+func newGraphTestHarness(t *testing.T, sc Scenario, sb Sandbox, af AgentFactory, saver GraphSaver) *Harness {
+	t.Helper()
+	h, err := NewHarness(HarnessOptions{Scenario: sc, Sandbox: sb, Agents: af,
+		Gate:    func(Challenge) CandidateGate { return newStubGate() },
+		Results: &recordingResults{}, Locker: fakeRunLocker{}, Graphs: saver,
+		Planner:  func(Challenge) Planner { return &stubPlanner{} },
+		Renderer: func(Challenge) Renderer { return stubRenderer{} }})
+	if err != nil {
+		t.Fatalf("NewHarness: %v", err)
+	}
+	return h
+}
+
+// TestRunSavesGraphOncePerChallenge：每题**恰好**落盘一次，且带上这次运行的 runID。
+//
+// 为什么盯「一次」：图落盘曾是「每轮末一次」的设计（见 GraphStore 的注释），
+// 那样一轮几十次完整序列化，而且发生在事件消费者协程上。改成每题终态一次之后，
+// 「一次」本身就成了契约；多一次是回归，少一次是「图没留下来」。
+func TestRunSavesGraphOncePerChallenge(t *testing.T) {
+	sc := &stubScenario{
+		challenges: []Challenge{
+			{Code: "c1", Category: "web", FlagCount: 1},
+			{Code: "c2", Category: "crypto", FlagCount: 1},
+		},
+		answers: map[string]string{"c1": "flag{a}"},
+	}
+	saver := &recordingGraphSaver{}
+	h := newGraphTestHarness(t, sc, &fakeSandbox{}, &scriptedAgentFactory{agent: &fakeAgent{}}, saver)
+
+	res, err := h.Run(context.Background(), testRunSpec())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	calls := saver.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("落盘次数 = %d，期望 2（每题一次）: %+v", len(calls), calls)
+	}
+	for i, want := range []string{"c1", "c2"} {
+		if calls[i].code != want {
+			t.Errorf("第 %d 次落盘的题目 = %q，期望 %q", i, calls[i].code, want)
+		}
+		if calls[i].runID != res.RunID {
+			t.Errorf("第 %d 次落盘的 runID = %q，期望 %q（端口拿到的必须是这次运行）",
+				i, calls[i].runID, res.RunID)
+		}
+	}
+}
+
+// TestRunGraphSaveFailureIsRecordedNotFatal：图写不出去只记账，不改本题结论。
+//
+// 图是研究辅助面。把它算成失败，会让「模型解出来了」在公开指标里降级成「跑坏了」
+// —— Reason 的语义是「为什么停」，不是「哪个副产物没写成功」。但「没写出去」也
+// 绝不能读成「写了」，所以失败必须出现在公开结果里。
+func TestRunGraphSaveFailureIsRecordedNotFatal(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   error
+		stage string
+	}{
+		{"写失败", fmt.Errorf("磁盘满了: %w", ErrGraphWrite), "write"},
+		{"序列化失败", errors.New("擦洗炸了"), "marshal"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := &stubScenario{
+				challenges: []Challenge{{Code: "c1", Category: "web", FlagCount: 1}},
+				answers:    map[string]string{"c1": "flag{real-answer}"},
+			}
+			ag := &fakeAgent{}
+			factory := &scriptedAgentFactory{agent: ag}
+			ag.script = func(_ int, _ func(Event)) {
+				emitToolEnd(factory.sink, "call-1", "curl -s http://t/", "flag{real-answer}\n")
+			}
+			saver := &recordingGraphSaver{err: tc.err}
+			h := newGraphTestHarness(t, sc, &fakeSandbox{}, factory, saver)
+
+			res, err := h.Run(context.Background(), testRunSpec())
+			if err != nil {
+				t.Fatalf("图落盘失败不得让 Run 报错: %v", err)
+			}
+			cr := res.Challenges[0]
+			if cr.Outcome.Reason != ReasonSolved {
+				t.Errorf("Reason = %q，期望 %q（副产物失败不该改「为什么停」）", cr.Outcome.Reason, ReasonSolved)
+			}
+			if !res.Completed {
+				t.Error("题目确实解出来了，Completed 必须仍为 true")
+			}
+			if got := cr.Outcome.GraphSaveFailures; len(got) != 1 || got[0] != tc.stage {
+				t.Errorf("GraphSaveFailures = %v，期望 [%s]", got, tc.stage)
+			}
+			// 公开面只放枚举，不放原始错误文本。
+			for _, v := range cr.Outcome.GraphSaveFailures {
+				if strings.Contains(v, "磁盘") || strings.Contains(v, "炸") {
+					t.Errorf("公开结果里出现了原始错误文本: %q", v)
+				}
+			}
+		})
+	}
+}
+
+// TestRunGraphSaveRunsOnErrorPath：轮次出错（不调 Flush 的那条路）也要留下图。
+//
+// 这正是「把落盘放在 defer 里、而不是轮循环末尾」的理由：最值得复盘的那次运行，
+// 恰恰是以错误收场的那次。若只在正常收尾处落盘，难题的图永远看不到。
+func TestRunGraphSaveRunsOnErrorPath(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", Category: "web", FlagCount: 1}},
+		answers: map[string]string{"c1": "flag{x}"}}
+	ag := &fakeAgent{roundErr: errors.New("agent 崩了")}
+	saver := &recordingGraphSaver{}
+	h := newGraphTestHarness(t, sc, &fakeSandbox{}, &scriptedAgentFactory{agent: ag}, saver)
+
+	if _, err := h.Run(context.Background(), testRunSpec()); err == nil {
+		t.Fatal("轮次出错必须从 Run 出来")
+	}
+	if got := saver.snapshot(); len(got) != 1 || got[0].code != "c1" {
+		t.Errorf("错误路径也必须落一次图，got %+v", got)
+	}
+}
+
+// TestRunWithoutGraphSaverIsNotAnError：没接图落盘是正常配置，不是错误。
+//
+// 它是**可选**端口（自定义 Planner 的调用方可能根本不关心图），所以缺了它既不能
+// panic，也不能记一笔「失败」——那会把「本来就没打算存图」读成「存图坏了」。
+func TestRunWithoutGraphSaverIsNotAnError(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", Category: "web", FlagCount: 1}},
+		answers: map[string]string{"c1": "flag{x}"}}
+	h := newTestHarness(t, sc, &fakeSandbox{}, &scriptedAgentFactory{agent: &fakeAgent{}},
+		func(Challenge) CandidateGate { return newStubGate() })
+
+	res, err := h.Run(context.Background(), testRunSpec())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := res.Challenges[0].Outcome.GraphSaveFailures; len(got) != 0 {
+		t.Errorf("没接 GraphSaver 时不该记失败，got %v", got)
+	}
+	// Doctor 要能看出「是没接，而不是接了没写出来」。
+	rep := h.Doctor(context.Background())
+	var found bool
+	for _, c := range rep.Checks {
+		if c.Name == "graph_saver" {
+			found = true
+			if c.OK || c.Fatal {
+				t.Errorf("graph_saver 检查应为「不 OK 且非 Fatal」，got OK=%v Fatal=%v", c.OK, c.Fatal)
+			}
+			if !strings.Contains(c.Detail, "未接入") {
+				t.Errorf("体检要说清是「未接入」，got %q", c.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Error("Doctor 必须报告 graph_saver：缺席的图会变成一次静默缺失")
+	}
+	if !rep.OK {
+		t.Error("可选端口缺席不得让整体体检失败")
 	}
 }
 
