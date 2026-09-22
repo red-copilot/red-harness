@@ -159,8 +159,9 @@ func (s RunSpec) Digest() string {
 // 字段在本仓库被明确记为一类比缺失更糟的缺陷（见 v04_test.go 里那条注释）。
 //
 // 调用点在 Harness.Run 的**最开头**，早于跨进程锁：`locker.Lock` 会写
-// `<StoreDir>/run.lock`，那是一处文件系统副作用，而配置错误是纯粹的调用方
-// 错误——没有任何理由先落下副作用再报错。
+// `/run/lock/red-harness/run-<daemon 端点指纹>.lock`（见 `local/lock.go`），
+// 那是一处文件系统副作用，而配置错误是纯粹的调用方错误——没有任何理由先落下
+// 副作用再报错。
 func (s RunSpec) Validate() error {
 	if err := s.Profile.Validate(); err != nil {
 		return err

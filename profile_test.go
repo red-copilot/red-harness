@@ -153,7 +153,7 @@ func TestProfileEmptyFollowsSchema(t *testing.T) {
 // 它同时钉三件事：
 //  1. 非法配置以 KindConfig 失败（不是静默回落）；
 //  2. **跨进程锁没有被取过**——校验排在 `locker.Lock` 之前，而 Lock 会写
-//     `<StoreDir>/run.lock`，那是一处真实副作用；
+//     `/run/lock/red-harness/run-<daemon 端点指纹>.lock`，那是一处真实副作用；
 //  3. Sandbox 与 Scenario 一次都没被调用。
 func TestRunRejectsInvalidConfigBeforeSideEffects(t *testing.T) {
 	cases := []struct {

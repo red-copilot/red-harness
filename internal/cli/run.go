@@ -83,15 +83,17 @@ func (f *runFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.profileFile, "profile", "", "solver profile 的 JSON 文件（未知键/非法值在起跑前拒绝）")
 	fs.StringVar(&f.bundleDir, "bundle", "", "只读挂进容器的 extension bundle 目录（同时决定 BundleDigest）")
 
-	// ⚠️ **默认空**：锁文件的默认位置（`<StoreDir>/run.lock`）只能由装配层给出。
-	// CLI 自己补一个默认路径就等于把「哪两个进程算同一个部署」复制一份到这一层，
-	// 于是同一个 store 经 CLI 与经 SDK 会拿到两把不同的锁——互斥看起来在、实际不在。
+	// ⚠️ **默认空**：锁文件的默认位置只能由装配层给出——它是
+	// `/run/lock/red-harness/run-<daemon 端点指纹>.lock`（见 `local/lock.go`），
+	// **不随 `--store` 变**。CLI 自己补一个默认路径就等于把「哪两个进程算同一个
+	// 部署」复制一份到这一层，于是同一个部署经 CLI 与经 SDK 会拿到两把不同的锁
+	// ——互斥看起来在、实际不在。
 	//
 	// 它的正当用途只有两种：多 store 分治时让几个 store 共用一把锁；以及集成测试
 	// 里**显式**让两个不同 `--store` 的进程争同一把锁（那条测试验的正是锁机制本身）。
 	// 指向不同路径的两个进程**互不互斥**，这一点写在帮助文本里，因为它是这个 flag
 	// 唯一的危险面。
-	fs.StringVar(&f.lockPath, "lock", "", "单运行锁文件路径（空则用装配层缺省 <store>/run.lock；⚠️ 不同路径之间不互斥）")
+	fs.StringVar(&f.lockPath, "lock", "", "单运行锁文件路径（空则用装配层缺省：/run/lock/red-harness/run-<端点指纹>.lock，不随 --store 变；⚠️ 指定不同路径的两个进程互不互斥）")
 }
 
 // budget 把 flag 折成 harness.Budget。

@@ -70,8 +70,10 @@ func newPorts(storeDir string, spec harness.RunSpec, deploy cli.DeployOptions) (
 		},
 	}
 	// 锁的显式覆盖（`--lock`）。**为空就不设**：`local.New` 会用它自己的默认值
-	// （`<StoreDir>/run.lock`），而那个默认值是唯一真源——在这里替它算一遍
-	// 等于把「哪两个进程算同一个部署」这个判据复制到 CLI，两处会漂移。
+	// （`/run/lock/red-harness/run-<daemon 端点指纹>.lock`），而那个默认值是唯一
+	// 真源——在这里替它算一遍等于把「哪两个进程算同一个部署」这个判据复制到
+	// CLI，两处会漂移。⚠️ 默认值与 `--store` **无关**（锁不能与被保护的数据同住：
+	// flock 绑 inode，换 store 会静默解锁一个正在跑的部署）。
 	if deploy.LockPath != "" {
 		opts.Lock = local.NewFileLock(deploy.LockPath)
 	}
