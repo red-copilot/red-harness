@@ -5,9 +5,12 @@ package executor
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,6 +103,59 @@ func repoRoot(t *testing.T) string {
 	return abs
 }
 
+// stubSrcLabel 是构建时打在测试镜像上的**构建输入摘要**标签，用于复用判定。
+//
+// 为什么需要它：复用判定原先只看「镜像在不在」，于是 piai/testdata/stubpi 一改动，
+// 集成门在镜像被手工删掉之前都会拿**旧二进制**跑。实测踩到过：镜像建于
+// 2026-09-22T00:19:15，而 stubpi 源码在当天 14:14:37 改过（625004c），镜像内
+// stubpi 的 sha256 与当前源码编出的不同——那次报出的「58 PASS / 0 SKIP」计数是真的，
+// 但它**证明的比记录的弱**：其中依赖 stubpi 行为的用例验的是 14 小时前的构建产物。
+//
+// 靠人记得在重跑前 `docker rmi` 是不行的，那个手工步骤正是会被跳过的那一步。
+const stubSrcLabel = "red-harness.stubpi.src"
+
+// stubSourceDigest 摘要**测试镜像的全部构建输入**：stubpi 源码 + Dockerfile.teststub。
+//
+// 为什么只摘要 stubpi 自己就够：该包只 import 标准库（无仓内依赖、也无独立
+// go.mod），所以它的二进制只由自己的源码决定。⚠️ 将来它一旦 import 了仓内包，
+// 这个摘要就会漏掉那条依赖边——那时要跟着改，否则又回到「改了源码但复用了旧镜像」。
+func stubSourceDigest(t *testing.T) string {
+	t.Helper()
+	root := repoRoot(t)
+	h := sha256.New()
+	inputs := []string{
+		filepath.Join(root, "piai", "testdata", "stubpi"),
+		filepath.Join(root, "runner", "Dockerfile.teststub"),
+	}
+	for _, in := range inputs {
+		err := filepath.WalkDir(in, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(root, p)
+			if err != nil {
+				return err
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			// 路径与长度都进摘要：只喂内容的话，"ab"+"c" 与 "a"+"bc" 同摘要，
+			// 且**改名**（内容不变）不触发重编——而改名确实是构建输入的改变。
+			fmt.Fprintf(h, "%s\x00%d\x00", rel, len(b))
+			h.Write(b)
+			return nil
+		})
+		if err != nil {
+			t.Skipf("跳过：无法摘要构建输入 %s（%v）", in, err)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // buildStubImage 把 piai 的 stub pi 编成静态二进制，再用 runner/Dockerfile.teststub
 // 打一个测试镜像，返回可用的 tag。
 //
@@ -113,13 +169,35 @@ func buildStubImage(t *testing.T) string {
 	t.Helper()
 	tag := testStubImage()
 
-	// 已经建好就直接复用（重复跑不重复构建，2 核机器上这一步要几十秒）。
 	// 环境用与执行器同源的那一份（见 Docker.subprocessEnv）：这里是测试自己调
 	// docker，但「连哪个 daemon」的口径不该与生产路径不同，否则一个设了
 	// DOCKER_CONTEXT 的 shell 会让测试检查 A 端点、跑到 B 端点。
-	if out, err := runCmd(context.Background(), "docker",
-		subprocessEnvFor(harness.DefaultDockerEndpoint()), "image", "inspect", tag); err == nil && strings.TrimSpace(out) != "" {
-		return tag
+	//
+	// ⚠️ 构建也必须用同一份 env（原先是裸 exec.Command，继承 os.Environ）。
+	// 否则会出现「编进 A 端点、检查并运行在 B 端点」——B 上根本没有那个镜像，
+	// 于是复用判定永远落空、每次都重编，而重编出来的还在 A 上。
+	env := subprocessEnvFor(harness.DefaultDockerEndpoint())
+
+	// 已经建好**且构建输入没变**才复用（重复跑不重复构建，2 核机器上这一步要几十秒）。
+	want := ""
+	if os.Getenv("RH_TEST_STUB_IMAGE") != "" {
+		// 显式指定镜像名的人已经拿走了控制权：不比对摘要，也不去覆盖它的 tag。
+		if out, err := runCmd(context.Background(), "docker", env, "image", "inspect", tag); err == nil && strings.TrimSpace(out) != "" {
+			return tag
+		}
+	} else {
+		want = stubSourceDigest(t)
+		// 摘要取不到（镜像不存在 / 是老代码路径建的、没有这个标签）一律当过期：
+		// 重编一次的代价是几十秒，而拿旧二进制跑出来的读数是**错的研究结论**。
+		got, err := runCmd(context.Background(), "docker", env, "image", "inspect",
+			"--format", `{{index .Config.Labels "`+stubSrcLabel+`"}}`, tag)
+		if err == nil && strings.TrimSpace(got) == want {
+			return tag
+		}
+		if err == nil {
+			t.Logf("测试镜像 %s 的构建输入已变（镜像记录=%q，当前=%s），重新构建",
+				tag, strings.TrimSpace(got), want)
+		}
 	}
 
 	dir := t.TempDir()
@@ -132,7 +210,13 @@ func buildStubImage(t *testing.T) string {
 	}
 
 	dockerfile := filepath.Join(repoRoot(t), "runner", "Dockerfile.teststub")
-	buildCmd := exec.Command("docker", "build", "-f", dockerfile, "-t", tag, dir)
+	args := []string{"build", "-f", dockerfile, "-t", tag}
+	if want != "" {
+		args = append(args, "--label", stubSrcLabel+"="+want)
+	}
+	args = append(args, dir)
+	buildCmd := exec.Command("docker", args...)
+	buildCmd.Env = env
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Skipf("跳过：无法构建测试镜像 %s（%v）: %s", tag, err, out)
 	}
