@@ -1,54 +1,52 @@
-# red-harness Roadmap（v0.4.0-research）
+# red-harness Roadmap（v0.4.0-research 收尾）
 
-> 更新：2026-09-21。架构与真实状态见 [architecture.md](architecture.md)，v0.4 目标行为见 [PLAN v0.4](PLAN%20v0.4.md)。本文只规划明确授权的 CTF、TSecBench 和本地靶场。
+> 更新：2026-09-22。当前实现见 [architecture.md](architecture.md)，目标行为见 [PLAN v0.4](PLAN%20v0.4.md)。适用范围仅为明确授权的 CTF、TSecBench 和本地靶场。
 
 ## 目标与发布边界
 
-v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 Harness.Run、每题一个真实 Docker sandbox、可信宿主调用平台、可解释的候选判定和可比较的公开指标。单机单用户、题目串行、文件结果后端。公开发布前必须证明隔离、停止、清理、结果保密和指标口径；测试通过率是研究指标，不替代这些门槛。
+v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`、每题一个 Docker sandbox、可信宿主平台控制面、可解释的候选判定和可比较的公开指标。部署范围是 Linux、Docker、单机单用户、题目串行和文件结果后端。通过率是研究指标；隔离、停止、清理、凭据保密和指标口径是发布门槛。
 
-当前工作区已有根包同步契约、Docker attached session、pi factory、Fake/TSecBench Scenario、DAG/Gate 和文件 ResultStore 初版；go test ./... -count=1 通过。CLI 仍是 v0.3 骨架，真实 sandbox 纵向闭环和关键安全性质尚未验收。
+截至 2026-09-22，CLI 已接线为 `doctor/list/run/stats`；装配层、默认跨进程单运行锁、Fake/TSecBench Scenario、Docker attached session、pi factory、DAG/Gate、文件 ResultStore 和离线假件全生命周期测试均已落地。`go test ./... -count=1` 通过。该测试尚未证明 `CLI → Harness.Run → 真实 Docker → pi → Evaluate → Cleanup` 的纵向闭环。现有 Docker 集成测试主要覆盖旧 `Executor` 入口，不能代替新同步入口的验收。
 
 ## 交付阶段
 
 | 阶段 | 优先级 / 状态 | 交付范围 | 可观察出口门 |
 |---|---|---|---|
-| M0 契约收敛 | P0 / 进行中 | 冻结 RunSpec、SolverProfile、SandboxSession、结果 schema；清理 v0.3/v0.4 双入口的含糊处 | SDK 示例能只用 v0.4 端口编译；版本与结果字段含义固定；无凭据字段进入可序列化规格 |
-| M1 真实隔离闭环 | P0 / 待验收 | 装配 Fake → Docker → stub pi → DAG/Gate → Evaluate → Cleanup；CLI 改为 doctor/list/run/stats | stub pi 与工具证明在同一容器内；一条命令完成离线题目全生命周期；正常、取消、失败后零遗留 |
-| M2 运行控制与候选可靠性 | P0 / 未完成 | 宿主解析 scope、有界事件队列、单运行锁、预算、候选去重、平台对账、提示/换支、一次 Agent 重启 | 未授权端点不可达；重复/不确定提交不误判；墙钟、轮数、turns、成本受限；故障注入能确定终态 |
-| M3 指标与研究循环 | P1 / 初版 | profile 冻结、私密 trace、公开结果、stats 聚合和对照口径 | 起跑剩余量与本次增量可重算；同 profile/model/challenge 可对照；公开文件与 CLI 无 canary 明文 |
-| M4 发布验收 | P0 / 未开始 | Docker 安全集成、真实 pi 最小冒烟、TSecBench 授权环境冒烟、打包和操作说明 | build/vet/test/race 全绿；隔离、网络、权限、清理验收全绿；真实场景失败明确记失败 |
+| M1 离线真实容器闭环 | P0 / 待验收 | Fake + stub pi 经 CLI、同步 Harness 和真实 SandboxSession 完成一题 | pi 与工具同处目标容器；提交由 Fake 确认；正常、取消和启动失败后资源零遗留 |
+| M2 上线前隔离与凭据门 | P0 / 未通过 | 凭据传递、镜像内版本核验、网络与文件系统隔离 | canary 不进 argv/公开输出；版本可核验；未授权端点不可达；隔离测试全绿 |
+| M3 运行可靠性 | P0 / 未完成 | 有界事件、真实预算、平台对账、恢复策略与清理 | 故障注入得到确定的题级终态；取消后仍保存安全结果；无残留资源 |
+| M4 指标与发布验收 | P0/P1 / 未完成 | 冻结 profile、私密 trace、指标修正、真实 pi 与授权平台冒烟 | 指标可重算；公开面无明文；全部合并门与发布门通过 |
 
-## 近期工作包：按依赖顺序
+下列工作按依赖与验收门槛排序；阶段状态以出口门是否通过为准，不以代码存在或单元测试通过为准。
 
-### 1. 冻结边界与输入
+## M1：离线真实容器闭环
 
-- RunSpec 只描述题目、Agent、预算、profile 和结果路径；目标白名单由 Scenario.Prepare 的目标经宿主解析产生，拒绝调用者覆盖或扩大。
-- SolverProfile 在 Run 开始时冻结，摘要同时驱动挂载、prompt、结果分组；避免 Harness profile 与 RunSpec.Profile 不一致。
-- NewHarness 要求 Planner、Renderer、Gate、ResultStore 等生产必需端口齐备；缺失时启动失败，不能静默把空轮次当作成功。
-- 定义 RunResult.Completed 为题目目标完成或明确区分 RunFinished 与 ChallengeSolved，避免“运行无错误”等同“解题成功”。
+- 用 Fake 场景和 stub pi 从 CLI `run` 走 `Discover → Prepare → NewSession → Launch → Round → Evaluate → Reconcile → Close → Cleanup → Save`。stub pi 回报自身及工具的容器身份，测试断言二者处于同一目标容器。
+- 为 `SandboxSession` 和同步 `Harness.Run` 增加真实 Docker 集成测试，覆盖只读 rootfs、有界 tmpfs、非 root、资源上限，以及正常完成、SIGINT 和启动失败后的容器、网络、代理和规则回收。旧 `Executor` 集成测试保留为兼容回归，但不计入本阶段的新入口出口门。
+- 一条离线命令应产出 Fake 平台确认的结果及可读取的公开指标；失败时保留明确失败分类和清理证据。Fake 成绩只证明编排接线，不证明真实解题能力。
 
-### 2. 跑通真实 sandbox
+## M2：上线前隔离与凭据门
 
-- 用 Fake 场景和 stub pi 做一条完整链路：Discover → Prepare → NewSession → Launch → Round → Evaluate → Reconcile → Close → Cleanup → Save。
-- Probe 在同一镜像中核验 pi 版本与运行位置；Launch 只允许一个 attached 主进程，工具随容器停止。
-- 启动前取得跨进程单运行锁，按固定 label 清理上次崩溃遗留资源；不能只按新 run ID 回收。
-- CLI 切到同步 API，仅暴露 doctor/list/run/stats；SIGINT 经 context 触发清理。
+- 消除 provider key 经 `ProcessSpec.Env → docker run -e KEY=value` 出现在宿主进程参数的路径。用固定 canary 检查 Docker 命令参数、CLI、日志和公开结果；平台 token 继续只留在宿主 bridge。
+- `SandboxSession.Probe` 必须从运行所用镜像取得 `ProbeResult.PiVersion` 并核对支持区间；空值或无法核验时拒绝进入真实平台运行。镜像 tag、digest 和实测版本应可追溯。
+- 从 `Scenario.Prepare` 的目标生成 IP:port 白名单，测试目标可达、非目标、宿主监听端口及公网默认不可达，provider 仅经白名单代理可达。明确记录同一 Docker bridge 内流量不经过当前 iptables 规则的边界，避免将其误报为已隔离。
+- 任一凭据、版本或隔离检查失败，即停止在离线阶段，不执行授权平台冒烟。
 
-### 3. 完成运行策略
+## M3：运行可靠性
 
-- Agent 事件进入**有界**队列，由同一个编排消费者更新 DAG、Gate 和进度；对重复、过大或不可信事件设置限额。
-- 轮次前后检查 ctx、墙钟、rounds、tool turns 与成本；取消优先于 provider 故障分类。
-- Gate 中 observed/derived 可提交，fabricated 阻断；错误候选本 Run 不重提。平台写入超时后先 Reconcile，能确认状态前不重发。
-- 两轮无**平台进度且无新增宿主验证事实**才请求一次提示；再次停滞切换未尝试意图。provider/进程可重试故障至多重启 Agent 一次，回灌脱敏摘要。
-- Cleanup 的错误单独记录；取消后的清理使用有界独立 context，所有资源回收路径可幂等重试。
+- 将当前无界 `eventSink.events` 和同步回调改为有界事件队列，由一个编排消费者更新 DAG、Gate 与进度；限制重复、超大和不可信事件，并验证背压与取消不会死锁。
+- 每轮从 Agent 权威统计读取 turns 与成本，连同墙钟和轮数检查预算；取消优先于 provider 故障分类。停滞以「无平台进度且无新增宿主验证事实」判定：两轮后每题至多请求一次提示，再次停滞切换未尝试意图。
+- observed/derived 候选可提交，fabricated 阻断；错误候选单 Run 不重提。submit/start/close 结果不确定时先按平台权威状态对账，确认未生效后才重试。可重试 provider/进程故障最多重启 Agent 一次，仅回灌脱敏事实摘要。
+- Agent、Sandbox 和 Scenario 清理使用独立的有界 context，错误单独记录而不覆盖主终态；取消后仍以有界 context 保存安全的公开结果。故障注入覆盖写超时、重复提交、Agent 崩溃、清理失败和宿主异常退出后的遗留回收。
 
-### 4. 修正研究指标
+## M4：指标与发布验收
 
-- 每题记录起跑时已解数、目标总数、本次新增确认数、完成状态、得分、成本、耗时、轮次、提示和失败类别。
-- 主指标：挑战完成率与“本次新增确认 / 起跑时剩余”召回率。不同题目集合只能给描述性累计数据；直接比较只使用重叠 challenge/profile/model。
-- 公开 result.json 只存指标、指纹和配置摘要；原始 trace 与候选只存权限受限的 private/。用固定 canary 检查所有公开输出与 argv。
+- 以每次 Run 冻结的有效 `RunSpec.Profile` 同时驱动 system prompt、只读 extension bundle、Planner/提示参数及 `ProfileDigest`；`HarnessOptions.Profile` 仅提供默认值。生产 `Harness` 必须有跨进程 `RunLocker`，直接使用 SDK 与 CLI 装配遵循同一约束。
+- 公开结果记录每题起跑剩余量、目标总量、本次新增确认、完成状态、成本、耗时、轮次、提示与失败类别；修正 `Kind` 分类被 `ResultFileStore` 归为 `unclassified` 的路径。原始 trace 和候选仅进入权限为 `0700/0600` 的 `private/`。
+- 主指标为挑战完成率及「本次新增确认 / 起跑时剩余」召回率；分母未知时明确标注不可计算。跨题目集合只报描述性累计数据，直接比较只使用重叠的 challenge/profile/model。
+- 通过新同步入口的 Docker 集成门与真实 pi 最小冒烟后，才在明确授权且 VPN 连通的 TSecBench 环境完成至少一题 `list → prepare → solve → submit → cleanup`。若授权环境不可用，保持发布门未通过，不用 Fake 或旧入口测试替代。
 
-## 跨阶段验收
+## 验收与证据
 
 每次合并：
 
@@ -60,8 +58,8 @@ go test ./... -count=1
 go test -race ./... -count=1
 ~~~
 
-Docker 集成门另跑 go test -tags integration ./executor/... -count=1，并增加同步 Harness 的真实容器测试。验收必须覆盖非 root/只读 rootfs、有界 tmpfs、CPU/内存/PID/墙钟限制、目标 IP:port 白名单、provider 代理、宿主端口与公网默认拒绝、宿主目录及 Docker socket 不可见。正常结束、SIGINT、Agent 崩溃、平台超时和宿主意外退出后，容器、网络、代理与防火墙规则均不得残留。
+Docker 门运行 `go test -tags integration ./executor/... -count=1`，并纳入 M1 新增的同步 Harness 真实容器测试。每阶段记录测试命令、通过或失败结果、容器/网络/代理/规则回收证据与尚未验证的性质；跳过的集成测试不算通过。发布门另核对凭据 canary、真实 pi 和授权平台冒烟。通过率未设绝对阈值，不替代上述门槛。
 
 ## 后续边界
 
-Web、公开报告、崩溃续跑、远程 worker、多 Agent、数据库和通用真实资产不进入 v0.4。若扩展到一般授权资产，先另立阶段完成签名授权清单、目标和时窗验证、动作级策略、审计与默认拒绝，再扩展执行范围。
+Web、公开报告、崩溃续跑、远程 worker、多 Agent、数据库和通用真实资产不进入 v0.4。若扩展到一般授权资产，另立阶段设计签名授权清单、目标与时窗验证、动作策略和审计。

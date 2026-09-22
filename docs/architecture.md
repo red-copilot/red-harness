@@ -1,7 +1,7 @@
 # red-harness SDK 架构（v0.4.0-research）
 
-> 更新：2026-09-21。本文按当前工作区代码描述实现状态；目标行为见 [PLAN v0.4](PLAN%20v0.4.md)，交付顺序见 [roadmap.md](roadmap.md)。
-> 旧 Engine、RunHandle、事件快照和 CLI 仍在源码中，供 v0.3 读取与测试使用；它们尚未成为 v0.4 的可用入口。
+> 更新：2026-09-22。本文按当前工作区代码描述实现状态；目标行为见 [PLAN v0.4](PLAN%20v0.4.md)，收尾出口门见 [roadmap.md](roadmap.md)。
+> 旧 Engine、RunHandle 和事件快照仍在源码中供 v0.3 读取与测试使用；CLI 已切到 v0.4 同步入口。
 
 ## 1. 定位与边界
 
@@ -9,7 +9,7 @@ v0.4 是面向**明确授权的 CTF、TSecBench 和本地靶场**的单机研究
 
 ~~~mermaid
 flowchart LR
-    Caller["SDK 调用者 / 未来 CLI"] --> H["Harness.Run<br/>同步编排"]
+    Caller["SDK 调用者 / CLI"] --> H["Harness.Run<br/>同步编排"]
     H --> S["Scenario<br/>Fake / TSecBench"]
     S --> B["bridge<br/>宿主平台凭据"]
     H --> D["DAG Planner + Renderer"]
@@ -32,7 +32,7 @@ flowchart LR
 | 公开结果 | profile 摘要、题目、轮次、进度、耗时、失败类别等 | flag、候选明文、模型 key、平台 token、原始 trace |
 | 私密证据 | 仅研究所需的原始输出与候选，限制文件权限 | 自动进入公开结果或 CLI 输出 |
 
-以上是目标不变式。当前 Docker 适配器已实现基础隔离配置；越界阻断、凭据泄漏和所有清理路径仍需真实容器集成门证明。
+以上是目标不变式。当前 Docker 适配器已实现基础隔离配置；新同步入口的越界阻断、凭据保密和所有清理路径仍需真实容器集成门证明。主进程环境已改为经 0600 的临时 `--env-file` 交给 `docker create`（argv canary 有集成回归），provider key 不再出现在宿主进程参数里；剩余绑定项是真实容器纵向闭环与授权平台冒烟。
 
 ## 2. SDK 端口与依赖方向
 
@@ -42,14 +42,14 @@ flowchart LR
 |---|---|---|
 | Harness.Run(ctx, RunSpec) | 同步遍历题目、调用轮循环、保存结果 | 已实现初版；缺硬化与纵向验收 |
 | Scenario | Discover → Prepare → Hint/Evaluate/Reconcile → Cleanup；平台副作用唯一入口 | scenario/Fake 与 TSecBench 已有；后者依赖宿主 bridge |
-| Sandbox / SandboxSession | 为每题建隔离网络，Launch 一个 attached 主进程，Close/Reclaim 回收 | executor/Docker 已有；Probe 当前只检查镜像 |
+| Sandbox / SandboxSession | 为每题建隔离网络，Launch 一个 attached 主进程，Close/Reclaim 回收 | executor/Docker 已有；Probe 在运行所用镜像里执行 `pi --version` 并回报 `ProbeResult.PiVersion`，取不到版本即拒绝启动 |
 | AgentFactory / Agent | 将 pi 绑定到已创建的 session，通过 RPC 执行轮次并发事件 | piai/Factory 已有；生产链路尚未做容器内验收 |
 | Planner / Renderer | DAG 事实、意图、剪枝和 prompt 渲染 | dag 可复用；由调用者注入 |
 | CandidateGate | 按来源归类、去重、判定候选可提交性 | gate.NewAll 提供 v0.4 的 observed/derived 视图 |
-| ResultStore | 保存公开指标并按维度聚合 | store/ResultFileStore 已有初版；指标口径未齐 |
-| CLI 装配 | doctor/list/run/stats 对接同步 Harness | **未实现**；当前 CLI 仍使用 v0.3 Engine.Start/Resume，WireFunc 为 nil |
+| ResultStore | 保存公开指标并按维度聚合 | 起跑剩余量、增量召回率与题级通过率已落地；`Kind` 错误类别可落盘，私密 trace 由 `AppendTrace` 落 `private/` |
+| CLI 装配 | doctor/list/run/stats 对接同步 Harness | 已由 cmd/red-harness → internal/cli → internal/wire 接线；真实容器纵向闭环待验收 |
 
-v0.4 的接口集中在根包 v04.go、model.go 和 ports.go。Version = 0.3.0 仍用于旧图 schema；ResearchVersion = 0.4.0-research 是新 SDK 标识。源码目前同时保留两套 API，不能把测试通过理解为 CLI 已切换。
+v0.4 的接口集中在根包 v04.go、model.go 和 ports.go。Version = 0.3.0 仍用于旧图 schema；ResearchVersion = 0.4.0-research 是新 SDK 标识。源码目前同时保留两套 API；CLI 已切换，但通过现有单元测试仍不能证明真实容器运行可用。
 
 ## 3. 一题的运行流程
 
@@ -81,22 +81,22 @@ sequenceDiagram
 
 关键规则：
 
-1. Prepare 返回的目标须由宿主解析为不可变的 IP:port 集合，再交给 Sandbox；调用者不能扩大 AllowHosts。
+1. Prepare 返回的目标须由宿主校验为不可变的 IP:port 集合，再交给 Sandbox；v0.4 `SandboxSpec` 没有调用者可填写的 AllowHosts。
 2. Agent 的 reader 只向有界事件队列发送事件；编排 goroutine 消费并更新 DAG、Gate 和运行状态。
 3. observed 与 derived 候选允许提交，fabricated 不提交；同一 Run 对同一候选只提交一次。提交结果不确定时，先按平台权威进度 Reconcile，再决定是否重试。
 4. 每题最多一次提示；连续两轮无平台进度且无新增宿主验证事实时触发。提示后再次停滞，应切换未尝试的意图。
 5. 可重试的 provider/进程故障最多重建 Agent 一次，并只回灌脱敏事实摘要；取消、超时、正常结束和失败都必须清理资源。
 
-**当前实现偏差**：eventSink 是无界切片且回调可在 reader 路径直接执行；Run 没有进程级单运行锁，Reclaim 只传入新生成的 run ID；SandboxSpec.AllowHosts 可由调用者填写；Probe 只做镜像检查；若 Planner/Renderer/Gate 缺失，题目会无轮次返回；墙钟与成本预算、一次重启、事实型停滞检测、cleanup 错误记录均未完成。以上均属路线图 P0，不应标记为已满足。
+**当前实现偏差**：`eventSink` 已是有界队列（队列长度、单轮事件数、单条体积三重上限），DAG/Gate 回调改到消费者 goroutine 上执行并由 `Flush` 做轮次屏障；Docker `Probe` 在同一镜像里核验 pi 版本；成本与 turns 预算已从 Agent 统计取值；提交不确定时先 Reconcile 再以不确定终态结束本题；一次 Agent 重启、有界清理、取消后结果保存与清理失败记账均已落地。仍未完成：事实型停滞与换支，以及真实容器的纵向验收。CLI 装配已默认提供跨进程锁并在启动前扫描遗留资源，`NewHarness` 也已拒绝缺 Locker/Planner/Renderer/Gate/Results。未完成项对应 [roadmap.md](roadmap.md) 的 M4 出口门。
 
 ## 4. 数据与结果语义
 
 - DAG 的事实层只记录可追溯的目标、服务、凭据线索和负面事实；答案层由 Gate 单独管理。answer.Fingerprint 是唯一指纹格式源。
 - RunResult 是内存返回值，可能包含 Outcome.Flags；ResultFileStore 用专门的公开结构序列化，避免把整个返回值写盘。
-- 目标公开结果位于 &lt;ResultDir&gt;/results/&lt;runID&gt;.json，只含指标与错误类别。原始 trace、证据和候选若需要持久化，应进入权限为 0700/0600 的 private/；当前 v0.4 私密 trace 持久化尚未接通。
-- 比较通过率时，应记录**起跑时剩余 flag 数**与本次新增确认数。当前聚合把最终累计进度当作本次确认量，RemainingAtStart 等字段未填，因此现有 Stats 不能用于通过率结论。
-- SolverProfile 的 prompt、只读扩展、Planner 参数和提示策略应在一次 Run 中冻结并以摘要标识。当前 RunResult.ProfileDigest 使用构造 Harness 时的 profile，运行时又读取 RunSpec.Profile 的 bundle；需统一为一份来源。
+- 目标公开结果位于 &lt;ResultDir&gt;/results/&lt;runID&gt;.json，只含指标与错误类别。原始 trace、证据和候选若需要持久化，应进入权限为 0700/0600 的 private/；`ResultFileStore.AppendTrace` 已把原始事件落到 &lt;ResultDir&gt;/private/&lt;runID&gt;/（题目编号取哈希，不直接做路径）。
+- `RemainingAtStart` 已在提交前记录并进入公开结果，`stats` 以「本次新增确认 / 起跑时剩余」计算召回率；分母未知的题目不计入比率。`ResultStore` 已放行契约的 `Kind` 枚举作为公开错误类别（`config`/`provider`/`executor` 等）。仍需用真实运行核验数据完整性。
+- SolverProfile 的 system prompt 已进入 AgentStart，`RunResult.ProfileDigest` 与 sandbox 的 profile bundle 都取自 `Run` 开始时冻结的那份 `RunSpec.Profile`（空则回落到装配 profile），Planner 的 `dryRoundsBeforeHint` 与 Renderer 的 `maxFacts`/`maxNegative` 也读同一份。剩余缺口是这些键目前靠约定而非 schema 校验。
 
 ## 5. 当前状态与验收口径
 
-截至本文更新，go test ./... -count=1 通过。它证明现有包测试可编译并运行，**未证明**同步 Harness 的真实 Docker 纵向闭环、CLI 可用、默认拒绝出站、取消清理或线上通过率。下一步先完成 Fake + stub pi 的容器内全生命周期，再按 [roadmap.md](roadmap.md) 逐项封闭 P0。
+截至本文更新，`go test ./... -count=1` 通过。它证明现有包测试可编译并运行，CLI 装配也有单元测试；**尚未证明**同步 Harness 的真实 Docker 纵向闭环、默认拒绝出站、取消清理或线上通过率。现有 Docker 集成测试主要走旧 `Executor` 入口。下一步按 [roadmap.md](roadmap.md) 先完成 Fake + stub pi 的真实容器全生命周期，再封闭凭据与隔离门。
