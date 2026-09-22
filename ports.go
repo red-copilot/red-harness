@@ -389,3 +389,36 @@ var (
 type GraphSaver interface {
 	SaveGraph(ctx context.Context, runID RunID, ch Challenge) error
 }
+
+// GraphState 是**某一题图产物的实际结果**。
+//
+// 它存在的理由是一条具体的误读：`SaveGraph` 过去返回 error，于是 `nil` 同时
+// 承担了两个意思——「没有失败」与「有文件产生」。而装配层的实现有一条
+// 「没有登记过这张图」的正常分支（选项没开、本题没走到导出），它同样返回 nil。
+// 于是「图是可选产物」这件事在调用方眼里消失了：图没写出来被读成写了。
+//
+// 四个值是穷举的，且**分工明确**：
+//
+//	GraphDisabled 端口不在位（`HarnessOptions.Graphs == nil`）。**只由根包折算，
+//	              实现方不得返回**——它是装配事实，不是产物事实。若允许实现方
+//	              返回它，「端口在位但这一题不需要图」与「压根没有端口」会合流，
+//	              而后者正是配置错误最需要被看见的那一档。
+//	GraphAbsent   端口在位、这一题没有登记过图 ⇒ **没有文件产生**。它不是失败。
+//	GraphSaved    graph.json 与 graph.mmd 都写出来了。
+//	GraphFailed   没写出来，或只写了一半；卡在哪由 GraphSaveFailures 的阶段枚举
+//	              说明（沿用既有的 marshal/write/export 三个值）。
+//
+// 不变式：`GraphState == GraphFailed` ⟺ `len(OutcomeView.GraphSaveFailures) > 0`。
+// 旧字段 `GraphSaveFailures` 因此保持原义，旧读者不会因为新字段而误判。
+type GraphState string
+
+const (
+	// GraphDisabled 表示装配层没有接 GraphSaver。
+	GraphDisabled GraphState = "disabled"
+	// GraphAbsent 表示端口在位，但这一题没有图可写——**没有文件产生**。
+	GraphAbsent GraphState = "absent"
+	// GraphSaved 表示图与其 mermaid 导出都写成功。
+	GraphSaved GraphState = "saved"
+	// GraphFailed 表示没写出来或只写了一半。
+	GraphFailed GraphState = "failed"
+)
