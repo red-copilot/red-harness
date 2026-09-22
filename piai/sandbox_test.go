@@ -825,3 +825,57 @@ func argValue(argv []string, flag string) string {
 	}
 	return ""
 }
+
+// TestSandboxFindsEnvRelativeToProcessCwd 钉住沙箱路径的 `.env` 查找起点。
+//
+// 回归：查找起点曾经是 `Agent.Workdir`，而 v0.4 的生产路径（`runChallenge` →
+// `AgentStart{Workdir: SandboxSpec.Workdir}`）在这里填的是**容器内**路径
+// （缺省 `/work`）。拿容器路径去搜宿主文件系统必然落空 ⇒ `.env` 里配好的
+// provider key 不生效，一路到 Start 的凭据预检才以「没有可用的 API key」拒绝。
+//
+// 这条缺陷长期看不见有两个原因，测试里都要堵掉：
+//
+//   - 既有的沙箱用例全都传 `AgentStart{Workdir: a.Workdir}`——**宿主**目录，
+//     于是查找起点恰好是对的。这里必须按生产路径传容器路径。
+//   - `doctor` 的凭据检查从 **cwd** 起找，`run` 从 Workdir 起找 ⇒ 体检报「已设置」
+//     而运行拒绝启动，一次**假绿**。两者现在用同一个起点。
+func TestSandboxFindsEnvRelativeToProcessCwd(t *testing.T) {
+	hostDir := t.TempDir()
+	// 明显的假值：凭据纪律要求测试夹具里不能出现任何真实 key。
+	envFile := filepath.Join(hostDir, ".env")
+	if err := os.WriteFile(envFile, []byte("OPENCODE_API_KEY=test-key-not-real\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(hostDir)
+	// 宿主进程环境里若真有同名变量，先清掉，避免测试断言依赖宿主状态。
+	t.Setenv("OPENCODE_API_KEY", "")
+	t.Setenv("OPENCODE_GO_API_KEY", "")
+
+	const containerWorkdir = "/work"
+	sess := &fakeSession{probeResult: harness.ProbeResult{
+		ContainerID: "fake-container-id", Image: "red-harness-runner:v0.3.0",
+		Workdir: containerWorkdir, PiVersion: "0.86.0"}}
+	a := &Agent{
+		Session: sess,
+		// EnvFile 留空：这正是 CLI 的形态（`internal/cli` 不传 .env），
+		// 所以查找必须自己走对。
+		Workdir:      containerWorkdir,
+		Provider:     "opencode-go",
+		Model:        "deepseek-v4-flash",
+		StallTimeout: 5 * time.Second,
+		ProbeTimeout: 2 * time.Second,
+		AbortGrace:   500 * time.Millisecond,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := a.Start(ctx, harness.AgentStart{Workdir: containerWorkdir}); err != nil {
+		t.Fatalf("沙箱路径必须能按进程 cwd 找到 .env（.env 是宿主文件，容器路径不是合法查找起点）: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
+
+	// 找到了还不够：它必须真的进了注入容器的环境（否则凭据只是「读到了」而没生效）。
+	spec := sess.spec(t, 0)
+	if got := envOf(spec.Env, "OPENCODE_API_KEY"); got != "test-key-not-real" {
+		t.Errorf("容器环境里的 OPENCODE_API_KEY = %q，期望来自 .env 的值", got)
+	}
+}

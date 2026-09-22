@@ -36,11 +36,10 @@ type Agent struct {
 	// （M0 确认非交互模式照常加载）。
 	//
 	// **sandbox 路径下它不参与进程启动**：容器里 pi 的 cwd 由
-	// Session.Probe 的 ProbeResult.Workdir 决定，这里只剩一个用途——作为
-	// resolveEnvFile 向上查找 .env 的起点（凭据在宿主侧读出来再注入容器环境）。
-	// 若调用方在这里填的是**容器内**路径（例如 /work），宿主上的 .env 查找几乎
-	// 必然落空，凭据就只能来自进程环境变量；那条路径由下面的 provider 预检
-	// 明确报错，不会静默降级。
+	// Session.Probe 的 ProbeResult.Workdir 决定，它也不参与 `.env` 查找——v0.4 的
+	// `runChallenge` 在这里填的就是**容器内**路径（`SandboxSpec.Workdir`），拿它搜
+	// 宿主文件系统必然落空，所以沙箱路径固定从**进程 cwd** 起找（与 doctor 的凭据
+	// 检查同一起点）。宿主路径（Session == nil）下它是宿主目录，`.env` 从它向上找。
 	Workdir string
 	// SessionDir 是 --session-dir。为空时：宿主路径落在 <Workdir>/.pi-sessions；
 	// sandbox 路径落在 <容器工作目录>/.pi-sessions（**绝不能**是宿主路径，见
@@ -323,7 +322,25 @@ func (a *Agent) Start(ctx context.Context, req harness.AgentStart) error {
 	}
 	a.BinPath = bin
 
-	envMap, envPath, err := resolveEnvFile(a.EnvFile, a.Workdir)
+	// .env 是**宿主**文件，而 sandbox 路径下 `a.Workdir` 按 v0.4 的契约是**容器内**
+	// 路径（`runChallenge` 传的就是 `SandboxSpec.Workdir`，缺省 `/work`）。拿一个
+	// 容器路径去搜宿主文件系统必然落空 ⇒ `.env` 里配好的 provider key 不生效，
+	// 一路到下面的预检才以「没有可用的 API key」拒绝。
+	//
+	// 曾经的做法是「就这样报错，不静默降级」（见 Agent.Workdir 的注释）。但 v0.4
+	// 的生产路径**没有别的选择**：那个字段在 v0.4 的语义就是容器内路径。于是
+	// `.env` 这条被文档推荐的配置方式在 CLI 上永远走不通，而 `doctor` 的凭据检查
+	// 从 **cwd** 起找、找得到 ⇒ 体检报「已设置」，`run` 却拒绝启动：一次**假绿**，
+	// 正是这条预检本来要防的那种失败。
+	//
+	// 所以沙箱路径固定从**进程 cwd** 起找——与 doctor 的凭据检查同一个起点，两者
+	// 从此不可能再各说各话。宿主路径维持原样（那里 `Workdir` 确实是宿主目录，
+	// AGENTS.md 与 pi 的 cwd 都基于它）。
+	envStart := a.Workdir
+	if a.Session != nil {
+		envStart = "."
+	}
+	envMap, envPath, err := resolveEnvFile(a.EnvFile, envStart)
 	if err != nil {
 		return err
 	}
