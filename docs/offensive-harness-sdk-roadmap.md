@@ -2,7 +2,7 @@
 
 > 规划基线：2026-09-22。当前实现以 [architecture.md](architecture.md) 为准；v0.4 出口门以 [roadmap.md](roadmap.md) 为准。本文规划 v0.4 收尾及后续版本，不把尚未通过的发布门写成既成事实。
 
-> 本次新增：[新架构设计](offensive-harness-sdk-architecture-next.md) 与本文 [N0–N5 实施路线](#6-新架构实施路线n0n5)。§2 保留当前运行架构，R0/R1 保留历史验收状态；N0–N5 是接下来的工程拆分，全部尚未开始，不重复安排已落地的 R1。
+> 本次新增：[新架构设计](offensive-harness-sdk-architecture-next.md) 与本文 [N0–N5 实施路线](#6-新架构实施路线n0n5)。§2 保留当前运行架构，R0/R1 保留历史验收状态；N0–N5 是接下来的工程拆分。**N0.1–N0.4 已实现且离线出口门已逐条实测**（见 [N0 的落地状态](#n0-的落地状态2026-09-22)），**N0.5 按决定推迟**；不重复安排已落地的 R1。
 
 ## 1. 产品定位与决策
 
@@ -43,7 +43,7 @@ flowchart LR
 
 1. **根包 `harness`** 定义 `RunSpec`、`RunResult`、错误类别及活跃端口；编排只依赖端口。`Scenario` 映射平台语义，`Sandbox` 管隔离与生命周期，`AgentFactory` 绑定既有 session，`Planner`/`Renderer`/`CandidateGate` 管求解状态，`ResultStore` 管公开结果。
 2. **适配器**：`scenario` + `bridge` 处理平台，`executor` 实现 Docker sandbox，`piai` 实现 pi RPC，`dag`/`gate` 实现策略，`store` 实现文件结果与私密 trace。适配器依赖根包，根包不反向依赖具体实现。
-3. **装配层 `internal/wire`** 是默认值与生产配置的单一入口。它从 `DefaultDockerConfig()` 构造隔离配置，注入跨进程锁、结果存储、策略工厂与可选图保存器；装配断言与 Docker 集成测试都必须走这条路径。直接调 SDK 也必须满足相同必需端口和锁契约。
+3. **装配层 `local`**（`local/wire.go` 的包文档）是默认值与生产配置的单一入口。它从 `DefaultDockerConfig()` 构造隔离配置，注入跨进程锁、结果存储、策略工厂与可选图保存器；装配断言与 Docker 集成测试都必须走这条路径。直接调 SDK 也必须满足相同必需端口和锁契约。⚠️ N0.1 之后装配实现从 `internal/wire` 搬到了 `local/`——**`internal/wire` 只剩一个薄转发层，且当前没有任何 import 方**。搬家的理由是 Go 的 internal 可见性规则让 `internal/wire` 只能被本模块 import，于是仓库内的示例证明不了「外部可用」；`local` 因此在 `internal/` **之外**。
 
 ### 单题状态与副作用顺序
 
@@ -106,6 +106,31 @@ Docker 宿主属于可信计算基。当前同一 Docker bridge 内流量不经�
 
 **R1 不改变发布边界**：R0 未通过期间不得据此发布 v0.5。迁移表见
 `docs/migration-v0.4-to-v0.5.md`。
+
+### N0 的落地状态（2026-09-22）
+
+§6 列的 N0.1–N0.5，**前四项已实现，出口门逐条离线实测通过，命令与读数在下面**；
+**N0.5 按决定推迟**（它不阻塞其余四项，且拓扑事实分级属于 analysis 侧的独立工作）。
+
+| 出口条件 | 证据（均为 2026-09-22 实测） |
+|---|---|
+| N0.1 外部 go.mod 可编译并跑 Fake | `example/external/` 是独立 module（`replace` 指回仓库根，只有换 module 路径编译器的 `internal/` 可见性检查才真的开始工作）。`go build ./...` 退出 0；`FAKE_PROVIDER_API_KEY=<占位> go run . --scenario fake --image red-harness-external-stubpi:solve --provider fake-provider` 退出 0：体检 14 项全 ok，run 终态 `finished`、`solved`（1 轮、1 次提交），公开结果与私密审计各落一份 |
+| N0.2 不同 StoreDir 双进程互斥 | `cmd/red-harness/lock_integration_test.go` 构建**真 CLI 二进制**并起两个（两个不同 `--store`、显式指向同一条 `--lock`）：第二个在回收之前失败，第一个正在跑的容器与网络原样在跑。它同时钉住「**修好扫描之后，锁第一次成为载荷**」（见下） |
+| N0.3 两题图不覆盖 | 图落点改为**每题一份** `<StoreDir>/runs/<runID>/challenges/<题目 ID>/attempts/1/{graph.json,graph.mmd}`（路径由 `store.FileStore.ForAttempt` 拼，装配层不拼路径），`TestTwoChallengesKeepDistinctArtifacts` 钉住；旧路径 `<runDir>/graph.json` 由 `FileStore.ReadGraph` 回退读取，并如实报告 `GraphSourceLegacyRunRoot` 与 `GraphSourceChallenge` 的区别 |
+| N0.4 审计写失败可见且不继续提交 | `TestAuditFailStopsRunAndKeepsConfirmedOutcome`：注入「只有审计失败、结果仍能写」时返回 `KindPersistence` 并**停止整次 Run**（`Run` 的题目循环遇 `KindPersistence` 即 `break`），本题标 `AuditIncomplete` 且**保留已确认成绩**（`Submitted` / `Flags` / `Score` 不清零）。错误链上带 `ErrAuditIncomplete` 哨兵，调用方不必解析消息 |
+| N0.5 拓扑事实分级 | **推迟（未实现）**。`analysis/red-harness/extract_topology.py` 没有 active / legacy / unwired 分级字段（`topology.json` 的 `edges` 只有 `source`/`target`/`kind`），也没有只检查模式（脚本无参数解析，恒重写 `topology.json`）。本次不把「已有拓扑图」记成「分级已完成」 |
+
+⚠️ **N0.2 的证据要连着读，否则会读反**：`ReclaimStale` 曾在生产路径上**完全空转**——
+扫描用 `docker ps --format '{{json .Labels}}'`，而它打印的是一个**逗号拼接的字符串**、
+不是 JSON 对象，于是每个对象都解析失败 ⇒ 归 `unparsable`，而判据里 `unparsable` 的
+定义是「只报告，永不删除」⇒ 一件都不删、且完全静默。修在 `3d3d299`（改走 `docker inspect`
+取结构）。**修好之前**那组「第一个进程的资源还在」的断言是**空转**的（回收根本删不掉
+东西，资源当然还在）；**修好之后**「无锁的第二个进程会在启动时把第一个正在跑的容器
+`docker rm --force` 掉」才是实测结论，而不是推理。也就是说：单运行锁这个设计是在
+N0.2 修好之后**才第一次有了载荷**。这条同时是 owner 归属判据（`run + owner` 两条）
+存在的理由——判据一旦真的会删，作用域算错就是删掉别人正在用的资源。
+
+**N0 不改变发布边界**：R0 未通过期间同样不得据此发布。
 
 ### R0 的具体执行顺序
 

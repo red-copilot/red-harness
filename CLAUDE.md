@@ -21,8 +21,8 @@ go test ./dag/... -count=1                      # 单个包（实现 agent 只�
 go test ./store/ -run TestLoadEventsSkipsTornLastLine -v   # 单个用例
 go test -race ./... -count=1                    # 全量 race
 UPDATE_GOLDEN=1 go test ./dag/                  # 一次重写两份 golden（render + mermaid）；diff 必须人工确认只动了预期那份
-go test -tags integration ./executor/... -count=1   # 隔离用例 25 条（13 条走 v0.4 SandboxSession 生产路径）
-go test -tags integration ./cmd/red-harness/... -count=1   # 新同步入口的纵向闭环（M1）
+go test -tags integration ./executor/... -count=1   # 隔离用例 **70 条**（2026-09-22 实测：70 PASS / 0 SKIP / 93.9s；其中 13 条 TestV04* 走 v0.4 SandboxSession 生产路径）
+go test -tags integration ./cmd/red-harness/... -count=1   # 新同步入口的纵向闭环（M1）+ 双进程争锁（lock_integration_test.go）：2 个顶层用例
 docker build -t red-harness-runner:v0.3.0 runner/   # runner 镜像（约 1.9 GB，内含真 pi）
 go run ./cmd/red-harness doctor                     # 体检；不给 --provider 时 provider_credentials 必然 FAIL
 go run ./cmd/red-harness run --scenario fake        # 离线纵向闭环：内置演示题，不碰网络与平台（仍需 Docker + runner 镜像）
@@ -71,22 +71,31 @@ harness（契约 + v0.4 Harness 门面，零内部依赖）
  ├── bridge   TSecBench Python 常驻子进程桥（JSONL/stdio）
  ├── piai     pi agent 适配（RPC 帧解析、看门狗）
  ├── scenario 场景适配：Fake（离线）/ TSecBench（真实平台）
+ ├── local     唯一装配点：同时 import 上面 7 个实现包
  ├── internal/cli + internal/wire + cmd/red-harness
- └── report/ web/   ← 未创建，且 v0.4 明确不做（example/ 是空目录）
+ └── report/ web/   ← 未创建，且 v0.4 明确不做
 ```
 
-**`internal/wire` 是唯一的装配层**，也是唯一同时 import 全部 7 个实现包的模块。
-实现包之间**两两互不 import**（`executor` 不认识 `scenario`，`scenario` 不认识 `dag`），
-所以「谁把 X 交给 Y」只在这里发生。CLI **不** import 实现包：它只依赖包内定义的窄接口
-（`internal/cli.Ports`），由 `cmd/red-harness` 在 `init()` 里用 `cli.SetWire` 接进来。
+**`local` 是唯一的装配层**（`local/wire.go` 的包文档），也是唯一同时 import 全部 7 个
+实现包的模块。实现包之间**两两互不 import**（`executor` 不认识 `scenario`，`scenario`
+不认识 `dag`），所以「谁把 X 交给 Y」只在这里发生。CLI **不** import 实现包：它只依赖
+包内定义的窄接口（`internal/cli.Ports`），装配函数由 `cmd/red-harness/main.go` 的
+`main()` **显式**传给 `cli.Main(args, stdout, stderr, wire WireFunc)`——包级 `SetWire`
+已删除，接线是一行参数，而不是一个没人调用的 `init()`。
+
+⚠️ **`internal/wire` 已退化为薄转发层，且当前没有任何 import 方**（连它自己的测试之外
+只剩本目录）。留着它是为了给外部调用方一轮迁移窗口，它**不是**装配点——装配点只有
+`local`。`local` 之所以必须在 `internal/` 之外，是因为 Go 的 internal 可见性规则让
+`internal/wire` 只能被本模块 import，于是仓库内的示例证明不了「外部可用」；
+`example/external/`（独立 module）才是那件事的可执行证据。
 
 ⚠️ **三条把系统拼起来的边在 import 图里看不见**，任何 grep-import 的依赖图都会把
 `internal/cli` / `scenario` / `piai` 误判成孤立：
 
 | 边 | 机制 |
 |---|---|
-| `internal/cli → internal/wire` | 包级 `WireFunc` 变量 + `cli.SetWire`（`cmd/red-harness/main.go`） |
-| `scenario → bridge` | `Platform` 窄接口，由 wire 注入 `*bridge.Client` |
+| `internal/cli → local` | `cli.Main` 的第四个参数（`WireFunc`），由 `cmd/red-harness/main.go` 的 `main()` 显式传入 `newPorts` |
+| `scenario → bridge` | `Platform` 窄接口，由 local 注入 `*bridge.Client` |
 | `piai → executor` | `AgentFactory.New` 收 `harness.SandboxSession`，piai 不 import executor |
 
 **`legacy` 是一个叶子包**：只准 import 标准库与根包。任何实现包出现在它的 import 里，
@@ -94,7 +103,7 @@ harness（契约 + v0.4 Harness 门面，零内部依赖）
 不过），那正是「实现包两两互不 import」要防的事故。这条规矩**不再只写在文档里**——
 `legacy/layering_test.go` 用 `go/parser` 扫全仓 import 图，四条断言：根包零内部依赖、
 legacy 只 import 标准库与根包、实现包两两零边、同时 import ≥2 个实现包的只有
-`internal/wire`。
+`local`（`assemblyPkgs` 已收紧回单元素集合，N0.1 的迁移窗口关闭）。
 
 `legacy` 里的 `Engine`/`New`/`RegisterEngine` **不要**再往那条路上加东西：v0.3 的引擎
 注册表**从来没有被填充过**（`engine/` 目录不存在，`RegisterEngine` 零调用方含测试），
@@ -107,9 +116,8 @@ legacy 只 import 标准库与根包、实现包两两零边、同时 import ≥
   ⚠️ v0.4/v0.5 私密面的实际落点是 `<ResultDir>/private/<runID>/` 下的两份文件：
   `<题目哈希>.jsonl`（原始 trace，`AppendTrace`）与 `submissions.jsonl`（候选审计，
   `AppendAudit`，每次提交一行、含平台判定）。**不是** v0.3 的候选账本
-  `<StoreDir>/runs/<id>/private/candidates.jsonl`——
-  **不是** v0.3 的候选账本 `<StoreDir>/runs/<id>/private/candidates.jsonl`——后者当前没有
-  生产写入方（见 `docs/v0.4-open-items.md`）。纪律不变，机制变了。
+  `<StoreDir>/runs/<id>/private/candidates.jsonl`——后者当前没有生产写入方
+  （见 `docs/v0.4-open-items.md`）。纪律不变，机制变了。
 - 公开面（`results/<runID>.json` / 看板 HTML / `DomainEvent` / `Snapshot` / `run.json` /
   `graph.json`）**一律只有计数与指纹**。v0.5 新增的运行清单（`manifest` 字段）同样只在
   这一侧：镜像 tag/digest 与 pi 版本各过一份字符集闸，提示策略按穷举的三个常量比对。`Snapshot` 故意没有 `Flags` 字段；`ResultFileStore`
@@ -124,15 +132,28 @@ legacy 只 import 标准库与根包、实现包两两零边、同时 import ≥
 ⚠️ **落盘面在 v0.4 变小了，别照着 v0.3 的图去读**：v0.4 明确不做崩溃续跑与事件重放，
 `HarnessOptions` 里**没有** `Store`/`GraphStore`（事件日志与快照那两个端口），装配层只建
 `ResultFileStore`，外加一个**可选**的 `Graphs`（`GraphSaver`，nil＝不落盘；它不是 Fatal，
-但 Doctor 会报出 `graph_saver` 一行）。有生产写入方的落点只有四个：
+但 Doctor 会报出 `graph_saver` 一行）。有生产写入方的落点只有**五个**（下表就是五行）：
 
 | 落点 | 写者 |
 |---|---|
 | `<ResultDir>/results/<runID>.json` 公开指标 | `store/results.go` |
 | `<ResultDir>/private/<runID>/<题目哈希>.jsonl` 原始 trace | `store/trace.go`（`AppendTrace`） |
 | `<ResultDir>/private/<runID>/submissions.jsonl` 候选审计（每次提交一行，含平台判定与明文） | `store/audit.go`（`AppendAudit`，v0.5 新增） |
-| `<StoreDir>/runs/<runID>/graph.json` + `graph.mmd` 每题终态 DAG | `internal/wire` 的 `dagGraphSaver`（生产装配恒提供） |
-| `<StoreDir>/run.lock` 跨进程单运行锁 | `internal/wire/lock.go` |
+| `<StoreDir>/runs/<runID>/challenges/<题目 ID>/attempts/1/graph.json` + `graph.mmd` **每题一份**终态 DAG | `local` 的 `dagGraphSaver`（生产装配恒提供；路径由 `store.FileStore.ForAttempt` 拼） |
+| `/run/lock/red-harness/run-<端点指纹>.lock` 跨进程单运行锁 | `local/lock.go`（`FileLock`；默认端点 `unix:///var/run/docker.sock` 的指纹是常量 `13c4025c`） |
+
+⚠️ 图与锁这两行都**改过落点**，别照旧路径读：
+
+- 图的旧落点 `<StoreDir>/runs/<runID>/graph.json`（一 run 一份，后一题会盖掉前一题）
+  现在**只读兼容**：`store.FileStore.ReadGraph` 先读
+  `challenges/<题目 ID>/attempts/<n>/graph.json`，文件不存在时才回退旧路径，并如实
+  返回 `GraphSourceChallenge` / `GraphSourceLegacyRunRoot` 让调用方判断「这份图是不是
+  我要的那道题」。
+- 锁**不再随 `--store` 变**：flock 绑的是 inode 而不是路径，与被保护的数据住在一起
+  时，`rm -rf` 旧 store 或换一个 `--store` 会让同一路径指向新 inode，正在跑的部署
+  被静默解锁。文件名按 **daemon 端点**取指纹，所以「同一宿主上的两个不同 socket」
+  （两个不同 daemon）各有一把锁——它们本就不共享容器与网络。`--lock` 是显式覆盖，
+  ⚠️ **不同 `--lock` 路径之间不互斥**；跨用户与跨主机明确不做（远程 daemon 直接拒绝）。
 
 `events.jsonl` / `run.json` / `private/candidates.jsonl` / `private/evidence/` / `report.*`
 在 v0.4 **仍然没有生产写入方**，只剩测试与 v0.3 兼容路径在用。**「先写事件、再原子写快照」
