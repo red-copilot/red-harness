@@ -21,7 +21,7 @@ go test ./dag/... -count=1                      # 单个包（实现 agent 只�
 go test ./store/ -run TestLoadEventsSkipsTornLastLine -v   # 单个用例
 go test -race ./... -count=1                    # 全量 race
 UPDATE_GOLDEN=1 go test ./dag/                  # 一次重写两份 golden（render + mermaid）；diff 必须人工确认只动了预期那份
-go test -tags integration ./executor/... -count=1   # 隔离用例 **70 条**（2026-09-22 实测：70 PASS / 0 SKIP / 93.9s；其中 13 条 TestV04* 走 v0.4 SandboxSession 生产路径）
+go test -tags integration ./executor/... -count=1   # 执行器集成门（2026-09-22 实测 70 PASS / 0 SKIP / 90.3s）。⚠️ **需要 Docker 的只有 27 条**（13 TestV04* 走 v0.4 SandboxSession 生产路径 + 14 TestIntegration* 走旧 Exec 端口），另 43 条是纯单元用例、不带 tag 也跑——「70」不是隔离用例数
 go test -tags integration ./cmd/red-harness/... -count=1   # 新同步入口的纵向闭环（M1）+ 双进程争锁（lock_integration_test.go）：2 个顶层用例
 docker build -t red-harness-runner:v0.3.0 runner/   # runner 镜像（约 1.9 GB，内含真 pi）
 go run ./cmd/red-harness doctor                     # 体检；不给 --provider 时 provider_credentials 必然 FAIL

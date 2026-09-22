@@ -7,14 +7,14 @@
 
 v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`、每题一个 Docker sandbox、可信宿主平台控制面、可解释的候选判定和可比较的公开指标。部署范围是 Linux、Docker、单机单用户、题目串行和文件结果后端。通过率是研究指标；隔离、停止、清理、凭据保密和指标口径是发布门槛。
 
-截至 2026-09-22，CLI 已接线为 `doctor/list/run/stats`；装配层、默认跨进程单运行锁、Fake/TSecBench Scenario、Docker attached session、pi factory、DAG/Gate、文件 ResultStore 和离线假件全生命周期测试均已落地。`go test ./... -count=1` 与 `go test -race ./... -count=1` 通过。**M1 的纵向闭环（`CLI → Harness.Run → 真实 Docker → pi → Evaluate → Cleanup`）已实测通过**：`go test -tags integration ./cmd/red-harness/... -count=1` 在本机 Docker 29.8 / root / runner 镜像在位时 14.3s 全绿，证明 pi 与工具同处目标容器、provider key 不进 argv、正常与取消与启动失败三条路径零遗留。旧 `Executor` 入口的集成测试保留为兼容回归。
+截至 2026-09-22，CLI 已接线为 `doctor/list/run/stats`；装配层、默认跨进程单运行锁、Fake/TSecBench Scenario、Docker attached session、pi factory、DAG/Gate、文件 ResultStore 和离线假件全生命周期测试均已落地。`go test ./... -count=1` 与 `go test -race ./... -count=1` 通过。**M1 的纵向闭环（`CLI → Harness.Run → 真实 Docker → pi → Evaluate → Cleanup`）已实测通过**：`go test -tags integration ./cmd/red-harness/... -count=1` 在本机 Docker 29.8 / root / runner 镜像在位时全绿（当时 1 个用例 / 14.3s；N0.2 加入双进程争锁用例后为 2 个用例 / 40.1s），证明 pi 与工具同处目标容器、provider key 不进 argv、正常与取消与启动失败三条路径零遗留。旧 `Executor` 入口的集成测试保留为兼容回归。
 
 ## 交付阶段
 
 | 阶段 | 优先级 / 状态 | 交付范围 | 可观察出口门 |
 |---|---|---|---|
 | M1 离线真实容器闭环 | P0 / **已通过** | Fake + stub pi 经 CLI、同步 Harness 和真实 SandboxSession 完成一题 | pi 与工具同处目标容器；提交由 Fake 确认；正常、取消和启动失败后资源零遗留 |
-| M2 上线前隔离与凭据门 | P0 / **已通过（隔离已复核）** | 凭据传递、镜像内版本核验、网络与文件系统隔离 | canary 不进 argv/公开输出（**已实测**）；版本可核验（**已实测**，镜像内 pi 0.85.1）；**生产装配的隔离已修并在授权环境重跑实测通过**（目标可达、公网/非授权不可达、代理白名单内外分别为 200/405）；25 条隔离用例在 master 上全绿，其中 13 条走 v0.4 的 `SandboxSession` 生产路径 |
+| M2 上线前隔离与凭据门 | P0 / **已通过（隔离已复核）** | 凭据传递、镜像内版本核验、网络与文件系统隔离 | canary 不进 argv/公开输出（**已实测**）；版本可核验（**已实测**，镜像内 pi 0.85.1）；**生产装配的隔离已修并在授权环境重跑实测通过**（目标可达、公网/非授权不可达、代理白名单内外分别为 200/405）；**需要 Docker 的 27 条**在 master 上全绿（其中 13 条走 v0.4 的 `SandboxSession` 生产路径），另 43 条同命令下也跑的纯单元用例**不计入**这个数 |
 | M3 运行可靠性 | P0 / **已完成（离线）** | 有界事件、真实预算、平台对账、恢复策略与清理 | 故障注入得到确定的题级终态；取消后仍保存安全结果；无残留资源；**事实型停滞与换支已落地** |
 | M4 指标与发布验收 | P0/P1 / **进行中** | 冻结 profile、私密 trace、指标修正、真实 pi 与授权平台冒烟 | 指标可重算（**已落地**）；公开面无明文（**已落地**）；真实 pi 已运行，平台确认的提交闭环**未通过** |
 | R1 v0.5 契约与审计（[offensive-harness-sdk-roadmap.md](offensive-harness-sdk-roadmap.md)） | P0 / **离线部分已落地** | profile schema、冻结运行清单、私密候选审计、legacy 退场、示例与迁移指南 | 编译期端口契约、配置拒绝用例、候选审计对账、公开面 canary、旧图读取回归、CLI 与 SDK 同口径——**六条全部离线可验、已实测**；但 R1 依赖 R0，**R0 未通过期间不得据此发布 v0.5** |
@@ -28,15 +28,19 @@ v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`�
 - 一条离线命令应产出 Fake 平台确认的结果及可读取的公开指标；失败时保留明确失败分类和清理证据。Fake 成绩只证明编排接线，不证明真实解题能力。
 
 **实测状态（2026-09-22，本机 Docker 29.8 / root / runner 镜像在位）**：
-`go test -tags integration ./cmd/red-harness/... -count=1` 14.3s 全绿，覆盖了上面第 1、3 条与第 2 条里的**生命周期**部分——同容器身份（stub pi 与其子工具回报同一个 hostname，且等于 `Probe` 的容器 ID）、provider key 不进任何一次 docker argv、正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
+`go test -tags integration ./cmd/red-harness/... -count=1` 2 个顶层用例全绿（2026-09-22 实测 40.1s）。其中 `TestIntegrationCLIFakeDocker` 覆盖了上面第 1、3 条与第 2 条里的**生命周期**部分——同容器身份（stub pi 与其子工具回报同一个 hostname，且等于 `Probe` 的容器 ID）、provider key 不进任何一次 docker argv、正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
 
 **隔离性质的取证分两条路径，都全绿**（`go test -tags integration ./executor/... -count=1`，
-**实测 25 条 / 84.1s / 0 跳过**）：只读 rootfs、有界 tmpfs、非 root、资源上限、宿主状态
-不可见、未授权端点不可达等。其中 12 条走旧 `Exec` 端口，13 条 `TestV04*` 走 v0.4 的
+**实测 70 PASS / 0 SKIP / 90.3s**）：其中**需要 Docker 的 27 条**验的是只读 rootfs、有界
+tmpfs、非 root、资源上限、宿主状态不可见、未授权端点不可达等——14 条走旧 `Exec` 端口，
+13 条 `TestV04*` 走 v0.4 的
 **`SandboxSession`（生产路径）**——后者 2026-09-22 从不合并分支 `v04-container-lifecycle`
 抢救回 master（`828d904`），并当场暴露出该路径上的一个真缺口（`Launch` 的 Workdir 绕过
 校验、且一次被拒即永久废掉 session，已修 `ededebb`）。此前记的「25 条」是**那个分支的
 数字**，在 master 上不可复现——现在它可复现了。
+⚠️ **那之后计数又变过**：上句的「25」与「84.1s」是**当时**的读数；N0.2 之后同一命令是
+70 PASS / 90.3s，多出来的 43 条是回收扫描与判据表的**单元**回归测试（不需要 Docker）。
+引用这条命令的读数时请连拆分一起引，别把 70 直接当成 25 的后继。
 **本阶段新增的**同步入口用例（`cmd/red-harness`）证明的是编排闭环本身——同容器身份、
 凭据不进 argv、三条路径零遗留——不重复取证隔离性质。
 
@@ -63,7 +67,7 @@ v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`�
 
 手写部分结构体 ⇒ 其余字段落零值 ⇒ 而 `DockerConfig` 零值里**所有 bool 都是 false = 关掉隔离**：`ManageIptables=false` 让 `installNetworkRules` 第一行就静默返回，`ProviderProxy=false` 让模型流量不走宿主侧域名白名单代理。`normalize()` 不补这两个开关。
 
-**为什么集成门没拦住**：那 25 条用例一律用 `DefaultDockerConfig()` 构造执行器，验的是**另一条构造路径**。于是「未授权端点不可达」「公网不可达」在测试里全绿、在生产装配上完全失效——`DefaultDockerConfig` 的注释里恰好写着这个危险（「零值里的 bool 全是 false（= 关掉隔离），直接拿零值构造执行器是不安全的」）。
+**为什么集成门没拦住**：那批用例（今天数出来是需要 Docker 的 27 条）一律用 `DefaultDockerConfig()` 构造执行器，验的是**另一条构造路径**。于是「未授权端点不可达」「公网不可达」在测试里全绿、在生产装配上完全失效——`DefaultDockerConfig` 的注释里恰好写着这个危险（「零值里的 bool 全是 false（= 关掉隔离），直接拿零值构造执行器是不安全的」）。
 
 **隔离复核：已重跑，**通过**（2026-09-22，授权环境，生产装配路径）**
 
