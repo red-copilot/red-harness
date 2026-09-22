@@ -353,3 +353,28 @@ func TestNewFakeScenarioWiresGraphSaver(t *testing.T) {
 		t.Fatal("体检里没有 graph_saver 这一项")
 	}
 }
+
+// TestChallengeShapeUsesBothSources 钉住「形态判定只有一个来源」。
+//
+// gate 与 dag 都用 challengeShape：前者决定候选能不能进账本，后者决定答案形状的
+// 内容能不能进图。两处此前**各拼一份输入**（gate 只传 Description），于是同一次
+// 运行里两个判据可能不是同一个形态——而两边看起来都正常，这种漂移除了对比两个
+// 组件的行为之外无从发现。
+//
+// 这里直接钉住「平台下发的 FlagFormat 会被算进去」：题面什么都没说时，若只看
+// 题面就会退回默认信封，而平台明说了格式就该按平台的来。
+func TestChallengeShapeUsesBothSources(t *testing.T) {
+	// 题面没有线索，平台下发了格式：必须按平台给的形态。
+	ch := harness.Challenge{Code: "c1", Description: "找到答案并提交", FlagFormat: "ctf{"}
+	got := challengeShape(ch)
+	if !got.Contains("ctf{abc}") {
+		t.Errorf("平台下发的 FlagFormat 没有生效：%+v", got.Envelopes)
+	}
+
+	// 反向：两个来源都空时只认默认信封（v0.5 收紧，见 answer.Infer 的注释）。
+	// 这条断言防的是「有人为了兼容把 AllowRaw 兜底加回来」。
+	empty := challengeShape(harness.Challenge{Code: "c2"})
+	if empty.AllowRaw {
+		t.Error("两个来源都空时不得默认允许裸串——那正是 147 次提交的成因")
+	}
+}

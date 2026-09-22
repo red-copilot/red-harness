@@ -76,8 +76,23 @@ var DefaultEnvelope = Envelope{Prefix: "flag{", Suffix: "}"}
 //  1. 题面出现 "flag{" 之类 ⇒ 信封形态，前缀取自题面。
 //  2. 题面出现 `XXX{` 且 XXX 是短标识符 ⇒ 信封形态。
 //  3. 题面出现密码/密钥/hash 等字样 ⇒ 允许裸串。
-//  4. 两者都没有 ⇒ 默认 flag{...} 信封 **且** 允许裸串（宁可多认，不可漏认；
-//     漏认的代价是拿不到分，多认的代价只是一条候选被平台判错）。
+//  4. 两者都没有 ⇒ **只**认默认信封，**不**默认允许裸串。
+//
+// ⚠️ **规则 4 是 v0.5 收紧的，此前它同时允许裸串**，理由是「宁可多认，不可漏认；
+// 漏认的代价是拿不到分，多认的代价只是一条候选被平台判错」。前半句对，后半句
+// **是错的**——「多认」的代价不止「一条候选被平台判错」：
+//
+//	2026-09-22 的授权真跑里，一道题面既没说 `flag{` 也没提密码/密钥的题，
+//	因为这条兜底而接受了**每一个原始 token** 当候选，最终打出 147 次
+//	`POST /submit`、其中 146 次是原始 token。平台配额被静默烧掉，而公开面上
+//	只看得到一个「提交过」的计数。
+//
+// 也就是说：多认的真正代价是**提交次数**——它乘在每一轮、每一条候选上，而不是
+// 一条候选一次。判错本身不要紧，但你没有那么多提交额度去「多认」。
+//
+// 收紧之后，一道题面什么都没说的题只会接受 `flag{...}`；如果它真的是裸串题，
+// 题面或 Challenge.FlagFormat 里总该有线索（见 harness.AnswerFormatHint 的
+// 「绝不硬塞 flag{...}」）。判错的代价回到了它本该在的量级。
 func Infer(description string) Shape {
 	var s Shape
 	seen := map[string]bool{}
@@ -111,12 +126,30 @@ func Infer(description string) Shape {
 	}
 
 	if len(s.Envelopes) == 0 && !s.AllowRaw {
-		// 题面什么都没说：两种形态都认
+		// 题面什么都没说：只认默认信封。**不要在这里加回 AllowRaw**——见 Infer
+		// 的注释：那条兜底的真实代价是提交次数，而提交次数是有配额的。
+		//
+		// 判据是「题面说了什么」，而不是「哪个更省事」：一道真的裸串题，
+		// 题面或 FlagFormat 里会有密码/密钥/hash 之类的线索，那时走的是规则 3。
 		s.Envelopes = []Envelope{DefaultEnvelope}
-		s.AllowRaw = true
 	}
 	s.normalize()
 	return s
+}
+
+// InferFor 是**唯一**该被调用的形态推断入口：题面 + 平台下发的格式。
+//
+// 为什么要把它单独提出来，而不是让每个调用方自己拼字符串：两个来源都得喂进去
+// （题面可能只说「提交密码」，平台可能另外下发 `flag{...}`），而**两处各拼一遍
+// 必然漂移**——这正是本仓库反复踩过的形状（`dag.FlagFingerprint` 与
+// `gate.Fingerprint` 曾经各实现一份指纹）。
+//
+// 实际发生过：`gate` 只拿 `ch.Description` 推断，而 `dag` 拿的是
+// `Description + " " + FlagFormat`。同一次运行里，入图判据与候选判据用的**不是
+// 同一个形态**——平台下发了格式、题面没提的那类题，两边会得出不同结论，而两边
+// 看起来都正常。
+func InferFor(description, flagFormat string) Shape {
+	return Infer(strings.TrimSpace(description + " " + flagFormat))
 }
 
 // New 直接构造一个只认给定信封的 Shape（测试与显式配置用）。

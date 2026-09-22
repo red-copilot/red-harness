@@ -46,10 +46,30 @@ func TestInferRawHint(t *testing.T) {
 	}
 }
 
-func TestInferDefaultAcceptsBoth(t *testing.T) {
+// TestInferDefaultIsEnvelopeOnly 是 v0.5 **刻意反转**的一条。
+//
+// 它此前叫 TestInferDefaultAcceptsBoth，断言空题面同时接受信封与裸串，理由是
+// 「宁可多认，不可漏认」。那条理由低估了「多认」的代价——它以为代价是「一条
+// 候选被平台判错」，实际代价是**提交次数**，而提交次数是有配额的：
+//
+//	2026-09-22 授权真跑：一道题面既无 `flag{` 也无密码/密钥字样的题，因为这条
+//	兜底把每一个原始 token 都收成了候选，打出 147 次 `POST /submit`（146 次是
+//	原始 token）。平台上只看得到一个「提交过」的计数，配额已经烧掉了。
+//
+// 反转而不是删除：这个行为的**变化本身**需要一条断言钉住，否则下一个人会
+// 照着「宁可多认」的直觉把它加回来。
+func TestInferDefaultIsEnvelopeOnly(t *testing.T) {
 	s := Infer("这是一道题")
-	if len(s.Envelopes) == 0 || !s.AllowRaw {
-		t.Errorf("空题面应同时接受信封与裸串，got %+v", s)
+	if len(s.Envelopes) != 1 || s.Envelopes[0] != DefaultEnvelope {
+		t.Errorf("空题面应只认默认信封，got %+v", s)
+	}
+	if s.AllowRaw {
+		t.Error("空题面**不得**默认允许裸串——那正是 147 次提交的成因")
+	}
+	// 反差面：题面真的提到裸串形态时（规则 3），AllowRaw 仍必须为真。
+	// 少了这条，上面那两条断言无法区分「收紧了」与「裸串支持坏了」。
+	if !Infer("请提交管理员密码").AllowRaw {
+		t.Error("题面提到「密码」时应允许裸串——收紧的是**兜底**，不是裸串支持本身")
 	}
 }
 

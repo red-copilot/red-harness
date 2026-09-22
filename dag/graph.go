@@ -110,15 +110,13 @@ func New(ch harness.Challenge) *Graph {
 
 // inferShape 从题面 + 平台下发的格式推断答案形态。
 //
-// 两个来源都喂进去：题面可能只说「提交密码」（裸串），平台可能另外下发
-// `flag{...}`（信封）。任何一处漏掉都会让形态判定偏窄，而漏认的代价是丢分。
+// ⚠️ 空题面的兜底在 v0.5 **变了**：此前 `Infer("")` 同时认信封与裸串，现在只认
+// 默认信封（见 answer.Infer 的注释——那条兜底的真实代价是提交次数，而提交次数
+// 有配额：2026-09-22 的一次真跑因此打出 147 次 submit）。
 func inferShape(ch harness.Challenge) answer.Shape {
-	src := strings.TrimSpace(ch.Description + " " + ch.FlagFormat)
-	if src == "" {
-		// 空题面也要给出兜底形态：Infer("") 会同时认信封与裸串（宁可多认）。
-		return answer.Infer("")
-	}
-	return answer.Infer(src)
+	// 拼接交给 answer.InferFor —— 它是唯一的形态推断入口，gate 侧也走它。
+	// 这里**不要**再拼一遍字符串（那是这条注释存在的全部理由）。
+	return answer.InferFor(ch.Description, ch.FlagFormat)
 }
 
 // SetShape 覆盖本题的答案形态。

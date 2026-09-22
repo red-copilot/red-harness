@@ -30,6 +30,7 @@ import (
 	"time"
 
 	harness "github.com/red-copilot/red-harness"
+	"github.com/red-copilot/red-harness/answer"
 	"github.com/red-copilot/red-harness/bridge"
 	"github.com/red-copilot/red-harness/dag"
 	"github.com/red-copilot/red-harness/executor"
@@ -285,7 +286,10 @@ func New(opts Options) (*Runner, error) {
 		Agents:   &piai.Factory{BinPath: opts.Agent.BinPath, EnvFile: opts.EnvFile},
 		Results:  results,
 		Locker:   locker,
-		Gate:     func(ch harness.Challenge) harness.CandidateGate { return gate.NewGate(ch.Description) },
+		// 形态判定走 challengeShape（题面 + 平台下发的格式），与 dag 侧**同源**。
+		Gate: func(ch harness.Challenge) harness.CandidateGate {
+			return gate.NewGateShape(challengeShape(ch))
+		},
 		SolverWithProfile: func(ch harness.Challenge, profile harness.SolverProfile) (harness.Planner, harness.Renderer) {
 			graph := dag.New(ch)
 			// 登记这张图，供 Harness 在本题收尾时落盘。闭包签名里没有 runID
@@ -362,6 +366,19 @@ func missingChecks(rep harness.DoctorReport) string {
 // `if h.results != nil`），于是每次运行都跑得好好的、却什么指标都没留下——
 // 而 stats 读的正是这些指标，表现为「跑了几十次，stats 说零次」。
 func optsResultsNil(rs harness.ResultStore) bool { return rs == nil }
+
+// challengeShape 是本装配层对「这道题的答案形态」的**唯一**判定。
+//
+// 为什么必须是一个具名函数而不是就地调 answer.InferFor：形态有两个消费者——
+// gate（候选判据）与 dag（答案形状内容拒入图的不变量）。它们此前**各拼一份输入**
+// （gate 只传 Description，dag 传 Description + FlagFormat），于是同一次运行里
+// 两个判据可能不是同一个形态，而两边看起来都正常。
+//
+// 收成一个函数之后，漂移需要一个显式的改动才会发生——而那时这段注释就是它的
+// 反对理由。
+func challengeShape(ch harness.Challenge) answer.Shape {
+	return answer.InferFor(ch.Description, ch.FlagFormat)
+}
 
 // buildScenario 按名字造场景。返回值里的 *bridge.Client 只在 tsecbench 下非空，
 // 调用方负责在失败路径与 Close 时关掉它。
