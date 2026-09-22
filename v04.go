@@ -661,6 +661,36 @@ func graphSaveStage(err error) string {
 	}
 }
 
+// foldGraphState 把「图落盘走到哪一步」折成 GraphState 的四态之一。
+//
+// ⚠️ **过渡状态（本波）**：`GraphSaver.SaveGraph` 现在的签名只返回 `error`，于是
+// 它的 nil 同时承担「没有失败」与「有文件产生」两个意思——装配层那条「这一题没有
+// 登记过图」的正常分支同样返回 nil。所以本轮**无法**从返回值区分 saved 与 absent：
+//
+//	端口不在位（saver == nil）        ⇒ GraphDisabled（只由根包折算，见 ports.go）
+//	有失败阶段（failures 非空）        ⇒ GraphFailed，卡在哪由阶段枚举说明
+//	nil error，且不是上面两档         ⇒ **GraphAbsent**
+//
+// 最后一档是刻意的取舍：nil 只证明「没有报错」，**不证明有文件产生**。把它读成
+// GraphSaved 正是这个类型被引入时要消灭的那句话（「图没写出来被读成写了」），
+// 而这里没有任何东西可以证明文件在盘上。宁可少报一档（读的人去目录里看一眼就会
+// 发现文件其实在），也不要多报（那一栏从此永久说谎）。
+//
+// 下一波 `SaveGraph` 直接返回四态之后，这一档由实现方如实回答，本函数退化成一次
+// 转发——调用点不用动。
+//
+// 不变式（ports.go）：`GraphState == GraphFailed` ⟺ `len(failures) > 0`。
+func foldGraphState(saver GraphSaver, failures []string) GraphState {
+	switch {
+	case saver == nil:
+		return GraphDisabled
+	case len(failures) > 0:
+		return GraphFailed
+	default:
+		return GraphAbsent
+	}
+}
+
 func (h *Harness) Doctor(ctx context.Context) DoctorReport {
 	r := DoctorReport{OK: true}
 	checks := []DoctorCheck{{Name: "scenario", OK: h != nil && h.scenario != nil, Fatal: true},
@@ -708,6 +738,25 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	// 明令禁止那么做。
 	if err := spec.Validate(); err != nil {
 		return RunResult{State: RunFailed}, err
+	}
+	// `Submit=true` 却没有审计端口 ⇒ **在任何平台调用之前拒绝整次运行**。
+	//
+	// 为什么这一档不能像图落盘那样「缺席就缺席」：`Submit=true` 意味着一串
+	// **不可追回的平台写操作**（起题、提交、关题），而没有审计就永远答不出
+	// 「提交了什么、平台怎么判的」——2026-09-22 那次授权真跑里「147 次提交、
+	// 146 条判错」的事后追查正是卡在这里，只能靠数聚合计数去猜。可选端口的缺席
+	// 最多让产物少一面；它的缺席让**已经发生过的写操作**不可解释。
+	//
+	// 判据用构造函数冻结的 `h.audits`，不在这里重新断言一次类型：同一件事有两个
+	// 判据就会有两套答案，而 Doctor 的 candidate_audit 一行读的也是它——「体检说
+	// 没接审计」与「这样跑会被拒」必须是同一个事实。
+	//
+	// 位置：早于 Discover（Run 里的第一处平台调用），也早于跨进程锁。拒绝必须发生
+	// 在副作用之前，否则「拒绝」本身已经踩过平台了。
+	if spec.Submit && h.audits == nil {
+		return RunResult{State: RunFailed}, Ef(KindConfig, "harness.audit",
+			"Submit=true 但没有候选审计落点（Results 未实现 AuditStore）：提交记录将不可回答；"+
+				"请接上审计，或改用 Submit=false 的干跑", nil)
 	}
 	if h.locker == nil {
 		return RunResult{}, Ef(KindConfig, "harness.run", "缺少跨进程单运行锁", nil)
@@ -800,9 +849,33 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 		}
 		cr, runErr := h.runChallenge(ctx, runID, spec, ch, &result.Manifest)
 		result.Challenges = append(result.Challenges, cr)
-		if runErr != nil && firstErr == nil {
-			firstErr = runErr
-			result.Err = safeError(runErr)
+		if runErr != nil {
+			if firstErr == nil {
+				firstErr = runErr
+			} else if IsKind(runErr, KindPersistence) {
+				// 落盘故障是这次运行**为什么停**的那个错，必须排在链首：result.Err
+				// 取的是链上第一个分类，被前面某道题的题级错误挡在前面，它就会在
+				// 公开面上消失——而「看不见」正是这一类故障的常态（见 KindPersistence
+				// 的注释：吞掉意味着调用方以为进展保住了）。
+				firstErr = errors.Join(runErr, firstErr)
+			}
+			result.Err = safeError(firstErr)
+		}
+		// ⚠️ **只有落盘故障中断整次运行**，其余错误一律只结束本题（既有语义，
+		// 见轮循环里「再次失败则结束当前题目并继续下一题」那条注释）：一道题起不来
+		// 不该让剩下的几十道题陪葬。
+		//
+		// 但候选审计写不出去不是「这道题的事」：它意味着**这次运行的提交记录已经
+		// 不完整了**，而 Submit=true 的每一次提交都是不可追回的平台写操作。继续跑
+		// 只会让缺口越拉越大，事后没有任何办法回答「到底提交了什么、平台怎么判的」
+		// ——那正是这份审计存在的全部理由。所以它按运行级故障处理：停下来，等调用
+		// 方修好落盘面再重跑。
+		//
+		// 与 `harness.result`（results.Save 失败）的区别：那一处 Run 直接返回错误，
+		// 因为它已经没有结果可交；这里本题的成绩**仍然保留在 cr.Outcome 里**——
+		// 停止不等于抹掉。
+		if IsKind(runErr, KindPersistence) {
+			break
 		}
 	}
 	result.EndedAt = h.now()
@@ -837,23 +910,35 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	return result, firstErr
 }
 
-// appendAudit 把一次提交写进私密候选审计。
+// appendAudit 把一次提交写进私密候选审计，并把**写不出去**这件事交给调用方。
 //
-// **尽力而为，不中断本题。** 判断依据是：能写坏这次追加的机器，紧接着也会写坏
-// `results.Save`——而那一处是致命的（Run 直接返回 KindPersistence）。所以把这里
-// 也做成致命不会多拦下任何东西，只会把「平台提交已经发生、账本已经记了 Submitted」
-// 的那一步砍断，让公开计数与审计行数对不上——而「对得上」正是这份审计的验收条件。
+// **为什么必须返回错误**（这一条此前被 `_ =` 显式丢弃）：原来的理由是「能写坏
+// 这次追加的机器，紧接着也会写坏 `results.Save`」——**这个推理不成立**。审计有它
+// **自己**的两条上限（单行 64 KiB、单文件 16 MiB，见 store/audit.go）与自己的 ctx
+// 检查，与 results.Save 完全独立：一行超长的候选审计会被拒，而公开指标照常写得
+// 进去。于是在旧实现下，`store/audit.go` 里两条 KindPersistence 分类**在生产路径
+// 上永远没有人看得到**——公开计数照常递增、State 不变、日志干净，而「提交了什么、
+// 平台怎么判的」已经答不出来了。这正是本仓库反复记为「比缺失更糟」的形状：
+// 字段在、机制在，只是没接线。
 //
-// ⚠️ 因此这里**显式丢弃**错误是有意的：审计写不进去的可见性是「公开结果本身
-// 写不进去」，不是这一条。
+// 返回 nil 的两条路径：写入成功，以及端口未接线（见下）。
 func (h *Harness) appendAudit(ctx context.Context, runID RunID, code string, c Candidate,
-	v SubmissionVerdict, eval Evaluation, evalErr error, at time.Time) {
-	audits, ok := h.results.(AuditStore)
-	if !ok {
+	v SubmissionVerdict, eval Evaluation, evalErr error, at time.Time) error {
+	audits := h.audits
+	if audits == nil {
 		// 没接审计端口。与 GraphSaver 同档：可选端口，不接不影响任何一次运行的
 		// 成败。但「没接」必须是**可见的**——否则「这次运行没有审计」会与
 		// 「这次运行没提交过」长得一样。见 Doctor 的 candidate_audit 一行。
-		return
+		//
+		// ⚠️ 这里返回 nil **不等于**「不接审计无所谓」：`Submit=true` 时它在 Run
+		// 的开头就被拒了（那条守卫读的是**同一个**构造函数冻结的字段）。走到这里
+		// 只可能是干跑——没有平台写操作，所以没有「不可追回的写操作没人记」的问题。
+		//
+		// ⚠️ 读冻结字段而不是在这里重新对 `h.results` 断言一次类型：那就是同一个
+		// 问题有两个判据，而两套答案会以最糟的方式分叉——Run 开头照 h.audits 放行，
+		// 之后有人换掉 Results，提交继续发生而审计**静默地不再落盘**，恰是本函数
+		// 要根除的那个形状。
+		return nil
 	}
 	rec := CandidateAudit{
 		Source: c.Source, Provenance: string(c.Provenance),
@@ -872,7 +957,16 @@ func (h *Harness) appendAudit(ctx context.Context, runID RunID, code string, c C
 	if evalErr != nil {
 		rec.SubmitError = evalErr.Error()
 	}
-	_ = audits.AppendAudit(ctx, runID, code, rec)
+	if err := audits.AppendAudit(ctx, runID, code, rec); err != nil {
+		// 公开面只拿固定文案（写不出去的原因可能是平台响应片段或路径），原始错误
+		// 留在 err 链上——与 graphSaveStage 同一档处置。
+		//
+		// 哨兵与分类都放进链上：分类回答「哪一类」（调用方据此决定停机），哨兵回答
+		// 「错的是哪一件事」（同一分类下还有别的落盘故障）。
+		return Ef(KindPersistence, "harness.audit",
+			"候选审计未能写入：本题的提交记录不完整", errors.Join(ErrAuditIncomplete, err))
+	}
+	return nil
 }
 
 // reclaimStale 回收上一次运行留下的、本次不用的沙箱资源。
@@ -944,6 +1038,14 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	// ——字段在、文档写了、落盘了，但永远是零。实测：一次真跑里题目实际耗时
 	// 约 10 分钟，公开结果写的是 `durationSeconds: 0`。
 	cr.Outcome.StartedAt = cr.StartedAt
+	// 图产物的**默认**结果先落下来，早于 Prepare/沙箱/Probe 的每一条出口：那几条
+	// 出口上「本题没有图」是**可证的**（我们连 SaveGraph 都没调到），落到这里的是
+	// 「端口不在位」与「没有文件产生」两档；真走到落盘的那条路由下面的 defer 覆盖。
+	//
+	// 与 StartedAt/EndedAt 同一条理由：逐条出口补必然漏，而漏掉的那一格会是一个
+	// **没定义**的值（空串），读的人只能自己猜它是什么意思——GraphState 的四个取值
+	// 是穷举的，空串不在其中。
+	cr.Outcome.GraphState = foldGraphState(h.graphs, nil)
 	target, err := h.scenario.Prepare(ctx, ch)
 	if err != nil {
 		cr.EndedAt = h.now()
@@ -1035,16 +1137,18 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	// 静默翻转——而翻转的表现是数据竞争，不是编译错误。
 	defer func() {
 		sink.Close()
-		if h.graphs == nil {
-			return
+		if h.graphs != nil {
+			// 独立的有界 context：走到这里时 ctx 可能已被取消（取消/超时路径），
+			// 而图恰恰是那些路径上最值得留下的东西。与 cleanup 同一个理由。
+			saveCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := h.graphs.SaveGraph(saveCtx, runID, ch); err != nil {
+				cr.Outcome.GraphSaveFailures = append(cr.Outcome.GraphSaveFailures, graphSaveStage(err))
+			}
 		}
-		// 独立的有界 context：走到这里时 ctx 可能已被取消（取消/超时路径），
-		// 而图恰恰是那些路径上最值得留下的东西。与 cleanup 同一个理由。
-		saveCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := h.graphs.SaveGraph(saveCtx, runID, ch); err != nil {
-			cr.Outcome.GraphSaveFailures = append(cr.Outcome.GraphSaveFailures, graphSaveStage(err))
-		}
+		// 折算点只有这一处：本题**走到过**落盘这一步，结果由失败阶段决定。
+		// 「端口不在位」与「没走到这一步」两档在函数开头就已经落下来了。
+		cr.Outcome.GraphState = foldGraphState(h.graphs, cr.Outcome.GraphSaveFailures)
 	}()
 	if h.gate != nil && (h.solverWithProfile != nil || h.solver != nil || h.planner != nil && h.renderer != nil) {
 		if h.solverWithProfile != nil {
@@ -1262,6 +1366,11 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 			}
 			eval, evalErr := h.scenario.Evaluate(ctx, ch, c.Flag)
 			submitted++
+			// Attempts 是这次调用的**公开**视图，赋值必须紧跟在这里，而不是等循环
+			// 结束后回填：下面两条路径都会直接 return，回填会把它们漏掉——而
+			// 「结果不确定」那一档恰恰最需要被计数（平台写超时，这一条到底算不算
+			// 提交过）。它与局部变量 submitted 是同一个量的两个视图，不另算一遍。
+			cr.Outcome.Attempts = submitted
 			// 审计在**两条**路径上都要落：正常判定与「结果不确定」。后者尤其
 			// 重要——它正是「平台写超时、这一条到底算不算提交」的那一档，而
 			// 只记成功的审计恰好答不出这个问题。
@@ -1270,13 +1379,21 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 				// 平台写超时后，总进度不足以证明这一条候选的状态。记录本次
 				// 提交，读取权威总进度，然后以不确定终态结束本题，禁止盲目重试。
 				v := gate.Mark(c.Flag, Evaluation{}, evalErr)
-				h.appendAudit(ctx, runID, ch.Code, c, v, Evaluation{}, evalErr, submittedAt)
+				auditErr := h.appendAudit(ctx, runID, ch.Code, c, v, Evaluation{}, evalErr, submittedAt)
 				if obj, reconcileErr := h.scenario.Reconcile(ctx, ch); reconcileErr == nil {
 					cr.Outcome.ProgressConfirmed, cr.Outcome.ProgressTotal = obj.Got, obj.Want
 				}
 				cr.Outcome.Reason = ReasonError
 				cr.Outcome.Err = "提交结果不确定"
 				cr.EndedAt = h.now()
+				if auditErr != nil {
+					// 审计也没写出去。两件事都要留下：Err 保留「不确定」那句（它
+					// 是这一行**没写成的审计**唯一的载体，也是本题停下来的原因），
+					// AuditIncomplete 单独记审计那一笔。返回值给审计错误——它的
+					// 停止粒度是**整次运行**（见 Run 的题目循环）。
+					cr.Outcome.AuditIncomplete = true
+					return cr, auditErr
+				}
 				return cr, Ef(KindPlatform, "harness.evaluate", "提交结果不确定", evalErr)
 			}
 			// 判定原样交给 gate：把 Evaluation 映射成账本字段（含 Duplicate 的
@@ -1285,7 +1402,18 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 			// 而不是自己再判一次 `Accepted && !Progress`（两处各写一遍必然漂移，
 			// 漂移的表现是幂等命中被记成新增确认，通过率系统性偏高）。
 			v := gate.Mark(c.Flag, eval, nil)
-			h.appendAudit(ctx, runID, ch.Code, c, v, eval, nil, submittedAt)
+			if auditErr := h.appendAudit(ctx, runID, ch.Code, c, v, eval, nil, submittedAt); auditErr != nil {
+				// ⚠️ **不碰 Submitted / Flags / Score。** 它们是审计失败**之前**
+				// 平台已经确认的事实（上面几条候选，以及本次提交在平台侧的判定），
+				// 清零等于把「已经解出来了」改写成「没解出来」——而 State 与
+				// Completed 本来就是两个问题（见 RunFinished 的注释）。这里的
+				// 「停」只影响后续：不再提交、不再跑下一题。
+				cr.Outcome.AuditIncomplete = true
+				cr.Outcome.Reason = ReasonError
+				cr.Outcome.Err = "候选审计未完整落盘"
+				cr.EndedAt = h.now()
+				return cr, auditErr
+			}
 			if eval.Progress {
 				progressed = true
 			}

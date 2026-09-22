@@ -175,7 +175,7 @@ func TestRunRejectsInvalidConfigBeforeSideEffects(t *testing.T) {
 			h, err := NewHarness(HarnessOptions{
 				Scenario: sc, Sandbox: sb, Agents: &scriptedAgentFactory{agent: &fakeAgent{}},
 				Gate:    func(Challenge) CandidateGate { return newStubGate() },
-				Results: &recordingResults{}, Locker: locker,
+				Results: &auditResults{}, Locker: locker,
 				Planner:  func(Challenge) Planner { return &stubPlanner{} },
 				Renderer: func(Challenge) Renderer { return stubRenderer{} },
 			})
@@ -221,7 +221,7 @@ func TestRunAcceptsValidProfileLimits(t *testing.T) {
 	h, err := NewHarness(HarnessOptions{
 		Scenario: sc, Sandbox: sb, Agents: &scriptedAgentFactory{agent: &fakeAgent{}},
 		Gate:    func(Challenge) CandidateGate { return newStubGate() },
-		Results: &recordingResults{}, Locker: locker,
+		Results: &auditResults{}, Locker: locker,
 		Planner:  func(Challenge) Planner { return &stubPlanner{} },
 		Renderer: func(Challenge) Renderer { return stubRenderer{} },
 	})

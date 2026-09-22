@@ -219,15 +219,27 @@ type stubScenario struct {
 	submitted      []string
 	evalCalls      int
 	reconcileCalls int
-	evalErr        error
-	cleanupErr     error
-	discoverErr    error
+	// discovered 数的是 Discover 被调用了几次。
+	//
+	// 为什么需要一个专门的计数器：Discover 是 Run 里**第一处平台调用**，而「拒绝
+	// 必须发生在任何平台调用之前」这条断言只能靠它来钉——prepared 只能证明没起题，
+	// 证明不了「连题目清单都没去平台上拉」。两者是不同档的副作用。
+	discovered  int
+	evalErr     error
+	cleanupErr  error
+	discoverErr error
+	// prepareErr 让「起题就失败」这条最早的出口可注入——它是 GraphState 那条
+	// 「默认值必须早于每一条出口」的断言的靶子。
+	prepareErr error
 	// evalHook 让用例按候选内容给不同判定（确认 / 幂等重复 / 判错）。
 	// 为 nil 时走默认的「对不对」二值判定。
 	evalHook func(flag string) Evaluation
 }
 
 func (s *stubScenario) Discover(context.Context, RunSpec) ([]Challenge, error) {
+	s.mu.Lock()
+	s.discovered++
+	s.mu.Unlock()
 	if s.discoverErr != nil {
 		return nil, s.discoverErr
 	}
@@ -238,6 +250,9 @@ func (s *stubScenario) Prepare(_ context.Context, ch Challenge) (Target, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prepared++
+	if s.prepareErr != nil {
+		return Target{}, s.prepareErr
+	}
 	return Target{Code: ch.Code, Addrs: []string{"10.9.9.9:8080"}, Network: "tcp"}, nil
 }
 
@@ -838,7 +853,7 @@ func TestRunRecordsChallengeDuration(t *testing.T) {
 	var tick int
 	h, err := NewHarness(HarnessOptions{Scenario: sc, Sandbox: &fakeSandbox{}, Agents: factory,
 		Gate:    func(Challenge) CandidateGate { return newStubGate() },
-		Results: &recordingResults{}, Locker: fakeRunLocker{},
+		Results: &auditResults{}, Locker: fakeRunLocker{},
 		Planner:  func(Challenge) Planner { return &stubPlanner{} },
 		Renderer: func(Challenge) Renderer { return stubRenderer{} },
 		Now:      func() time.Time { tick++; return base.Add(time.Duration(tick) * time.Second) }})
@@ -994,7 +1009,7 @@ func TestRunFreezesProfileIntoAgentStart(t *testing.T) {
 		Planner:  func(Challenge) Planner { return &stubPlanner{} },
 		Renderer: func(Challenge) Renderer { return stubRenderer{} },
 		Gate:     func(Challenge) CandidateGate { return newStubGate() },
-		Results:  &recordingResults{},
+		Results:  &auditResults{},
 		Profile:  SolverProfile{Name: "p1", SystemPrompt: "你是一个授权的 CTF 解题助手"}}
 	h, err := NewHarness(opts)
 	if err != nil {
@@ -1035,6 +1050,45 @@ func TestRunFreezesProfileIntoAgentStart(t *testing.T) {
 	}
 }
 
+// TestRunNonPersistenceErrorDoesNotStopWholeRun：**只有落盘故障**中断整次运行。
+//
+// 这是既有语义的钉子，不是新行为：一道题起不来（Probe 失败、轮级错误、预算耗尽…）
+// 只结束**本题**，剩下的题照跑——一次装配/平台抖动不该让几十道题陪葬。审计写不出去
+// 是唯一的例外（见 TestAuditFailStopsRunAndKeepsConfirmedOutcome），所以「谁中断
+// 整次运行」这张表必须被两边的用例同时钉住，否则放宽某一类错误时没人会知道。
+func TestRunNonPersistenceErrorDoesNotStopWholeRun(t *testing.T) {
+	sc := &stubScenario{
+		challenges: []Challenge{{Code: "c1", FlagCount: 1}, {Code: "c2", FlagCount: 1}},
+		answers:    map[string]string{"c1": "flag{x}"},
+	}
+	ag := &fakeAgent{roundErr: errors.New("假进程死了")}
+	factory := &scriptedAgentFactory{agent: ag}
+
+	h := newTestHarness(t, sc, &fakeSandbox{}, factory, func(Challenge) CandidateGate { return newStubGate() })
+	res, err := h.Run(context.Background(), testRunSpec())
+	if err == nil {
+		t.Fatal("轮级错误必须让 Run 返回错误")
+	}
+	if IsKind(err, KindPersistence) || IsKind(err, KindCancelled) {
+		t.Fatalf("这是题级故障，分类不该是落盘/取消: %v", err)
+	}
+	if !IsKind(err, KindExecutor) {
+		t.Errorf("错误分类 = %v，期望 KindExecutor（轮级故障的既有分类）", err)
+	}
+	if len(res.Challenges) != 2 {
+		t.Fatalf("只跑了 %d 道题——第一道题的轮级错误不该让整次运行停下来", len(res.Challenges))
+	}
+	if sc.prepared != 2 || sc.cleaned != 2 {
+		t.Errorf("Scenario 起题/清理 = %d/%d，期望 2/2", sc.prepared, sc.cleaned)
+	}
+	if res.State != RunFailed {
+		t.Errorf("State = %q，期望 %q", res.State, RunFailed)
+	}
+	if got := res.Challenges[0].Outcome; got.Reason != ReasonError || got.Err == "" {
+		t.Errorf("第一道题必须留下「为什么停」: reason=%q err=%q", got.Reason, got.Err)
+	}
+}
+
 // ── 图落盘 ──
 
 // recordingGraphSaver 是记账型 GraphSaver：记下「哪次运行的哪道题被要求落盘」。
@@ -1067,7 +1121,7 @@ func newGraphTestHarness(t *testing.T, sc Scenario, sb Sandbox, af AgentFactory,
 	t.Helper()
 	h, err := NewHarness(HarnessOptions{Scenario: sc, Sandbox: sb, Agents: af,
 		Gate:    func(Challenge) CandidateGate { return newStubGate() },
-		Results: &recordingResults{}, Locker: fakeRunLocker{}, Graphs: saver,
+		Results: &auditResults{}, Locker: fakeRunLocker{}, Graphs: saver,
 		Planner:  func(Challenge) Planner { return &stubPlanner{} },
 		Renderer: func(Challenge) Renderer { return stubRenderer{} }})
 	if err != nil {
@@ -1229,6 +1283,96 @@ func TestRunWithoutGraphSaverIsNotAnError(t *testing.T) {
 	}
 }
 
+// TestRunGraphStateFoldsEveryOutcome：GraphState 的每一档都必须由**一次真的 Run**
+// 折算出来，并且与 GraphSaveFailures 的不变式
+// （`GraphState == GraphFailed ⟺ len(GraphSaveFailures) > 0`）同时成立。
+//
+// 为什么要在 Run 这一层钉，而不是单测那个折算函数：GraphState 是**产出**（这道题
+// 最后到底有没有图可看），不是某个函数的返回值。只把折算函数测绿、却没有调用方
+// 读它，正是本仓库反复记为「比缺失更糟」的形状（字段在、机制在、没接线）。
+//
+// ⚠️ 「端口在位且落盘成功」那一档要的是 GraphAbsent 而**不是** GraphSaved：根包
+// 现在只能从 `SaveGraph == nil` 推出「没有失败」，推不出「产生了文件」——装配层的
+// SaveGraph 有一条「这一题没有登记过图」的正常分支同样返回 nil，而那一档没有文件。
+// 这正是 GraphState 这个类型存在的理由（见 ports.go），所以过渡期宁可少报。
+// 下一波把端口签名换成四态直返之后，这一格会变成 GraphSaved，届时改的是这一行。
+func TestRunGraphStateFoldsEveryOutcome(t *testing.T) {
+	cases := []struct {
+		name       string
+		saver      GraphSaver
+		probeErr   error
+		prepareErr error
+		want       GraphState
+		// wantSaveCalls 是 SaveGraph **被调用**的次数：它把「端口不在位」与
+		// 「端口在位但没走到那一步」区分开——两者的 GraphState 都是「没有文件」，
+		// 但原因完全不同。
+		wantSaveCalls int
+		wantFailures  []string
+	}{
+		{name: "端口不在位", saver: nil, want: GraphDisabled, wantSaveCalls: 0},
+		{name: "端口在位，落盘没有报错", saver: &recordingGraphSaver{},
+			want: GraphAbsent, wantSaveCalls: 1},
+		{name: "端口在位，落盘失败", saver: &recordingGraphSaver{err: fmt.Errorf("磁盘满了: %w", ErrGraphWrite)},
+			want: GraphFailed, wantSaveCalls: 1, wantFailures: []string{"write"}},
+		{name: "Probe 就失败，没走到落盘",
+			saver: &recordingGraphSaver{}, probeErr: Ef(KindExecutor, "sandbox.probe", "假探测失败", nil),
+			want: GraphAbsent, wantSaveCalls: 0},
+		// 这一档钉的是「默认值必须早于**每一条**出口」：Prepare 是 runChallenge
+		// 里最早的出口，默认值放晚了这里就是一个没定义的空串。
+		{name: "起题就失败，没走到落盘",
+			saver: &recordingGraphSaver{}, prepareErr: errors.New("平台不肯起题"),
+			want: GraphAbsent, wantSaveCalls: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := &stubScenario{
+				challenges: []Challenge{{Code: "c1", Category: "web", FlagCount: 1}},
+				answers:    map[string]string{"c1": "flag{x}"},
+				prepareErr: tc.prepareErr,
+			}
+			h, err := NewHarness(HarnessOptions{
+				Scenario: sc, Sandbox: &fakeSandbox{probeErr: tc.probeErr},
+				Agents:  &scriptedAgentFactory{agent: &fakeAgent{}},
+				Gate:    func(Challenge) CandidateGate { return newStubGate() },
+				Results: &auditResults{}, Locker: fakeRunLocker{}, Graphs: tc.saver,
+				Planner:  func(Challenge) Planner { return &stubPlanner{} },
+				Renderer: func(Challenge) Renderer { return stubRenderer{} }})
+			if err != nil {
+				t.Fatalf("NewHarness: %v", err)
+			}
+			res, _ := h.Run(context.Background(), testRunSpec())
+			if len(res.Challenges) != 1 {
+				t.Fatalf("跑了 %d 道题，期望 1", len(res.Challenges))
+			}
+			got := res.Challenges[0].Outcome
+			if got.GraphState != tc.want {
+				t.Errorf("GraphState = %q，期望 %q", got.GraphState, tc.want)
+			}
+			// 空串是**没定义**的第五个取值：GraphState 的四个常量是穷举的，
+			// 少走一条出口就会让它变成空串，而读的人只能自己猜。
+			if got.GraphState == "" {
+				t.Error("GraphState 为空串——有一条出口没有折算它")
+			}
+			// ports.go 的不变式，与上面那一档一起成立才算数。
+			if isFailed := got.GraphState == GraphFailed; isFailed != (len(got.GraphSaveFailures) > 0) {
+				t.Errorf("不变式被破坏：GraphState=%q 而 GraphSaveFailures=%v",
+					got.GraphState, got.GraphSaveFailures)
+			}
+			if len(tc.wantFailures) > 0 {
+				if len(got.GraphSaveFailures) != len(tc.wantFailures) ||
+					got.GraphSaveFailures[0] != tc.wantFailures[0] {
+					t.Errorf("GraphSaveFailures = %v，期望 %v", got.GraphSaveFailures, tc.wantFailures)
+				}
+			}
+			if saver, ok := tc.saver.(*recordingGraphSaver); ok {
+				if n := len(saver.snapshot()); n != tc.wantSaveCalls {
+					t.Errorf("SaveGraph 被调用 %d 次，期望 %d", n, tc.wantSaveCalls)
+				}
+			}
+		})
+	}
+}
+
 // TestKindOf：取分类的语义边界。
 func TestKindOf(t *testing.T) {
 	if _, ok := KindOf(nil); ok {
@@ -1262,7 +1406,7 @@ func testRunSpec() RunSpec {
 func newTestHarness(t *testing.T, sc Scenario, sb Sandbox, af AgentFactory,
 	gate func(Challenge) CandidateGate) *Harness {
 	t.Helper()
-	opts := HarnessOptions{Scenario: sc, Sandbox: sb, Agents: af, Gate: gate, Results: &recordingResults{}, Locker: fakeRunLocker{}}
+	opts := HarnessOptions{Scenario: sc, Sandbox: sb, Agents: af, Gate: gate, Results: &auditResults{}, Locker: fakeRunLocker{}}
 	if gate != nil {
 		opts.Planner = func(Challenge) Planner { return &stubPlanner{} }
 		opts.Renderer = func(Challenge) Renderer { return stubRenderer{} }
@@ -1282,7 +1426,7 @@ func newTestHarnessWithPlanner(t *testing.T, sc Scenario, sb Sandbox, af AgentFa
 	t.Helper()
 	h, err := NewHarness(HarnessOptions{Scenario: sc, Sandbox: sb, Agents: af,
 		Gate:    func(Challenge) CandidateGate { return newStubGate() },
-		Results: &recordingResults{}, Locker: fakeRunLocker{},
+		Results: &auditResults{}, Locker: fakeRunLocker{},
 		Planner:  func(Challenge) Planner { return planner },
 		Renderer: func(Challenge) Renderer { return stubRenderer{} }})
 	if err != nil {

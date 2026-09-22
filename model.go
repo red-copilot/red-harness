@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -318,6 +319,18 @@ type OutcomeView struct {
 	Candidates []Candidate
 	// Submitted 是**去重后的确认数**（不是提交次数——v0.2 契约这里统计错了）。
 	Submitted int
+	// Attempts 是**实际调用 Evaluate 的次数**（含「结果不确定」的那一次）。
+	//
+	// ⚠️ **它不是 Submitted 的别名**：Submitted 数的是去重后的**确认**数（幂等
+	// 命中也算），Attempts 数的是**尝试**数。一次跑出 3 次提交、其中 1 次判错时，两个
+	// 数是 2 与 3。只有两个数都在，报告才答得出「我们试了多少次」与「平台认了
+	// 多少条」——前者是候选集合与额度的问题，后者是答案质量的问题。
+	//
+	// 为什么必须是一个真字段，而不是让调用方从 Candidates / Rejected 反推：候选
+	// 在闸与轮循环之间被过滤过（fabricated 族与已提交过的不再出现），推出来的数
+	// 与真实调用次数会静默地差一截。⚠️ 也不要让它变成第二个 Candidates：那个字段
+	// 有定义、有注释、全仓**零赋值点**，读的人却会以为它一直在被填。
+	Attempts int
 	// Duplicates 是平台幂等命中数（等价于已确认，所以计入 Submitted）。
 	Duplicates int
 	// Rejected 是被平台判错的候选数。
@@ -367,6 +380,25 @@ type OutcomeView struct {
 	Err string
 	// CleanupFailures records failed cleanup stages without exposing raw errors.
 	CleanupFailures []string
+	// GraphState 是本题图产物的**实际结果**（disabled / absent / saved / failed），
+	// 取值与不变式见 GraphState 的注释。
+	//
+	// 它取代的是「SaveGraph 返回 nil ⇒ 一定有文件产生」那句旧读法——装配层有一
+	// 条「这一题没有登记过图」的正常分支同样返回 nil，于是「图是可选产物」这件事
+	// 在调用方眼里消失了。与 GraphSaveFailures 的分工：那个说**卡在哪一步**，
+	// 这个说**实际有没有产物**。
+	GraphState GraphState
+	// AuditIncomplete 为真表示本题的候选审计**没有全部写出去**。
+	//
+	// ⚠️ **不要照着 GraphSaveFailures 抄它的处置**：图是研究辅助面，写不出去只
+	// 记账、本题结论不变；而候选审计就是「提交了什么、平台怎么判的」这份记录
+	// 本身，没有它就没有任何东西能回答这个问题——所以它是**运行级**故障，Run
+	// 会停下来（见 Run 的题目循环）。
+	//
+	// 与它配对的是 err 链上的 ErrAuditIncomplete 与本题的 Reason=ReasonError。
+	// 已确认的成绩**一律保留**：Submitted / Flags / Score 都是审计失败**之前**
+	// 平台已经确认的事实，清零它们等于把「解出来了」改写成「没解出来」。
+	AuditIncomplete bool
 	// GraphSaveFailures 记录图落盘的失败阶段（"marshal" / "write"），不携带原始
 	// 错误文本。
 	//
@@ -391,6 +423,18 @@ func (o OutcomeView) Duration() time.Duration {
 	}
 	return o.EndedAt.Sub(o.StartedAt)
 }
+
+// ErrAuditIncomplete 表示**本题的候选审计没有全部写出去**。调用方用
+// `errors.Is(err, ErrAuditIncomplete)` 判断，而不是去解析错误消息。
+//
+// 为什么不只靠 KindPersistence：同一个分类下还有别的落盘故障（results.Save 写不
+// 出去、trace 写不出去），而调用方对它们的处置不同——审计不完整意味着**这次运行
+// 的提交记录已经不可回答了**，唯一正确的动作是先修好落盘面再重跑，继续跑只会把
+// 缺口拉大。分类回答「哪一类错了」，哨兵回答「错的是哪一件事」。
+//
+// ⚠️ 它只活在 err 链上（被包在 *Error 的 Err 里，那一份不参与序列化），**不进
+// 公开面**：公开面里有 AuditIncomplete 布尔位与 Reason。
+var ErrAuditIncomplete = errors.New("候选审计未完整落盘")
 
 // ── 端口入参 ──
 
