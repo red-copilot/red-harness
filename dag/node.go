@@ -119,13 +119,21 @@ const (
 // 或未来版本写的新状态都可能出现。未知状态在 `executable` 的 switch 里会落到
 // default 分支（不可执行），看起来像「意图做完了」——一个拼错的状态会让整条
 // 阶段链静默停住。所以读取路径上要显式校验。
-func (s IntentState) Valid() bool {
-	switch s {
-	case IntentPending, IntentActive, IntentDone, IntentFailed, IntentBlocked,
-		IntentAbandoned, IntentInterrupted:
-		return true
-	}
-	return false
+//
+// 校验与**枚举**共用 intentStates 这一份：状态散在两处（一个 map 供遍历、一个
+// switch 供判定）就会漂移，而漂移的表现是「新状态被判为非法」或「渲染时少一类
+// 样式」——两者都不会让任何测试变红，除非有东西能遍历全部状态。`factKinds` 与
+// `intentKinds` 早就是这个形状，状态跟着它们对齐。
+func (s IntentState) Valid() bool { return intentStates[s] }
+
+var intentStates = map[IntentState]bool{
+	IntentPending:     true,
+	IntentActive:      true,
+	IntentDone:        true,
+	IntentFailed:      true,
+	IntentBlocked:     true,
+	IntentAbandoned:   true,
+	IntentInterrupted: true,
 }
 
 // 三层信任（见 extract.go 与设计文档 §一）。
