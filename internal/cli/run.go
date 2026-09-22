@@ -112,10 +112,10 @@ func (f *runFlags) budget() harness.Budget {
 // ⚠️ **RunSpec 会整份写进 run.json（公开文件），所以这里绝不能放凭据。**
 // provider 的 API key 走进程环境变量，平台 token 走 bridge 子进程环境变量。
 //
-// ⚠️ **StoreDir 先绝对化再入 spec。** 它是 `RunSpec.Digest()` 的一部分，而
-// `--store` 的默认值是一个相对路径（"runs"）：原样写进去等于把 **cwd 变成配置
-// 的一部分**——同一个 store 在 /a 与 /b 下起两次会得到两个不同的摘要，比对时报
-// 「配置漂移」，而两次其实指向不同的目录（更糟的是不报错的那种）。
+// ⚠️ **这里只放「运行意图与资源上限」**：跑哪几道题、用哪个模型、花多少预算、
+// 提不提交。运行目录与凭据来源属于**部署配置**，由装配层持有（见 storeDir 的
+// 注释）——它们曾经在 RunSpec 里，代价是每次都被装配层盖掉，调用方以为自己
+// 填的值生效了。
 func (f *runFlags) spec() harness.RunSpec {
 	return harness.RunSpec{
 		Scenario: f.scenario,
@@ -133,7 +133,6 @@ func (f *runFlags) spec() harness.RunSpec {
 		Sandbox:    harness.SandboxSpec{Image: f.image},
 		HintPolicy: f.hint,
 		Submit:     f.submit,
-		StoreDir:   f.storeDir(),
 		Policy: harness.PolicySpec{
 			MaxAttemptsPerIntent: f.policyMaxAttempts,
 			DryRoundsBeforeHint:  f.policyDryRounds,
@@ -141,15 +140,16 @@ func (f *runFlags) spec() harness.RunSpec {
 	}
 }
 
-// storeDir 把 `--store` 折成绝对路径，是**唯一**该用来喂装配层（`a.ports`）
-// 与写进 RunSpec.StoreDir 的 store 值。
+// storeDir 把 `--store` 折成绝对路径，是**唯一**该用来喂装配层（`a.ports`）的
+// store 值。
 //
-// ⚠️ **不要在这里改回 f.store**：`spec()` 把绝对化后的值写进 RunSpec.StoreDir，
-// 而 StoreDir 是 Digest 的一部分、也是比对时的漂移判据。如果装配层拿到的是
-// 相对路径（"runs"）而摘要里是 "/abs/cwd/runs"，同一个 store 就有了两种表示：
-// 装配层按 cwd 建目录、摘要按另一个根比对，换个 cwd 再跑就报「配置漂移」；
-// `list`/`stats` 更直接——它们会去 cwd 下找一个并不存在的结果目录。
-// 所以「绝对化」必须发生在**所有**出口上，而不是只发生在 spec 里。
+// ⚠️ **不要在这里改回 f.store**：`--store` 的默认值是一个相对路径（"runs"），
+// 而装配层按它建目录、`list`/`stats` 按它找结果目录。同一个 store 若有两种表示，
+// 换个 cwd 再跑就会分叉——而分叉的形态不是报错，是「list 说没有运行」。
+// 所以「绝对化」必须发生在**所有**出口上。
+//
+// v0.4 起 store 根**不再进 RunSpec**：它是部署级配置，不是运行意图。它因此也不再
+// 是摘要的输入——但绝对化这条要求与摘要无关，它来自「三条路径必须指向同一个目录」。
 func (f *runFlags) storeDir() string { return absStoreDir(f.store) }
 
 // absStoreDir 把 store 根折成绝对路径（解析失败时退回原值，让 store.New 给出

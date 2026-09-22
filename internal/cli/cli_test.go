@@ -443,9 +443,8 @@ func TestRunWiredMapsFlagsToRunSpec(t *testing.T) {
 	if len(spec.Targets) != 2 || spec.Targets[0] != "demo-1" || spec.Targets[1] != "demo-2" {
 		t.Errorf("Targets = %v，期望按逗号拆分并去空白", spec.Targets)
 	}
-	if spec.StoreDir != "/tmp/rh" {
-		t.Errorf("StoreDir = %q", spec.StoreDir)
-	}
+	// `--store` 刻意**不**在这里断言：v0.4 起运行目录属于装配配置，不进 RunSpec。
+	// 它去哪了由 TestRelativeStoreReachesPortsAsAbsolutePath 覆盖。
 	if spec.Agent.Provider != "fake-provider" || spec.Agent.Model != "fake-model" {
 		t.Errorf("Agent = %+v", spec.Agent)
 	}
@@ -979,8 +978,14 @@ func TestBudgetNegativeValuesFallBackToDefaults(t *testing.T) {
 }
 
 // TestRelativeStoreReachesPortsAsAbsolutePath 钉住「绝对化发生在所有出口上」：
-// 装配层拿到的 storeDir 必须与 RunSpec.StoreDir 是同一个字符串，否则同一个
-// store 有两种表示——装配层按 cwd 建、摘要按绝对根比对，比对时报「配置漂移」。
+// 装配层拿到的是折好的绝对根，而不是用户原样输入的相对路径。
+//
+// 为什么必须绝对化：装配层按它建结果目录、`list`/`stats` 按它去找。三条路径若
+// 各折一次，换个 cwd 就会分叉——而分叉的形态不是报错，是「list 说没有运行」。
+//
+// v0.4 起 store 根**不再进 RunSpec**（它是部署级配置，不是运行意图），所以这里
+// 只钉装配层这一个出口；run 与 list/stats 是否指向同一个根，由
+// TestListAndStatsShareRunStoreRoot 覆盖。
 func TestRelativeStoreReachesPortsAsAbsolutePath(t *testing.T) {
 	eng := &fakeRunner{res: harness.RunResult{RunID: "r-1",
 		Challenges: []harness.ChallengeResult{{Outcome: harness.OutcomeView{Reason: harness.ReasonSolved}}}}}
@@ -993,15 +998,14 @@ func TestRelativeStoreReachesPortsAsAbsolutePath(t *testing.T) {
 	if code := dispatch([]string{"run", "--scenario", "fake", "--store", "runs"}, *a); code != 0 {
 		t.Fatalf("dispatch(run) = %d", code)
 	}
-	if !filepath.IsAbs(gotStore) {
-		t.Errorf("装配层收到的 storeDir = %q，期望绝对路径", gotStore)
+	// 断言**确切值**而不只是 IsAbs：IsAbs 对「绝对化成了另一个目录」是瞎的，
+	// 而那正是这条测试要防的错。
+	want, err := filepath.Abs("runs")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(eng.specs) != 1 {
-		t.Fatalf("Run 调用次数 = %d", len(eng.specs))
-	}
-	if eng.specs[0].StoreDir != gotStore {
-		t.Errorf("spec.StoreDir = %q 与装配层的 %q 不一致（同一个 store 不能有两种表示）",
-			eng.specs[0].StoreDir, gotStore)
+	if gotStore != want {
+		t.Errorf("装配层收到的 storeDir = %q，期望 %q", gotStore, want)
 	}
 }
 

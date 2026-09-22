@@ -48,7 +48,6 @@ func TestContract_RunSpecDigest(t *testing.T) {
 		Targets:  []string{"web-01", "pwn-02"},
 		Agent:    harness.AgentSpec{Provider: "opencode-go", Model: "deepseek-v4-flash"},
 		Budget:   harness.Budget{MaxRounds: 10},
-		StoreDir: "/tmp/rh",
 	}
 
 	// 同配置 ⇒ 同摘要。这是恢复时 fail closed 的基础：如果同配置算出不同摘要，
@@ -73,7 +72,6 @@ func TestContract_RunSpecDigest(t *testing.T) {
 		"Model":      func(s *harness.RunSpec) { s.Agent.Model = "other-model" },
 		"Submit":     func(s *harness.RunSpec) { s.Submit = true },
 		"HintPolicy": func(s *harness.RunSpec) { s.HintPolicy = harness.HintAlways },
-		"StoreDir":   func(s *harness.RunSpec) { s.StoreDir = "/tmp/other" },
 	}
 	for name, mutate := range drifts {
 		s := base
@@ -296,7 +294,7 @@ func TestContract_SnapshotHasNoPlaintext(t *testing.T) {
 		SchemaVersion: harness.SchemaVersion,
 		RunID:         "run-1",
 		State:         harness.RunCompleted,
-		Spec:          harness.RunSpec{Scenario: "fake", StoreDir: "/tmp/x"},
+		Spec:          harness.RunSpec{Scenario: "fake"},
 		SpecDigest:    "abc123",
 		Objective:     harness.Objective{Kind: "flag_count", Want: 2, Got: 2, Completed: true},
 		Public: harness.PublicSummary{

@@ -482,7 +482,9 @@ func (r *Runner) resolve(spec harness.RunSpec) harness.RunSpec {
 	// 产生两种摘要。ReadOnly 恒真（v0.4 不提供可写的 rootfs）。
 	spec.Executor = harness.ExecutorSpec{Image: sb.Image, CPUs: sb.CPUs, MemoryMB: sb.MemoryMB,
 		PidsLimit: sb.PidsLimit, ReadOnly: true}
-	spec.StoreDir, spec.ResultDir = r.storeDir, r.resultDir
+	// 运行目录**不写回 spec**：v0.4 起 StoreDir/ResultDir 属于装配配置而不是运行
+	// 意图。它们继续由 r.storeDir / r.resultDir 持有，结果后端在 New 里就按它们
+	// 建好了（store.NewResultStore），所以这里没有第二条下游读取路径。
 	if spec.Profile.Empty() {
 		spec.Profile = r.profile()
 	}

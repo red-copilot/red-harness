@@ -106,12 +106,14 @@ type RunSpec struct {
 	HintPolicy string `json:"hintPolicy"`
 	// Submit 为假时只记账不提交（干跑）。干跑用于离线验证与对照。
 	Submit bool `json:"submit"`
-	// StoreDir 是运行目录的根。恢复时必须与快照里的摘要一致。
-	StoreDir string `json:"storeDir"`
-	// ResultDir is the v0.4 metrics root, kept separate from private evidence.
-	ResultDir string        `json:"resultDir,omitempty"`
-	Profile   SolverProfile `json:"profile,omitempty"`
-	Policy    PolicySpec    `json:"policy"`
+	// ⚠️ **运行目录不在 RunSpec 里。** StoreDir / ResultDir 曾是这里的字段，
+	// v0.4 把它们移出：它们是**部署级配置**（这台机器把结果写在哪），不是运行
+	// 意图（要跑哪几道题、花多少预算）。留在 RunSpec 里的代价是它们会进 Digest，
+	// 于是「换个 cwd 跑同一份配置」被报成配置漂移——而更糟的是，调用方会以为
+	// 自己填的那个值生效了，实际装配层每次都会把它盖掉（见 wire.resolve）。
+	// 现在唯一的来源是装配配置（`internal/wire.Options`），CLI 不再往 spec 里写。
+	Profile SolverProfile `json:"profile,omitempty"`
+	Policy  PolicySpec    `json:"policy"`
 }
 
 // Digest 返回配置摘要（sha256 前 16 个十六进制字符）。

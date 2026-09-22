@@ -85,9 +85,11 @@ func TestNewFakeScenarioWiresProductionPorts(t *testing.T) {
 	if spec.Budget != harness.DefaultBudget() {
 		t.Fatalf("DefaultSpec 的预算应当是 DefaultBudget，得到 %+v", spec.Budget)
 	}
-	// StoreDir 必须已经绝对化：相对路径会让摘要随 cwd 变化。
-	if !filepath.IsAbs(spec.StoreDir) || spec.StoreDir != r.storeDir {
-		t.Fatalf("RunSpec.StoreDir 应当是绝对化后的装配根: %q", spec.StoreDir)
+	// store 根必须已经绝对化：相对路径会让装配层按 cwd 建目录，而 list/stats
+	// 在另一个 cwd 下就找不到结果目录。v0.4 起它只活在装配层——RunSpec 里不再有
+	// StoreDir，所以这条断言钉的是装配层自己持有的那个值。
+	if !filepath.IsAbs(r.storeDir) {
+		t.Fatalf("装配层的 store 根应当是绝对路径: %q", r.storeDir)
 	}
 	// provider 白名单为空在 executor 里是「全部拒绝」，装配层必须补上缺省白名单，
 	// 否则容器里连模型 API 都连不上，而失败形态是 pi 静默超时。

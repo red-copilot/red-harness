@@ -50,7 +50,7 @@ func ev(seq int64, typ harness.DomainEventType, id harness.RunID) harness.Domain
 }
 
 func snap(id harness.RunID, lastSeq int64) harness.Snapshot {
-	spec := harness.RunSpec{Scenario: "fake", Targets: []string{"demo-1"}, StoreDir: "/tmp/x"}
+	spec := harness.RunSpec{Scenario: "fake", Targets: []string{"demo-1"}}
 	return harness.Snapshot{
 		SchemaVersion:  harness.SchemaVersion,
 		RunID:          id,
