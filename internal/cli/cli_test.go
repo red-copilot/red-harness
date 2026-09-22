@@ -582,6 +582,54 @@ func TestRunNeverPrintsCandidatePlaintext(t *testing.T) {
 	}
 }
 
+// TestRunChallengeLinePrintsGraphSaveFailures 钉住「图没落盘」在命令行上是**可见**的。
+//
+// 图是研究辅助面：写失败不算本题失败（Reason 不变），所以公开指标里没有别的痕迹
+// 能说明「这次运行的图没留下来」。此前它只进结果文件，命令行用户完全看不到——
+// 而「没写出去」被读成「写了」的代价是：事后拿不到图，却以为图本来就没有。
+func TestRunChallengeLinePrintsGraphSaveFailures(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		failures []string
+		wantCol  bool
+	}{
+		{"图正常落盘", nil, false},
+		{"图没写出去", []string{"write"}, true},
+		{"未知阶段也要打出来", []string{"unknown"}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := newTestApp()
+			a.Wire = wirePorts(Ports{Harness: &fakeRunner{res: harness.RunResult{
+				RunID: "r-1", Scenario: "fake",
+				Reason: harness.ReasonSolved, State: harness.RunFinished,
+				Challenges: []harness.ChallengeResult{{
+					Challenge: harness.Challenge{Code: "demo-1"},
+					Outcome: harness.OutcomeView{
+						Reason: harness.ReasonSolved, GraphSaveFailures: c.failures,
+						ProgressConfirmed: 1, ProgressTotal: 1, Submitted: 1, Rounds: 2,
+					},
+				}},
+			}}})
+			var out, errb bytes.Buffer
+			a.stdout, a.stderr = &out, &errb
+
+			dispatch([]string{"run", "--store", "/tmp/rh"}, *a)
+			got := out.String()
+			if c.wantCol {
+				if !strings.Contains(got, "图未落盘 "+c.failures[0]) {
+					t.Fatalf("图落盘失败必须在摘要里可见：%q", got)
+				}
+				return
+			}
+			// 常规摘要行的形状不能变。
+			const want = "  demo-1\t已解出\t进度 1/1\t确认 1\t重复 0\t判错 0\t轮次 2\t耗时 0s\n"
+			if !strings.Contains(got, want) {
+				t.Errorf("常规摘要行变了：\n得到 %q\n期望含 %q", got, want)
+			}
+		})
+	}
+}
+
 // TestRunSummaryPrintsTerminalState 钉住摘要行的**运行终态**。
 //
 // 为什么必须打它：`Reason` 与 `State` 回答的是两个不同的问题（见 printRunResult

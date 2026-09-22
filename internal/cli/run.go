@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,8 +41,9 @@ type runFlags struct {
 	hint   string
 	submit bool
 
-	policyMaxAttempts int
-	policyDryRounds   int
+	policyMaxAttempts    int
+	policyDryRounds      int
+	policyMaxSubmissions int
 
 	profileFile string
 	bundleDir   string
@@ -75,6 +77,7 @@ func (f *runFlags) register(fs *flag.FlagSet) {
 
 	fs.IntVar(&f.policyMaxAttempts, "max-attempts", 0, "同一意图的最大重试轮数（0 表示用默认）")
 	fs.IntVar(&f.policyDryRounds, "dry-rounds-before-hint", 0, "连续无进展多少轮后允许请求提示（0 表示用默认）")
+	fs.IntVar(&f.policyMaxSubmissions, "max-submissions", 0, "每题向平台提交候选的次数上限（0 表示用默认 50）")
 
 	fs.StringVar(&f.profileFile, "profile", "", "solver profile 的 JSON 文件（未知键/非法值在起跑前拒绝）")
 	fs.StringVar(&f.bundleDir, "bundle", "", "只读挂进容器的 extension bundle 目录（同时决定 BundleDigest）")
@@ -144,8 +147,9 @@ func (f *runFlags) spec() (harness.RunSpec, error) {
 		HintPolicy: f.hint,
 		Submit:     f.submit,
 		Policy: harness.PolicySpec{
-			MaxAttemptsPerIntent: f.policyMaxAttempts,
-			DryRoundsBeforeHint:  f.policyDryRounds,
+			MaxAttemptsPerIntent:       f.policyMaxAttempts,
+			DryRoundsBeforeHint:        f.policyDryRounds,
+			MaxSubmissionsPerChallenge: f.policyMaxSubmissions,
 		},
 		Profile: profile,
 	}, nil
@@ -330,6 +334,14 @@ func printRunResult(w io.Writer, res harness.RunResult) {
 			// 到底是方向都做完了，还是编排层把几个方向判成停滞扔掉了，改法
 			// 完全不同（见 model.go 的 BranchesAbandoned 注释）。
 			fmt.Fprintf(w, "\t换支 %d", c.Outcome.BranchesAbandoned)
+		}
+		// 图落盘失败同样只在非 0 时打印。**但它必须被打印出来**：图是研究辅助面，
+		// 失败不算本题失败（Reason 不变），所以公开指标里没有别的痕迹能说明
+		// 「这次运行的图没留下来」——命令行用户此前完全看不到这一笔，只能去翻
+		// 结果文件。而「没写出去」被读成「写了」的代价是：事后拿不到图，却以为
+		// 图本来就没有。
+		if len(c.Outcome.GraphSaveFailures) > 0 {
+			fmt.Fprintf(w, "\t图未落盘 %s", strings.Join(c.Outcome.GraphSaveFailures, ","))
 		}
 		fmt.Fprintln(w)
 	}

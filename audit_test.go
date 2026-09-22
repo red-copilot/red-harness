@@ -229,3 +229,103 @@ func TestAuditIsOptionalPort(t *testing.T) {
 		t.Error("未接入时的文案必须说明后果，否则读的人只会看到一行「没接」")
 	}
 }
+
+// ── 提交次数上限 ──
+
+// TestSubmitCapStopsAtLimit 是这一项的**关键**断言：撞上限时平台调用次数
+// **恰好等于**上限，一次都不多。
+//
+// 为什么这条比「Reason 对不对」更重要：上限判定若排在平台调用之后（很自然的写法
+// ——先提交再记账），「停下来」的那一刻已经又提交了一次，超出的量取决于候选有多少。
+// 那种实现能满足「Reason 是 submit_limit」却完全没起到约束作用，所以必须用调用
+// 次数来钉，而不是看 Reason。
+func TestSubmitCapStopsAtLimit(t *testing.T) {
+	const cap = 3
+	sc := &stubScenario{
+		challenges: []Challenge{{Code: "c1", FlagCount: 1}},
+		answers:    map[string]string{"c1": "flag{none-of-these}"},
+	}
+	sb := &fakeSandbox{}
+	ag := &fakeAgent{}
+	factory := &scriptedAgentFactory{agent: ag}
+	// 一次产出 10 条候选，远多于上限。
+	ag.script = func(_ int, _ func(Event)) {
+		for i := 0; i < 10; i++ {
+			emitToolEnd(factory.sink, "call", "curl http://t/",
+				"flag{candidate-"+string(rune('a'+i))+"}\n")
+		}
+	}
+	h, res := newAuditHarness(t, sc, sb, factory)
+
+	spec := testRunSpec()
+	spec.Budget = Budget{MaxRounds: 1, MaxWall: 0, MaxTurns: 0}
+	spec.Policy = PolicySpec{MaxSubmissionsPerChallenge: cap}
+	got, err := h.Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if sc.evalCalls != cap {
+		t.Fatalf("平台提交次数 = %d，期望恰好 %d（上限判定必须排在平台调用之前）", sc.evalCalls, cap)
+	}
+	cr := got.Challenges[0]
+	if cr.Outcome.Reason != ReasonSubmitLimit {
+		t.Errorf("Reason = %q，期望 %q", cr.Outcome.Reason, ReasonSubmitLimit)
+	}
+	if cr.Outcome.SubmissionsCapped == 0 {
+		t.Error("撞上限时必须记下还剩多少候选没提交——只有 Reason 分不出「上限定紧了」与「候选失控」")
+	}
+	// 审计与提交次数对账：三条提交三行审计。
+	if n := len(res.all()); n != cap {
+		t.Errorf("审计行数 = %d，期望 %d（与提交次数一致）", n, cap)
+	}
+}
+
+// TestSubmitCapDoesNotTriggerBelowLimit 是反面对照：正常提交不该被上限误伤。
+func TestSubmitCapDoesNotTriggerBelowLimit(t *testing.T) {
+	sc := &stubScenario{
+		challenges: []Challenge{{Code: "c1", FlagCount: 1}},
+		answers:    map[string]string{"c1": "flag{right}"},
+	}
+	sb := &fakeSandbox{}
+	ag := &fakeAgent{}
+	factory := &scriptedAgentFactory{agent: ag}
+	ag.script = func(_ int, _ func(Event)) {
+		emitToolEnd(factory.sink, "call-1", "curl http://t/a", "flag{right}\n")
+		emitToolEnd(factory.sink, "call-2", "curl http://t/b", "flag{wrong}\n")
+	}
+	h, res := newAuditHarness(t, sc, sb, factory)
+
+	spec := testRunSpec()
+	spec.Policy = PolicySpec{MaxSubmissionsPerChallenge: 10}
+	got, err := h.Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	cr := got.Challenges[0]
+	if cr.Outcome.Reason == ReasonSubmitLimit {
+		t.Fatal("两条提交不该撞上上限 10")
+	}
+	if cr.Outcome.SubmissionsCapped != 0 {
+		t.Errorf("SubmissionsCapped = %d，期望 0", cr.Outcome.SubmissionsCapped)
+	}
+	if n := len(res.all()); n != 2 {
+		t.Errorf("审计行数 = %d，期望 2", n)
+	}
+}
+
+// TestSubmitCapDefaultIsRecordedInManifest：上限是「生效值」，必须进清单。
+//
+// 与 PlannerDryRounds 同一条理由：事后要能回答「这次跑的上限是多少」，
+// 否则一次 submit_limit 终止无法与另一档配置的运行比较。
+func TestSubmitCapDefaultIsRecordedInManifest(t *testing.T) {
+	if got := resolveSubmitCap(RunSpec{}); got != DefaultMaxSubmissionsPerChallenge {
+		t.Errorf("默认上限 = %d，期望 %d", got, DefaultMaxSubmissionsPerChallenge)
+	}
+	if got := resolveManifest(RunSpec{}).MaxSubmissions; got != DefaultMaxSubmissionsPerChallenge {
+		t.Errorf("清单记的上限 = %d，期望 %d（清单必须记生效值）", got, DefaultMaxSubmissionsPerChallenge)
+	}
+	if got := resolveManifest(RunSpec{Policy: PolicySpec{MaxSubmissionsPerChallenge: 7}}).MaxSubmissions; got != 7 {
+		t.Errorf("清单应记配置值 7，得到 %d", got)
+	}
+}

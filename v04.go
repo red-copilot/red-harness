@@ -420,6 +420,8 @@ type RunManifest struct {
 	// ——那两份默认值在 dag 包里，根包看不到，所以这里**不折算**，如实记 0。
 	PromptMaxFacts    int
 	PromptMaxNegative int
+	// MaxSubmissions 是**实际生效**的每题提交次数上限（回落链的终点）。
+	MaxSubmissions int
 	// HintPolicy 是实际生效的提示策略（空串已折成 HintAuto）。
 	HintPolicy string
 	// RequestedImage 是配置里请求的镜像，通常是一个 tag——**tag 会漂移**。
@@ -456,6 +458,7 @@ func resolveManifest(spec RunSpec) RunManifest {
 	// 与轮循环用的回落链**是同一段逻辑**：清单不另算一遍，否则两处一旦漂移，
 	// 清单记的就不是真正生效的那个值——而清单的全部意义就在于它记的是生效值。
 	m.PlannerDryRounds = resolveDryRounds(spec)
+	m.MaxSubmissions = resolveSubmitCap(spec)
 	if m.HintPolicy == "" {
 		m.HintPolicy = HintAuto
 	}
@@ -464,6 +467,17 @@ func resolveManifest(spec RunSpec) RunManifest {
 		m.RequestedImage = spec.Executor.Image
 	}
 	return m
+}
+
+// resolveSubmitCap 是每题提交次数上限的回落链。
+//
+// 与 resolveDryRounds 同形、同理由：清单与轮循环必须用**同一份**判定，
+// 否则清单记一个值、实际生效另一个值，而两者看起来都正常。
+func resolveSubmitCap(spec RunSpec) int {
+	if n := spec.Policy.MaxSubmissionsPerChallenge; n > 0 {
+		return n
+	}
+	return DefaultMaxSubmissionsPerChallenge
 }
 
 // resolveDryRounds 是「连续无进展多少轮后允许请求提示」的回落链。
@@ -598,11 +612,17 @@ func NewHarness(opts HarnessOptions) (*Harness, error) {
 //
 // 写成两句而不是只在失败时报错：Doctor 的输出是给人判断「这次跑出来的东西里
 // 有没有图可看」的，缺席时要能一眼看出是「没接」而不是「接了没写出来」。
+// ⚠️ 这是**装配在位**的断言，不是「本次真的写出了图」的证明。
+//
+// 两者必须分开说：`dagGraphSaver` 在题目没登记过图时**静默返回 nil**（那不是
+// 失败，是「这一轮没有图」），所以「已接入」永远不蕴含「文件在盘上」。把装配
+// 当作产物来报，会让「图没写出来」变成一次看不见的缺失——而 open items 那套
+// 判据正是拿「有没有人看得见」当标准的。
 func graphSaverDetail(h *Harness) string {
 	if h == nil || h.graphs == nil {
 		return "未接入：本次运行不会落盘 DAG（<StoreDir>/runs/<runID>/graph.json 不会出现）"
 	}
-	return "已接入：每题终态落盘 DAG"
+	return "已接入（仅表示端口在位）：每题终态尝试落盘 DAG；是否真的写出见公开结果的 graphSaveFailures"
 }
 
 // auditDetail 报告候选审计是否接线。
@@ -621,14 +641,23 @@ func auditDetail(h *Harness) string {
 //
 // 为什么要这一步：公开结果里**不能**出现原始错误文本（可能带路径、目标地址、
 // 平台响应片段）。原始错误仍在 err 链上（它不参与序列化），供调用方查日志。
+// 三档对应三种不同的处境，见 ErrGraph* 的注释。第四档 `"unknown"` 是给
+// **不是本包产生的错误**留的：`GraphSaver` 是一个公开端口，任何实现都能注入，
+// 而一个自定义实现的失败原因不会是这三个哨兵之一。
+//
+// 为什么必须有它：原先的 `default` 把**任何**未知错误都标成 `"marshal"`——
+// 那是在断言一件我们并不知道的事（「图没序列化出来」），而读报告的人会照着它
+// 去查序列化。一个编出来的原因比「原因未知」有害得多。
 func graphSaveStage(err error) string {
 	switch {
 	case errors.Is(err, ErrGraphExport):
 		return "export"
 	case errors.Is(err, ErrGraphWrite):
 		return "write"
-	default:
+	case errors.Is(err, ErrGraphMarshal):
 		return "marshal"
+	default:
+		return "unknown"
 	}
 }
 
@@ -1059,6 +1088,10 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	}
 	var used Budget
 	dryRounds, hintUsed, lastProgress := 0, 0, ch.Solved
+	// 本题已向平台提交的次数。**跨轮累计**：上限约束的是「这道题一共提交了多少
+	// 次」，而不是「这一轮提交了多少次」——失控的形状正是「每轮都提交一批」。
+	submitted := 0
+	submitCap := resolveSubmitCap(spec)
 	// 停滞判据的另一半：宿主已验证事实的水位线。初值在**进循环之前**取，
 	// 这样第 1 轮就有一个可比的基线（建图时入图的授权地址也算数）。
 	lastHostFacts := planner.HostFacts()
@@ -1213,11 +1246,22 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		// 不再靠运行时断言取用——断言失败会静默回落到 observed-only，表现为
 		// 「推导族的正确答案再也提交不出去」而所有测试全绿。
 		candidates := gate.NewAll()
-		for _, c := range candidates {
+		capped := false
+		for i, c := range candidates {
 			if c.Provenance == ProvenanceFabricated || !spec.Submit {
 				continue
 			}
+			// ⚠️ **上限判定必须排在平台调用之前。** 排在后面等于「停下来」的那一刻
+			// 已经又提交了一次——上限就成了摆设，而且超出的量取决于候选有多少。
+			if submitted >= submitCap {
+				capped = true
+				// 记下**这一轮里还剩多少候选没提交**。它与 Reason 配对才回答得了
+				// 「上限定紧了，还是候选集合失控了」。
+				cr.Outcome.SubmissionsCapped += len(candidates) - i
+				break
+			}
 			eval, evalErr := h.scenario.Evaluate(ctx, ch, c.Flag)
+			submitted++
 			// 审计在**两条**路径上都要落：正常判定与「结果不确定」。后者尤其
 			// 重要——它正是「平台写超时、这一条到底算不算提交」的那一档，而
 			// 只记成功的审计恰好答不出这个问题。
@@ -1263,6 +1307,16 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 			} else if v.Rejected {
 				cr.Outcome.Rejected++
 			}
+		}
+		if capped {
+			// 撞上限即结束本题。**不继续跑轮次**：后面的轮次只会产出更多无法提交
+			// 的候选，继续跑等于把预算花在一个已经不能再提交的方向上。
+			//
+			// 用 ReasonSubmitLimit 而不是 ReasonError：这不是「运行坏了」，而是
+			// 「这次运行的候选集合不正常」——两者的处置完全相反（前者查日志，
+			// 后者多半要去看答案形态判定是不是放宽了）。
+			cr.Outcome.Reason = ReasonSubmitLimit
+			break
 		}
 		if obj, e := h.scenario.Reconcile(ctx, ch); e == nil {
 			cr.Outcome.ProgressConfirmed, cr.Outcome.ProgressTotal = obj.Got, obj.Want

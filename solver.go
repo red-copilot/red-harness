@@ -72,6 +72,15 @@ const (
 	// ReasonProviderFailure 表示 provider 故障——pi 把 provider 错误呈现为
 	// 一次静默的空会话。这是前身「280 run / 0 flag / 63 题」事故的护栏。
 	ReasonProviderFailure = "provider_failure"
+	// ReasonSubmitLimit 是 v0.5 新增：本题撞到了 PolicySpec.MaxSubmissionsPerChallenge
+	// 的提交次数上限，已停止提交并结束本题。
+	//
+	// 为什么单列一个原因而不是复用 ReasonError 或 ReasonMaxRounds：这三种「停」
+	// 指向完全不同的处置——轮次用尽是规划层的问题（意图拆得不够细），提交超限是
+	// 候选集合失控（多半是答案形态判宽了），而以错误收场是运行坏了。2026-09-22
+	// 那次 147 次提交的事故里，公开面上只能看到一个「提交过」的计数，没有任何东西
+	// 指出「这次提交次数不正常」。
+	ReasonSubmitLimit = "submit_limit"
 	// ReasonNoProgress 是 v0.4 新增：一次运行**正常跑完**，但没有任何一道题
 	// 达成目标。
 	//

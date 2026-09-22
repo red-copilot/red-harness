@@ -221,7 +221,30 @@ type PolicySpec struct {
 	MaxAttemptsPerIntent int `json:"maxAttemptsPerIntent,omitempty"`
 	// DryRoundsBeforeHint 是连续无进展多少轮后允许请求提示（沿用 HintAuto 的阈值）。
 	DryRoundsBeforeHint int `json:"dryRoundsBeforeHint,omitempty"`
+	// MaxSubmissionsPerChallenge 是**每题**向平台提交候选的次数上限（0 表示用
+	// DefaultMaxSubmissionsPerChallenge）。到达上限即停止本题提交并以
+	// ReasonSubmitLimit 结束本题。
+	//
+	// 为什么需要它：v0.4 每轮把 `gate.NewAll()` 的全部候选提交一遍，**没有任何
+	// 次数约束**。2026-09-22 的一次授权真跑里，一道题打出了 **147 次
+	// `POST /submit`**，其中 146 次提交的是原始 token——平台配额被静默烧掉，
+	// 而公开面上只看得到「提交过」这个计数。见 DefaultMaxSubmissionsPerChallenge
+	// 的注释：那一场的主因是答案形态判定，这一条是兜底。
+	MaxSubmissionsPerChallenge int `json:"maxSubmissionsPerChallenge,omitempty"`
 }
+
+// DefaultMaxSubmissionsPerChallenge 是每题提交次数的内置上限。
+//
+// **50 这个数是怎么来的**：一道题的正常提交次数是「几个 flag × 几次尝试」的
+// 量级，再宽也落在个位数到几十之间；而现场那次失控是 147，且当时并没有撞到这个
+// 上限——它是被轮次预算拦下的，也就是说「不设限」的真实上限由预算决定，可能是
+// 几百。50 因此是「明显宽于正常、又远小于失控」的一档。
+//
+// ⚠️ 它**不是**那次事故的主因对策。主因是 answer.Infer 在题面什么都没说时回退成
+// `AllowRaw=true`，于是每一个 token 都成了候选——那条已经在 v0.5 收紧。这一条是
+// 兜底：即使候选集合再次失控，代价也有界，而且**可见**（ReasonSubmitLimit +
+// SubmissionsCapped）。
+const DefaultMaxSubmissionsPerChallenge = 50
 
 // ── 预算 ──
 
@@ -299,6 +322,11 @@ type OutcomeView struct {
 	Duplicates int
 	// Rejected 是被平台判错的候选数。
 	Rejected int
+	// SubmissionsCapped 是**因为撞到提交次数上限而没有被提交**的候选数。
+	//
+	// 与 ReasonSubmitLimit 配对：Reason 回答「为什么停」，它回答「还剩多少没提交」
+	// ——上限定得太紧还是候选集合失控，靠这两个数一起看才分得出来。
+	SubmissionsCapped int
 	// Rounds 是实际消耗的意图轮次。
 	Rounds int
 	// IntentDone 是达成的意图数（来自图的状态统计）。

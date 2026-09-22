@@ -1123,7 +1123,15 @@ func TestRunGraphSaveFailureIsRecordedNotFatal(t *testing.T) {
 		stage string
 	}{
 		{"写失败", fmt.Errorf("磁盘满了: %w", ErrGraphWrite), "write"},
-		{"序列化失败", errors.New("擦洗炸了"), "marshal"},
+		{"序列化失败", fmt.Errorf("擦洗炸了: %w", ErrGraphMarshal), "marshal"},
+		{"导出失败", fmt.Errorf("mermaid 没写出来: %w", ErrGraphExport), "export"},
+		// **没有哨兵的错误归到 unknown，不归到 marshal**。
+		//
+		// 这条用例此前钉的是相反的行为：任何未知错误都被报成 "marshal"。那是在
+		// 断言一件我们并不知道的事（「图没序列化出来」），而读报告的人会照着它去
+		// 查序列化。GraphSaver 是公开端口，实现可以是别人写的，它的失败原因本来
+		// 就未必属于这三个哨兵——编一个原因比说「原因未知」有害得多。
+		{"无哨兵的错误", errors.New("自定义实现炸了"), "unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

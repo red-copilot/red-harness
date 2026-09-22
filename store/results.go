@@ -123,6 +123,8 @@ type publicManifest struct {
 	// PromptMaxFacts / PromptMaxNegative 是配置值；0 表示由渲染层默认值决定。
 	PromptMaxFacts    int `json:"promptMaxFacts,omitempty"`
 	PromptMaxNegative int `json:"promptMaxNegative,omitempty"`
+	// MaxSubmissions 是实际生效的每题提交次数上限。
+	MaxSubmissions int `json:"maxSubmissions,omitempty"`
 	// HintPolicy 是实际生效的提示策略（空串已折成 auto）。
 	HintPolicy string `json:"hintPolicy,omitempty"`
 	// RequestedImage 是配置里请求的镜像（通常是 tag，会漂移）。
@@ -163,7 +165,9 @@ type publicChallenge struct {
 	// 为什么要落盘：一次运行以 no_intent 收场时，「所有方向都做完了」与「编排层
 	// 把几个停滞方向判掉扔了」指向完全不同的改法（题目做不动 vs 阈值/提示策略要
 	// 调），而事后只看 Reason 分不出这两者。见 sanitizeCount（负数在这里没有含义）。
-	BranchesAbandoned int      `json:"branchesAbandoned,omitempty"`
+	BranchesAbandoned int `json:"branchesAbandoned,omitempty"`
+	// SubmissionsCapped 是因撞到提交上限而未提交的候选数。
+	SubmissionsCapped int      `json:"submissionsCapped,omitempty"`
 	CleanupFailures   []string `json:"cleanupFailures,omitempty"`
 	// GraphSaveFailures 记录 DAG 落盘的失败阶段（marshal / write）。
 	//
@@ -193,6 +197,7 @@ func toPublic(r harness.RunResult) publicResult {
 			CostUSD: c.Outcome.Stats.CostUSD,
 			Rounds:  c.Outcome.Rounds, HintUsed: c.Outcome.HintUsed,
 			BranchesAbandoned: sanitizeCount(c.Outcome.BranchesAbandoned),
+			SubmissionsCapped: sanitizeCount(c.Outcome.SubmissionsCapped),
 			CleanupFailures:   sanitizeCleanupFailures(c.Outcome.CleanupFailures),
 			GraphSaveFailures: sanitizeGraphSaveFailures(c.Outcome.GraphSaveFailures),
 			DurationSeconds:   c.Outcome.Duration().Seconds()})
@@ -210,6 +215,7 @@ func toPublicManifest(m harness.RunManifest) publicManifest {
 		PlannerDryRounds:  sanitizeCount(m.PlannerDryRounds),
 		PromptMaxFacts:    sanitizeCount(m.PromptMaxFacts),
 		PromptMaxNegative: sanitizeCount(m.PromptMaxNegative),
+		MaxSubmissions:    sanitizeCount(m.MaxSubmissions),
 		HintPolicy:        sanitizeHintPolicy(m.HintPolicy),
 		RequestedImage:    sanitizeImageRef(m.RequestedImage),
 		Image:             sanitizeImageRef(m.Image),
@@ -223,6 +229,7 @@ func fromPublicManifest(p publicManifest) harness.RunManifest {
 		PlannerDryRounds:  p.PlannerDryRounds,
 		PromptMaxFacts:    p.PromptMaxFacts,
 		PromptMaxNegative: p.PromptMaxNegative,
+		MaxSubmissions:    p.MaxSubmissions,
 		HintPolicy:        p.HintPolicy,
 		RequestedImage:    p.RequestedImage,
 		Image:             p.Image,
@@ -266,13 +273,18 @@ func sanitizeCleanupFailures(failures []string) []string {
 // 公开面看不见，等于没记。两份白名单各自对应各自的值域，混用就是又一次
 // 「失败被静默吞掉」。
 //
-// 三档对应三种不同的处境，不能合并：marshal=图没序列化出来，
-// write=图根本没落盘，export=图在盘上但没导出成人可读的 mermaid。
+// 四档对应四种不同的处境，不能合并：marshal=图没序列化出来，write=图根本没落盘，
+// export=图在盘上但没导出成人可读的 mermaid，unknown=失败原因不是本仓库产生的
+// 那三个哨兵之一（GraphSaver 是公开端口，实现可以是别人写的）。
+//
+// ⚠️ `"unknown"` 这一档必须在这里被放行：根包新加一个枚举值而这里忘了同步，
+// 表现是**账记了但公开面看不见**——等于没记。这正是本函数存在的原因，所以它自己
+// 也要守这条。
 func sanitizeGraphSaveFailures(failures []string) []string {
 	var out []string
 	for _, failure := range failures {
 		switch failure {
-		case "marshal", "write", "export":
+		case "marshal", "write", "export", "unknown":
 			out = append(out, failure)
 		}
 	}
