@@ -1,0 +1,50 @@
+# red-harness 集成测试专用镜像：runner + stub pi
+#
+# 这个 Dockerfile **不是生产镜像**。生产镜像见同目录的 `Dockerfile`
+# （`red-harness-runner:v0.3.0`），它里面装的是真 pi。
+#
+# # 为什么需要它
+#
+# v0.4 的 M1 出口门要求「stub pi 明确证明自身运行在目标容器而非宿主」。证明它的
+# 唯一办法是把**真的 stub pi 二进制**放进容器里跑起来，再看它眼中的世界：hostname、
+# /proc/1/cgroup、/.dockerenv、宿主工作目录与 Docker socket 是否可见。
+#
+# 为什么不直接在 runner 镜像里跑真 pi：真 pi 需要 provider 凭据，会花 token，而且
+# 它的行为依赖模型服务是否可用——那会把「隔离对不对」这个确定性命题变成一次不可
+# 复现的网络实验。stub pi 是确定性的：它只讲 JSONL/RPC 协议，不发任何网络请求。
+#
+# # 怎么构建
+#
+# 集成测试自己构建它（见 executor/session_integration_test.go 的 buildStubImage）：
+#
+#   CGO_ENABLED=0 go build -o <tmp>/stubpi <repo>/piai/testdata/stubpi
+#   docker build -f runner/Dockerfile.teststub -t red-harness-runner:teststub <tmp>
+#
+# **stubpi 不在这个目录里**：它是 piai 包的测试夹具（piai/testdata/stubpi），
+# 归 piai 所有。这里只负责在构建时 COPY 一个**预先编好**的静态二进制进来——
+# 于是构建上下文就是那个临时目录，而不是 runner/。
+#
+# 构建失败/镜像不存在时集成测试**跳过**而不是失败：集成测试失败应该意味着
+# 「隔离真的坏了」，而不是「这台机器没编出测试镜像」。
+
+FROM red-harness-runner:v0.3.0
+
+# stubpi 是静态链接的 Go 二进制（CGO_ENABLED=0），不需要任何运行时依赖。
+COPY stubpi /usr/local/bin/stubpi
+RUN chmod 0755 /usr/local/bin/stubpi
+
+# 自检：把「镜像里到底有什么」写进文件。与生产镜像同款做法——镜像里有什么必须
+# 留下痕迹，而不是等到运行期才发现。
+RUN set -eu; \
+    log=/opt/red-harness/TESTSTUB_SELFCHECK.txt; \
+    : > "$log"; \
+    echo "runner=red-harness-runner:teststub" >> "$log"; \
+    echo "base=red-harness-runner:v0.3.0" >> "$log"; \
+    echo "stubpi_path=$(command -v stubpi)" >> "$log"; \
+    echo "stubpi_version=$(stubpi --version 2>/dev/null || echo unknown)" >> "$log"; \
+    echo "pi_version=$(pi --version 2>/dev/null || echo unknown)" >> "$log"; \
+    cat "$log"
+
+# CMD 与生产镜像一致：长睡。容器的生命周期由 executor 管（NewSession 建网络、
+# Launch 起主进程、Reclaim 删容器），镜像自己退出会让后续操作全部失败。
+CMD ["sleep", "infinity"]
