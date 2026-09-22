@@ -96,6 +96,22 @@ func TestNewFakeScenarioWiresProductionPorts(t *testing.T) {
 	if got := r.docker.Config().ProviderAllowHosts; len(got) == 0 {
 		t.Fatal("装配层没有补上 provider 白名单（空 = 全部拒绝）")
 	}
+	// ⚠️ **隔离开关必须是开着的。** 这条断言是回归：装配层曾经手写
+	// `DockerConfig{ProviderAllowHosts: hosts}`，其余字段落零值，而零值里所有 bool
+	// 都是 false = 关掉隔离——`ManageIptables=false` 让 installNetworkRules 第一行
+	// 就静默返回（无白名单、无默认拒绝，容器可直连公网），`ProviderProxy=false`
+	// 让模型流量不走宿主侧代理。实测现场：容器内 `1.1.1.1:443` 可达、
+	// 非授权内网地址可达、且没有任何 *_PROXY 环境变量。
+	//
+	// 之所以长期没被发现，是因为集成用例都用 DefaultDockerConfig() 构造执行器，
+	// 验的是另一条路径。这条断言钉的正是**生产装配**这一条。
+	cfg := r.docker.Config()
+	if !cfg.ManageIptables {
+		t.Error("装配层把 ManageIptables 关掉了：白名单与默认拒绝都不会生效")
+	}
+	if !cfg.ProviderProxy {
+		t.Error("装配层把 ProviderProxy 关掉了：模型流量不走宿主侧域名白名单代理")
+	}
 }
 
 // TestNewTSecBenchWithoutBridgeFails 钉「tsecbench 场景需要可用的桥」。

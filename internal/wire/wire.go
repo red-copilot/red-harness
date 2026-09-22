@@ -231,7 +231,22 @@ func New(opts Options) (*Runner, error) {
 	if len(hosts) == 0 {
 		hosts = defaultProviderHosts
 	}
-	docker, err := executor.NewDocker(executor.DockerConfig{ProviderAllowHosts: hosts})
+	// ⚠️ **必须从 DefaultDockerConfig() 起手，不能手写一个部分结构体。**
+	//
+	// 这里原先写的是 `DockerConfig{ProviderAllowHosts: hosts}`——其余字段全落零值，
+	// 而 `DockerConfig` 的零值里**所有 bool 都是 false = 关掉隔离**：
+	// `ManageIptables=false` 让 `installNetworkRules` 第一行就静默返回（没有白名单、
+	// 没有默认拒绝，容器可直连公网与任意内网地址），`ProviderProxy=false` 让
+	// provider 流量不走宿主侧域名白名单代理。
+	//
+	// 之所以长期没被发现：所有集成用例都用 `DefaultDockerConfig()` 构造执行器，
+	// 于是它们验的是**另一条路径**。DefaultDockerConfig 的注释里恰好写着这个危险
+	// （「零值里的 bool 全是 false（= 关掉隔离），直接拿零值构造执行器是不安全的」），
+	// 而生产装配正好踩在上面。用 DefaultDockerConfig 起手还能顺带吃到将来新增的
+	// 缺省字段。
+	dockerCfg := executor.DefaultDockerConfig()
+	dockerCfg.ProviderAllowHosts = hosts
+	docker, err := executor.NewDocker(dockerCfg)
 	if err != nil {
 		return fail(err)
 	}
