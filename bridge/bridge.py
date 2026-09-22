@@ -394,6 +394,19 @@ def _handle_line(bridge, tsec_mod, line: str) -> str:
         err = protocol.classify(exc, tsec_mod)
         # traceback 只进 stderr（Go 侧落 private/），不进协议。
         _log(f"bridge: {cmd} 失败 code={err['code']} {type(exc).__name__}")
+        # **平台原始响应体（SDK 异常的 detail）也要落 private stderr。**
+        #
+        # 为什么必须带上：classify 只给分类（code / retryable），而「未识别状态码」
+        # 这一类——例如平台回 501 配一个我们不认识的 body——光看分类无从下手。
+        # SDK 把它折成 `unexpected error (http 501)`，平台究竟说了什么只有 detail
+        # 里有。实测为定位一次 501 真跑了三轮：第一轮连 stderr 都没落盘
+        # （private/ 还没建），第二轮有了 traceback 但仍缺响应体。
+        #
+        # 落点是 **private/（0700/0600）**：detail 可能回显我们提交的候选明文，
+        # 那正是 private 该装的东西，绝不能进协议通道或公开面。
+        detail = getattr(exc, "detail", None)
+        if detail:
+            _log(f"bridge: {cmd} detail={detail!r}")
         _log(traceback.format_exc())
         return protocol.encode(protocol.err_response(req_id, err))
 
