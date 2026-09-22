@@ -190,6 +190,30 @@ func (s *dockerSession) Launch(ctx context.Context, ps harness.ProcessSpec) (har
 	if len(ps.Command) == 0 {
 		return nil, harness.Ef(harness.KindConfig, "sandbox.launch", "主进程命令为空", nil)
 	}
+	// Workdir 的校验必须在**取锁之前**，理由有两条，都不是风格问题：
+	//
+	//  1. 它会覆盖 `p.WorkdirCtr`，而 `planRun` 对 `ExecutorSpec.Workdir` 的两条
+	//     校验跑在那之前——所以不校验就等于**绕过**它们：一个相对路径会一路走到
+	//     `--workdir` 上，由 docker 报一句「the working directory ... is invalid」，
+	//     错误被归成 KindExecutor（执行器故障），而它其实是调用方配置错了。
+	//  2. 锁内紧接着就把 `s.launched` 置真，而它**从不回退**。于是校验若放在锁内
+	//     或创建之后，一次被拒的 Launch 会让这个 session 永久不可用（后续任何
+	//     Launch 都收「一个 sandbox 只允许启动一个主进程」）——一次配置错误被记成
+	//     「这个 sandbox 已经用过了」。
+	//
+	// 两条规则与 NewSession 对 `SandboxSpec.Workdir` 的校验逐字同强度：容器内工作
+	// 目录**只在这两个入口**被设置，两处规则不一致就会有一条缝。
+	// 用 `path` 而不是 `filepath`——这是容器内路径，宿主的分隔符规则不适用。
+	if ps.Workdir != "" {
+		if !path.IsAbs(ps.Workdir) {
+			return nil, harness.Ef(harness.KindConfig, "sandbox.launch",
+				fmt.Sprintf("ProcessSpec.Workdir 必须是容器内绝对路径，got %q", ps.Workdir), nil)
+		}
+		if strings.Contains(ps.Workdir, ":") {
+			return nil, harness.Ef(harness.KindConfig, "sandbox.launch",
+				fmt.Sprintf("ProcessSpec.Workdir 不得含冒号，got %q", ps.Workdir), nil)
+		}
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
