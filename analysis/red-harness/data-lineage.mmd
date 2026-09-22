@@ -1,0 +1,48 @@
+graph LR
+  %% 读写线（由 extract_topology.py 生成）。--> 读，==> 写。
+  %% 圆柱 = 数据存储。注意 store 是下面 8 个落点的唯一写者（单写者模型）。
+  n_store["store"]
+  n_ds_events_jsonl[("events.jsonl")]
+  n_ds_run_json[("run.json")]
+  n_ds_graph_json[("graph.json")]
+  n_ds_candidates_jsonl[("private/candidates.jsonl")]
+  n_ds_evidence[("private/evidence/")]
+  n_ds_private_trace[("private/<runID>/*.jsonl")]
+  n_ds_results[("results/<runID>.json")]
+  n_ds_report[("report.json / report.md")]
+  n_internal_wire["internal/wire"]
+  n_ds_run_lock[("run.lock")]
+  n_dag["dag"]
+  n_bridge["bridge（Go 侧）"]
+  n_ds_bridge_stderr[("private/bridge-stderr.log")]
+  n_executor["executor"]
+  n_ds_host_netfilter[("宿主 netfilter")]
+  n_ds_runner_image[("runner 镜像（docker images）")]
+  n_runner_Dockerfile["runner/Dockerfile（镜像构建）"]
+  n_ds_provider_api[("模型 provider API")]
+  n_bridge_bridge_py["bridge.py（Python 桥）"]
+  n_ds_tsecbench_api[("TSecBench 平台 API")]
+  n_piai["piai"]
+  n_ds_env_file[(".env（凭据）")]
+  n_ds_pi_session[("pi 会话目录")]
+  n_store ==>|write| n_ds_events_jsonl
+  n_store ==>|write| n_ds_run_json
+  n_store ==>|write| n_ds_graph_json
+  n_store ==>|write| n_ds_candidates_jsonl
+  n_store ==>|write| n_ds_evidence
+  n_store ==>|write| n_ds_private_trace
+  n_store ==>|write| n_ds_results
+  n_store ==>|write| n_ds_report
+  n_internal_wire ==>|write| n_ds_run_lock
+  n_dag -->|read| n_ds_graph_json
+  n_bridge ==>|write| n_ds_bridge_stderr
+  n_executor ==>|write| n_ds_host_netfilter
+  n_executor -->|read| n_ds_runner_image
+  n_runner_Dockerfile ==>|write| n_ds_runner_image
+  n_executor ==>|write| n_ds_provider_api
+  n_bridge_bridge_py -->|read| n_ds_tsecbench_api
+  n_bridge_bridge_py ==>|write| n_ds_tsecbench_api
+  n_piai -->|read| n_ds_env_file
+  n_piai ==>|write| n_ds_pi_session
+  classDef store fill:#8b5cf6,stroke:#5b21b6,color:#fff
+  class n_ds_events_jsonl,n_ds_run_json,n_ds_graph_json,n_ds_candidates_jsonl,n_ds_evidence,n_ds_private_trace,n_ds_results,n_ds_report,n_ds_run_lock,n_ds_bridge_stderr,n_ds_host_netfilter,n_ds_runner_image,n_ds_provider_api,n_ds_tsecbench_api,n_ds_env_file,n_ds_pi_session store

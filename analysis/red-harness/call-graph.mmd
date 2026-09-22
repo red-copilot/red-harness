@@ -1,0 +1,43 @@
+graph TD
+  %% 域级调用图（由 extract_topology.py 生成）。
+  %% ==> dispatch：动态派发/注入，只看 import 是看不见的。
+  %% 蓝色 = 入口点（来自部署/构建描述，不是源码里的可达性）。
+  n_dom_contract["契约层"]
+  n_dom_reasoning["事实与答案层"]
+  n_dom_store["持久化"]
+  n_dom_execution["隔离执行"]
+  n_dom_agent["Agent 接入"]
+  n_dom_scenario["场景适配"]
+  n_dom_composition["装配与接口"]
+  n_dom_data["数据存储"]
+  n_bridge_bridge_py["bridge.py（Python 桥）"]
+  n_cmd_red_harness["cmd/red-harness"]
+  n_piai_testdata_stubpi["stubpi（测试替身）"]
+  n_runner_Dockerfile["runner/Dockerfile（镜像构建）"]
+  n_dom_agent --> n_dom_contract
+  n_dom_agent --> n_dom_data
+  n_dom_agent ==> n_dom_execution
+  n_dom_agent ==> n_dom_scenario
+  n_dom_composition --> n_dom_agent
+  n_dom_composition --> n_dom_contract
+  n_dom_composition --> n_dom_data
+  n_dom_composition --> n_dom_execution
+  n_dom_composition ==> n_dom_reasoning
+  n_dom_composition ==> n_dom_scenario
+  n_dom_composition --> n_dom_store
+  n_dom_execution --> n_dom_contract
+  n_dom_execution --> n_dom_data
+  n_dom_reasoning --> n_dom_contract
+  n_dom_reasoning --> n_dom_data
+  n_dom_reasoning ==> n_dom_store
+  n_dom_scenario ==> n_dom_agent
+  n_dom_scenario --> n_dom_contract
+  n_dom_store --> n_dom_contract
+  n_dom_store --> n_dom_data
+  n_dom_store --> n_dom_reasoning
+  n_bridge_bridge_py --> n_dom_agent
+  n_cmd_red_harness --> n_dom_composition
+  n_piai_testdata_stubpi --> n_dom_agent
+  n_runner_Dockerfile --> n_dom_execution
+  classDef entry fill:#1f6feb,stroke:#0b3d91,color:#fff
+  class n_bridge_bridge_py,n_cmd_red_harness,n_piai_testdata_stubpi,n_runner_Dockerfile entry

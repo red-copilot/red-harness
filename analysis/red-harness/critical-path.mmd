@@ -1,0 +1,56 @@
+flowchart TD
+  %% 主流程：研究员跑一次评测，拿回分数（人设：安全研究员（红队工程师））
+  %% 无遥测接入（本机不接平台、不跑真实 provider），故不标 p50/p99。
+  s0["1. 敲下 run，指定场景与预算"]
+  n_cmd_red_harness[/"cmd/red-harness"/]
+  s0 -.-> n_cmd_red_harness
+  n_internal_cli[/"internal/cli"/]
+  s0 -.-> n_internal_cli
+  s1["2. 装配层把契约与实现拼成一台 Harness"]
+  s0 --> s1
+  n_internal_wire[/"internal/wire"/]
+  s1 -.-> n_internal_wire
+  n_harness[/"harness"/]
+  s1 -.-> n_harness
+  s2["3. 抢到全机唯一的那把运行锁"]
+  s1 --> s2
+  n_ds_run_lock[/"ds:run.lock"/]
+  s2 -.-> n_ds_run_lock
+  s3["4. 从平台取回题目清单与目标地址"]
+  s2 --> s3
+  n_scenario[/"scenario"/]
+  s3 -.-> n_scenario
+  n_bridge[/"bridge"/]
+  s3 -.-> n_bridge
+  n_bridge_bridge_py[/"bridge/bridge.py"/]
+  s3 -.-> n_bridge_bridge_py
+  n_ds_tsecbench_api[/"ds:tsecbench-api"/]
+  s3 -.-> n_ds_tsecbench_api
+  s4["5. 为这道题拉起隔离容器与内网"]
+  s3 --> s4
+  n_executor[/"executor"/]
+  s4 -.-> n_executor
+  n_ds_docker_daemon[/"ds:docker-daemon"/]
+  s4 -.-> n_ds_docker_daemon
+  n_ds_runner_image[/"ds:runner-image"/]
+  s4 -.-> n_ds_runner_image
+  s5["6. 在容器里驱动 pi 跑题，事件实时回流"]
+  s4 --> s5
+  n_piai[/"piai"/]
+  s5 -.-> n_piai
+  n_executor[/"executor"/]
+  s5 -.-> n_executor
+  s6["7. 过程与快照落盘（公开面只有指纹）"]
+  s5 --> s6
+  n_store[/"store"/]
+  s6 -.-> n_store
+  n_ds_events_jsonl[/"ds:events.jsonl"/]
+  s6 -.-> n_ds_events_jsonl
+  n_ds_run_json[/"ds:run.json"/]
+  s6 -.-> n_ds_run_json
+  s7["8. 写完公开指标，list / stats 读得到"]
+  s6 --> s7
+  n_ds_results[/"ds:results"/]
+  s7 -.-> n_ds_results
+  n_internal_cli[/"internal/cli"/]
+  s7 -.-> n_internal_cli
