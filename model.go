@@ -290,6 +290,8 @@ type OutcomeView struct {
 	Report string
 	// Err 非空表示这道题以异常收场。
 	Err string
+	// CleanupFailures records failed cleanup stages without exposing raw errors.
+	CleanupFailures []string
 	// StartedAt / EndedAt 用于报告。
 	StartedAt time.Time
 	EndedAt   time.Time

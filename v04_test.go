@@ -30,6 +30,7 @@ type fakeSandbox struct {
 	launchSpecs []ProcessSpec
 	probeErr    error
 	launchErr   error
+	closeErr    error
 }
 
 func (s *fakeSandbox) NewSession(_ context.Context, spec SandboxSpec) (SandboxSession, error) {
@@ -93,7 +94,7 @@ func (s *fakeSession) Close(context.Context) error {
 		s.sb.closed++
 		s.sb.mu.Unlock()
 	}
-	return nil
+	return s.sb.closeErr
 }
 
 type fakeProcess struct {
@@ -102,6 +103,11 @@ type fakeProcess struct {
 	done   chan struct{}
 	once   sync.Once
 }
+
+type fakeRunLocker struct{}
+
+func (fakeRunLocker) Lock(context.Context) error { return nil }
+func (fakeRunLocker) Unlock() error              { return nil }
 
 func (p *fakeProcess) Read([]byte) (int, error)    { <-p.done; return 0, errors.New("closed") }
 func (p *fakeProcess) Write(b []byte) (int, error) { return len(b), nil }
@@ -121,9 +127,13 @@ type fakeAgent struct {
 	started   int
 	closed    int
 	steers    []string
+	prompts   []string
 	lastStart AgentStart
 	script    func(round int, emit func(Event))
 	roundErr  error
+	stats     Stats
+	block     bool
+	entered   chan struct{}
 }
 
 func (a *fakeAgent) Start(_ context.Context, req AgentStart) error {
@@ -131,8 +141,16 @@ func (a *fakeAgent) Start(_ context.Context, req AgentStart) error {
 	a.lastStart = req
 	return nil
 }
-func (a *fakeAgent) Round(_ context.Context, req RoundRequest) (RoundResult, error) {
+func (a *fakeAgent) Round(ctx context.Context, req RoundRequest) (RoundResult, error) {
 	a.rounds++
+	a.prompts = append(a.prompts, req.Prompt)
+	if a.block {
+		if a.entered != nil {
+			close(a.entered)
+		}
+		<-ctx.Done()
+		return RoundResult{Err: "cancelled"}, ctx.Err()
+	}
 	if a.roundErr != nil {
 		return RoundResult{Reason: ReasonError, Err: "假 agent 故障"}, a.roundErr
 	}
@@ -145,13 +163,29 @@ func (a *fakeAgent) Steer(_ context.Context, msg string) error {
 	a.steers = append(a.steers, msg)
 	return nil
 }
-func (a *fakeAgent) Stats(context.Context) (Stats, error) { return Stats{}, nil }
+func (a *fakeAgent) Stats(context.Context) (Stats, error) { return a.stats, nil }
 func (a *fakeAgent) Close(context.Context) error          { a.closed++; return nil }
 
 // scriptedAgentFactory 让每道题拿到同一个假 agent，并把 sink 接上。
 type scriptedAgentFactory struct {
 	agent *fakeAgent
 	sink  EventSink
+}
+
+type sequenceAgentFactory struct {
+	agents []*fakeAgent
+	sink   EventSink
+	next   int
+}
+
+func (f *sequenceAgentFactory) New(_ AgentSpec, _ SandboxSession, sink EventSink) (Agent, error) {
+	f.sink = sink
+	if f.next >= len(f.agents) {
+		return nil, errors.New("unexpected agent restart")
+	}
+	agent := f.agents[f.next]
+	f.next++
+	return agent, nil
 }
 
 func (f *scriptedAgentFactory) New(_ AgentSpec, _ SandboxSession, ev EventSink) (Agent, error) {
@@ -173,14 +207,17 @@ func emitToolEnd(sink EventSink, callID, cmd, output string) {
 // （依赖方向是单向的：实现包依赖根包）。这里的假场景只实现编排需要的最小语义。
 
 type stubScenario struct {
-	challenges []Challenge
-	answers    map[string]string // code → 正确 flag
-	mu         sync.Mutex
-	prepared   int
-	cleaned    int
-	hints      int
-	submitted  []string
-	evalErr    error
+	challenges     []Challenge
+	answers        map[string]string // code → 正确 flag
+	mu             sync.Mutex
+	prepared       int
+	cleaned        int
+	hints          int
+	submitted      []string
+	evalCalls      int
+	reconcileCalls int
+	evalErr        error
+	cleanupErr     error
 }
 
 func (s *stubScenario) Discover(context.Context, RunSpec) ([]Challenge, error) {
@@ -204,6 +241,7 @@ func (s *stubScenario) Hint(context.Context, Challenge) (string, error) {
 func (s *stubScenario) Evaluate(_ context.Context, ch Challenge, flag string) (Evaluation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.evalCalls++
 	if s.evalErr != nil {
 		return Evaluation{}, s.evalErr
 	}
@@ -215,6 +253,7 @@ func (s *stubScenario) Evaluate(_ context.Context, ch Challenge, flag string) (E
 func (s *stubScenario) Reconcile(_ context.Context, ch Challenge) (Objective, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reconcileCalls++
 	got := 0
 	for _, f := range s.submitted {
 		if f == s.answers[ch.Code] {
@@ -228,7 +267,7 @@ func (s *stubScenario) Cleanup(context.Context, Challenge) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleaned++
-	return nil
+	return s.cleanupErr
 }
 
 func boolScore(ok bool) int {
@@ -467,6 +506,28 @@ func TestRunRoundErrorStopsChallenge(t *testing.T) {
 	}
 }
 
+func TestRunRestartsProcessOnceWithSafeSummary(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}}, answers: map[string]string{"c1": "flag{answer}"}}
+	sb := &fakeSandbox{}
+	first := &fakeAgent{roundErr: errors.New("process exited")}
+	second := &fakeAgent{}
+	factory := &sequenceAgentFactory{agents: []*fakeAgent{first, second}}
+	second.script = func(_ int, _ func(Event)) {
+		emitToolEnd(factory.sink, "call", "curl http://10.9.9.9:8080/", "flag{answer}")
+	}
+	h := newTestHarness(t, sc, sb, factory, func(Challenge) CandidateGate { return newStubGate() })
+	res, err := h.Run(context.Background(), testRunSpec())
+	if err != nil || !res.Completed {
+		t.Fatalf("process restart did not recover: completed=%v err=%v", res.Completed, err)
+	}
+	if first.closed != 1 || second.closed != 1 || sb.sessions != 2 || sb.closed != 2 {
+		t.Fatalf("restart lifecycle: first=%d second=%d sessions=%d closed=%d", first.closed, second.closed, sb.sessions, sb.closed)
+	}
+	if len(second.prompts) == 0 || !strings.Contains(second.prompts[0], "平台已确认进度") || strings.Contains(second.prompts[0], "flag{answer}") {
+		t.Fatalf("recovery prompt missing safe summary or included answer: %q", second.prompts)
+	}
+}
+
 // TestRunHintRequestedOncePerChallenge：两轮无进展只请求一次提示，之后不再请求。
 func TestRunHintRequestedOncePerChallenge(t *testing.T) {
 	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}},
@@ -492,6 +553,81 @@ func TestRunHintRequestedOncePerChallenge(t *testing.T) {
 	}
 	if res.Challenges[0].Outcome.HintUsed != 1 {
 		t.Errorf("HintUsed = %d，期望 1", res.Challenges[0].Outcome.HintUsed)
+	}
+}
+
+func TestRunCostBudgetUsesAgentStats(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}}, answers: map[string]string{"c1": "flag{never}"}}
+	ag := &fakeAgent{stats: Stats{Turns: 2, CostUSD: 0.02}}
+	h := newTestHarness(t, sc, &fakeSandbox{}, &scriptedAgentFactory{agent: ag}, func(Challenge) CandidateGate { return newStubGate() })
+	spec := testRunSpec()
+	spec.Budget.MaxCostUSD = 0.01
+	res, err := h.Run(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.Challenges[0].Outcome
+	if got.Reason != ReasonMaxCost || got.Rounds != 1 || got.Stats.CostUSD != 0.02 {
+		t.Fatalf("cost budget did not stop after measured round: %+v", got)
+	}
+}
+
+func TestRunSubmitUncertainReconcilesAndStops(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}},
+		answers: map[string]string{"c1": "flag{answer}"}, evalErr: errors.New("platform write timeout")}
+	ag := &fakeAgent{}
+	factory := &scriptedAgentFactory{agent: ag}
+	ag.script = func(_ int, _ func(Event)) {
+		emitToolEnd(factory.sink, "call", "curl http://10.9.9.9:8080/", "flag{answer}")
+	}
+	h := newTestHarness(t, sc, &fakeSandbox{}, factory, func(Challenge) CandidateGate { return newStubGate() })
+	res, err := h.Run(context.Background(), testRunSpec())
+	if !IsKind(err, KindPlatform) {
+		t.Fatalf("uncertain submit kind = %v, want platform", err)
+	}
+	if sc.evalCalls != 1 || sc.reconcileCalls != 1 || ag.rounds != 1 {
+		t.Fatalf("uncertain submit was retried or not reconciled: eval=%d reconcile=%d rounds=%d", sc.evalCalls, sc.reconcileCalls, ag.rounds)
+	}
+	if got := res.Challenges[0].Outcome; got.Err != "提交结果不确定" || got.Reason != ReasonError || got.Submitted != 0 {
+		t.Fatalf("uncertain submit classified as success: %+v", got)
+	}
+}
+
+func TestRunCancellationPersistsResultAndCleanupFailures(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}}, cleanupErr: errors.New("cleanup failed")}
+	sb := &fakeSandbox{closeErr: errors.New("sandbox cleanup failed")}
+	ag := &fakeAgent{block: true, entered: make(chan struct{})}
+	h := newTestHarness(t, sc, sb, &scriptedAgentFactory{agent: ag}, func(Challenge) CandidateGate { return newStubGate() })
+	recorded := &recordingResults{}
+	h.results = recorded
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type runReturn struct {
+		res RunResult
+		err error
+	}
+	done := make(chan runReturn, 1)
+	go func() { res, err := h.Run(ctx, testRunSpec()); done <- runReturn{res, err} }()
+	select {
+	case <-ag.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent round did not start")
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if !IsKind(got.err, KindCancelled) || got.res.Reason != ReasonStopped {
+			t.Fatalf("cancellation classification: reason=%q err=%v", got.res.Reason, got.err)
+		}
+		if len(recorded.saved) != 1 || recorded.saveCtxErr != nil {
+			t.Fatalf("cancelled result was not saved with a fresh context: saves=%d ctxErr=%v", len(recorded.saved), recorded.saveCtxErr)
+		}
+		failures := got.res.Challenges[0].Outcome.CleanupFailures
+		if len(failures) != 2 || failures[0] != "sandbox" || failures[1] != "scenario" {
+			t.Fatalf("cleanup failures were not recorded separately: %v", failures)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled Run did not terminate")
 	}
 }
 
@@ -553,7 +689,7 @@ func TestRunFreezesProfileIntoAgentStart(t *testing.T) {
 	ag := &fakeAgent{}
 	factory := &scriptedAgentFactory{agent: ag}
 
-	opts := HarnessOptions{Scenario: sc, Sandbox: sb, Agents: factory,
+	opts := HarnessOptions{Scenario: sc, Sandbox: sb, Agents: factory, Locker: fakeRunLocker{},
 		Planner:  func(Challenge) Planner { return &stubPlanner{} },
 		Renderer: func(Challenge) Renderer { return stubRenderer{} },
 		Gate:     func(Challenge) CandidateGate { return newStubGate() },
@@ -573,6 +709,19 @@ func TestRunFreezesProfileIntoAgentStart(t *testing.T) {
 	// Workdir 必须是容器内路径，不是宿主路径。
 	if ag.lastStart.Workdir != "/work" {
 		t.Errorf("AgentStart.Workdir = %q，期望容器内路径 /work", ag.lastStart.Workdir)
+	}
+	override := SolverProfile{Name: "run-specific", SystemPrompt: "本次运行的提示", ExtensionBundle: "/tmp/profile"}
+	spec := testRunSpec()
+	spec.Profile = override
+	res, err := h.Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("override Run: %v", err)
+	}
+	if ag.lastStart.SystemPrompt != override.SystemPrompt || res.ProfileDigest != override.Digest() {
+		t.Errorf("RunSpec.Profile 未统一驱动 prompt 与摘要: prompt=%q digest=%q", ag.lastStart.SystemPrompt, res.ProfileDigest)
+	}
+	if sb.specs[len(sb.specs)-1].ProfileDir != override.ExtensionBundle {
+		t.Error("RunSpec.Profile 的 bundle 未进入 sandbox")
 	}
 }
 
@@ -609,7 +758,7 @@ func testRunSpec() RunSpec {
 func newTestHarness(t *testing.T, sc Scenario, sb Sandbox, af AgentFactory,
 	gate func(Challenge) CandidateGate) *Harness {
 	t.Helper()
-	opts := HarnessOptions{Scenario: sc, Sandbox: sb, Agents: af, Gate: gate, Results: &recordingResults{}}
+	opts := HarnessOptions{Scenario: sc, Sandbox: sb, Agents: af, Gate: gate, Results: &recordingResults{}, Locker: fakeRunLocker{}}
 	if gate != nil {
 		opts.Planner = func(Challenge) Planner { return &stubPlanner{} }
 		opts.Renderer = func(Challenge) Renderer { return stubRenderer{} }
@@ -626,14 +775,16 @@ func newTestHarness(t *testing.T, sc Scenario, sb Sandbox, af AgentFactory,
 // 它同时也是「NewHarness 拒绝缺 Results」这条守卫的对照物——缺了它这台 Harness
 // 会把「跑完不落盘」变成一次静默成功。
 type recordingResults struct {
-	mu    sync.Mutex
-	saved []RunResult
+	mu         sync.Mutex
+	saved      []RunResult
+	saveCtxErr error
 }
 
-func (r *recordingResults) Save(_ context.Context, res RunResult) error {
+func (r *recordingResults) Save(ctx context.Context, res RunResult) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.saved = append(r.saved, res)
+	r.saveCtxErr = ctx.Err()
 	return nil
 }
 func (r *recordingResults) Get(context.Context, RunID) (RunResult, error) {
@@ -658,6 +809,7 @@ func TestNewHarnessRejectsMissingPorts(t *testing.T) {
 			Renderer: func(Challenge) Renderer { return stubRenderer{} },
 			Gate:     func(Challenge) CandidateGate { return newStubGate() },
 			Results:  &recordingResults{},
+			Locker:   fakeRunLocker{},
 		}
 	}
 	if _, err := NewHarness(base()); err != nil {
@@ -674,6 +826,7 @@ func TestNewHarnessRejectsMissingPorts(t *testing.T) {
 		{"Renderer", func(o *HarnessOptions) { o.Renderer = nil }},
 		{"Gate", func(o *HarnessOptions) { o.Gate = nil }},
 		{"Results", func(o *HarnessOptions) { o.Results = nil }},
+		{"Locker", func(o *HarnessOptions) { o.Locker = nil }},
 	} {
 		o := base()
 		tc.drop(&o)

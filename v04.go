@@ -131,6 +131,31 @@ func (p SolverProfile) Digest() string {
 	return digestJSON(b)
 }
 
+// Empty 报告这个 profile 是否「一个字段都没填」。
+//
+// 它是「该不该回落到默认 profile」的唯一判据，装配层（internal/wire.resolve）
+// 必须调它，不能自己再抄一份字段列表：两处一旦漂移，Run 实际生效的 profile
+// 与 RunSpec 里那份就不是同一个东西，而摘要看起来仍然正常。
+func (p SolverProfile) Empty() bool {
+	return p.Name == "" && p.SystemPrompt == "" && p.ExtensionBundle == "" &&
+		len(p.Planner) == 0 && len(p.PromptPolicy) == 0
+}
+
+func profilePositiveInt(values map[string]any, key string) (int, bool) {
+	v, exists := values[key]
+	if !exists {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case int:
+		return n, n > 0 && n <= 10000
+	case float64:
+		i := int(n)
+		return i, n > 0 && n <= 10000 && float64(i) == n
+	}
+	return 0, false
+}
+
 // ResultStore is intentionally separate from the event/snapshot Store. It
 // stores aggregate metrics and fingerprints, never candidate plaintext.
 type ResultStore interface {
@@ -138,6 +163,12 @@ type ResultStore interface {
 	Get(context.Context, RunID) (RunResult, error)
 	List(context.Context) ([]RunResult, error)
 	Stats(context.Context, StatsQuery) (StatsReport, error)
+}
+
+// TraceStore is an optional private event sink. Implementations must keep raw
+// events outside public result files and restrict directory/file permissions.
+type TraceStore interface {
+	AppendTrace(context.Context, RunID, string, Event) error
 }
 
 // RunLocker 是**跨进程**的单运行锁。
@@ -172,17 +203,20 @@ type StatsQuery struct {
 // RemainingAtStart，**分母为 0 表示有挑战的分母未知**（FlagCount 未知），此时
 // 不得宣称召回率——两个计数器都会把该挑战排除在外。
 type StatsReport struct {
-	Runs             int     `json:"runs"`
-	Completed        int     `json:"completed"`
-	CompletionRate   float64 `json:"completionRate"`
-	ConfirmedFlags   int     `json:"confirmedFlags"`
-	RemainingAtStart int     `json:"remainingAtStart"`
-	RecallRate       float64 `json:"recallRate"`
-	Score            int     `json:"score"`
-	CostUSD          float64 `json:"costUSD"`
-	DurationSeconds  float64 `json:"durationSeconds"`
-	HintedRuns       int     `json:"hintedRuns"`
-	ProviderFailures int     `json:"providerFailures"`
+	Runs                    int     `json:"runs"`
+	Completed               int     `json:"completed"`
+	CompletionRate          float64 `json:"completionRate"`
+	Challenges              int     `json:"challenges"`
+	SolvedChallenges        int     `json:"solvedChallenges"`
+	ChallengeCompletionRate float64 `json:"challengeCompletionRate"`
+	ConfirmedFlags          int     `json:"confirmedFlags"`
+	RemainingAtStart        int     `json:"remainingAtStart"`
+	RecallRate              float64 `json:"recallRate"`
+	Score                   int     `json:"score"`
+	CostUSD                 float64 `json:"costUSD"`
+	DurationSeconds         float64 `json:"durationSeconds"`
+	HintedRuns              int     `json:"hintedRuns"`
+	ProviderFailures        int     `json:"providerFailures"`
 }
 
 // ChallengeResult is the return-only view for one target. A result store must
@@ -210,16 +244,18 @@ type RunResult struct {
 // Harness is the synchronous v0.4 façade. It intentionally contains no pause,
 // resume, control socket or web lifecycle.
 type Harness struct {
-	scenario Scenario
-	sandbox  Sandbox
-	agents   AgentFactory
-	results  ResultStore
-	locker   RunLocker
-	gate     func(Challenge) CandidateGate
-	planner  func(Challenge) Planner
-	renderer func(Challenge) Renderer
-	profile  SolverProfile
-	now      func() time.Time
+	scenario          Scenario
+	sandbox           Sandbox
+	agents            AgentFactory
+	results           ResultStore
+	locker            RunLocker
+	gate              func(Challenge) CandidateGate
+	solverWithProfile func(Challenge, SolverProfile) (Planner, Renderer)
+	solver            func(Challenge) (Planner, Renderer)
+	planner           func(Challenge) Planner
+	renderer          func(Challenge) Renderer
+	profile           SolverProfile
+	now               func() time.Time
 	// mu guards running only. It is **not** the cross-process lock: see RunLocker.
 	mu      sync.Mutex
 	running bool
@@ -230,10 +266,13 @@ type HarnessOptions struct {
 	Sandbox  Sandbox
 	Agents   AgentFactory
 	Results  ResultStore
-	// Locker is optional; nil means no cross-process mutual exclusion. Callers
-	// that run unattended should provide one.
-	Locker   RunLocker
-	Gate     func(Challenge) CandidateGate
+	// Locker is required for all production runs, including direct SDK use.
+	Locker            RunLocker
+	Gate              func(Challenge) CandidateGate
+	SolverWithProfile func(Challenge, SolverProfile) (Planner, Renderer)
+	// Solver creates a Planner and Renderer over the same per-challenge state.
+	// If set, it takes precedence over the separate legacy factories.
+	Solver   func(Challenge) (Planner, Renderer)
 	Planner  func(Challenge) Planner
 	Renderer func(Challenge) Renderer
 	Profile  SolverProfile
@@ -258,10 +297,10 @@ func NewHarness(opts HarnessOptions) (*Harness, error) {
 	//   - 缺 Results：Run 里的 `if h.results != nil` 会让「跑完不落盘」变成一次
 	//     静默成功，表现为「跑了几十次，stats 说零次」。
 	// 两者都是「看起来跑通了、其实什么都没验证」的形状，必须在启动时拒绝。
-	if opts.Planner == nil {
+	if opts.SolverWithProfile == nil && opts.Solver == nil && opts.Planner == nil {
 		missing = append(missing, "Planner")
 	}
-	if opts.Renderer == nil {
+	if opts.SolverWithProfile == nil && opts.Solver == nil && opts.Renderer == nil {
 		missing = append(missing, "Renderer")
 	}
 	if opts.Gate == nil {
@@ -269,6 +308,9 @@ func NewHarness(opts HarnessOptions) (*Harness, error) {
 	}
 	if opts.Results == nil {
 		missing = append(missing, "Results")
+	}
+	if opts.Locker == nil {
+		missing = append(missing, "Locker")
 	}
 	if len(missing) > 0 {
 		return nil, Ef(KindConfig, "harness.new", "缺少必需端口: "+strings.Join(missing, ", "), nil)
@@ -278,7 +320,7 @@ func NewHarness(opts HarnessOptions) (*Harness, error) {
 		now = time.Now
 	}
 	return &Harness{scenario: opts.Scenario, sandbox: opts.Sandbox, agents: opts.Agents,
-		results: opts.Results, locker: opts.Locker, gate: opts.Gate, planner: opts.Planner,
+		results: opts.Results, locker: opts.Locker, gate: opts.Gate, solverWithProfile: opts.SolverWithProfile, solver: opts.Solver, planner: opts.Planner,
 		renderer: opts.Renderer, profile: opts.Profile, now: now}, nil
 }
 
@@ -287,9 +329,10 @@ func (h *Harness) Doctor(ctx context.Context) DoctorReport {
 	checks := []DoctorCheck{{Name: "scenario", OK: h != nil && h.scenario != nil, Fatal: true},
 		{Name: "sandbox", OK: h != nil && h.sandbox != nil, Fatal: true},
 		{Name: "agent_factory", OK: h != nil && h.agents != nil, Fatal: true},
-		{Name: "planner", OK: h != nil && h.planner != nil, Fatal: true},
-		{Name: "renderer", OK: h != nil && h.renderer != nil, Fatal: true},
+		{Name: "planner", OK: h != nil && (h.planner != nil || h.solver != nil || h.solverWithProfile != nil), Fatal: true},
+		{Name: "renderer", OK: h != nil && (h.renderer != nil || h.solver != nil || h.solverWithProfile != nil), Fatal: true},
 		{Name: "gate", OK: h != nil && h.gate != nil, Fatal: true}}
+	checks = append(checks, DoctorCheck{Name: "locker", OK: h != nil && h.locker != nil, Fatal: true})
 	if h != nil && h.sandbox != nil {
 		// Reclaim is deliberately not called here: doctor must not mutate runtime
 		// state. Presence checks are enough at this layer.
@@ -308,6 +351,9 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	if h == nil {
 		return RunResult{}, Ef(KindConfig, "harness.run", "Harness 为空", nil)
 	}
+	if h.locker == nil {
+		return RunResult{}, Ef(KindConfig, "harness.run", "缺少跨进程单运行锁", nil)
+	}
 	h.mu.Lock()
 	if h.running {
 		h.mu.Unlock()
@@ -319,16 +365,28 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 
 	// 跨进程单运行锁在**一切副作用之前**取。放到 Discover 之后等于已经起过题
 	// 了再发现别人在跑，那时平台侧已经被踩过。
-	if h.locker != nil {
-		if err := h.locker.Lock(ctx); err != nil {
-			return RunResult{}, Ef(KindConfig, "harness.lock", "获取单运行锁失败", err)
-		}
-		defer func() { _ = h.locker.Unlock() }()
+	if err := h.locker.Lock(ctx); err != nil {
+		return RunResult{}, Ef(KindConfig, "harness.lock", "获取单运行锁失败", err)
+	}
+	defer func() { _ = h.locker.Unlock() }()
+
+	profile := spec.Profile
+	if profile.Empty() {
+		profile = h.profile
+	}
+	// JSON round-trip copies nested maps. A caller mutating Profile during Run
+	// must not change prompt/parameters after the digest has been recorded.
+	profileJSON, err := json.Marshal(profile)
+	if err != nil {
+		return RunResult{}, Ef(KindConfig, "harness.profile", "profile 无法序列化", err)
+	}
+	if err := json.Unmarshal(profileJSON, &spec.Profile); err != nil {
+		return RunResult{}, Ef(KindConfig, "harness.profile", "profile 无法冻结", err)
 	}
 
 	started := h.now()
 	runID := RunID(fmt.Sprintf("run-%d", started.UnixNano()))
-	result := RunResult{RunID: runID, Scenario: spec.Scenario, ProfileDigest: h.profile.Digest(), Model: spec.Agent.Model, StartedAt: started}
+	result := RunResult{RunID: runID, Scenario: spec.Scenario, ProfileDigest: spec.Profile.Digest(), Model: spec.Agent.Model, StartedAt: started}
 
 	// 先按 label 扫掉**上次崩溃**留下的容器/网络/规则，再建本题的资源。
 	//
@@ -371,8 +429,14 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	result.EndedAt = h.now()
 	result.Completed = runCompleted(result)
 	switch {
+	case IsKind(firstErr, KindCancelled):
+		result.Reason = ReasonStopped
 	case result.Err != "":
-		result.Reason = ReasonError
+		if IsKind(firstErr, KindProvider) {
+			result.Reason = ReasonProviderFailure
+		} else {
+			result.Reason = ReasonError
+		}
 	case result.Completed:
 		result.Reason = ReasonCompleted
 	default:
@@ -381,10 +445,14 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 		// 而不是让调用方从 Completed 反推。
 		result.Reason = ReasonNoProgress
 	}
-	if h.results != nil {
-		if err := h.results.Save(ctx, result); err != nil {
-			return result, Ef(KindPersistence, "harness.result", "保存运行指标失败", err)
-		}
+	saveCtx := ctx
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		saveCtx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+	}
+	if err := h.results.Save(saveCtx, result); err != nil {
+		return result, errors.Join(firstErr, Ef(KindPersistence, "harness.result", "保存运行指标失败", err))
 	}
 	return result, firstErr
 }
@@ -419,13 +487,35 @@ func runCompleted(r RunResult) bool {
 	return false
 }
 
-func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, ch Challenge) (ChallengeResult, error) {
-	cr := ChallengeResult{Challenge: ch, StartedAt: h.now()}
+func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, ch Challenge) (cr ChallengeResult, runErr error) {
+	cr = ChallengeResult{Challenge: ch, StartedAt: h.now()}
 	target, err := h.scenario.Prepare(ctx, ch)
 	if err != nil {
 		cr.EndedAt = h.now()
 		return cr, err
 	}
+	var ss SandboxSession
+	var ag Agent
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if ag != nil {
+			if err := ag.Close(cleanupCtx); err != nil {
+				cr.Outcome.CleanupFailures = append(cr.Outcome.CleanupFailures, "agent")
+			}
+		}
+		if ss != nil {
+			if err := ss.Close(cleanupCtx); err != nil {
+				cr.Outcome.CleanupFailures = append(cr.Outcome.CleanupFailures, "sandbox")
+			}
+		}
+		if err := h.scenario.Cleanup(cleanupCtx, ch); err != nil {
+			cr.Outcome.CleanupFailures = append(cr.Outcome.CleanupFailures, "scenario")
+		}
+		if cr.EndedAt.IsZero() {
+			cr.EndedAt = h.now()
+		}
+	}()
 	sb := spec.Sandbox
 	if sb.Image == "" {
 		sb.Image = spec.Executor.Image
@@ -457,32 +547,46 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	// RemainingAtStart 必须在**任何提交之前**记下：它就是「起跑时还差几个」，
 	// 也就是增量召回率的分母。放到轮循环之后记等于把本次成绩算进基线。
 	cr.Outcome.RemainingAtStart = ch.Remaining()
-	ss, err := h.sandbox.NewSession(ctx, sb)
+	ss, err = h.sandbox.NewSession(ctx, sb)
 	if err != nil {
 		cr.EndedAt = h.now()
-		_ = h.scenario.Cleanup(context.Background(), ch)
 		return cr, err
 	}
-	defer func() { _ = ss.Close(context.Background()); _ = h.scenario.Cleanup(context.Background(), ch) }()
 	if _, err := ss.Probe(ctx); err != nil {
 		cr.EndedAt = h.now()
 		return cr, err
 	}
-	sink := &eventSink{}
+	sink := newEventSink(ctx)
+	defer sink.Close()
 	var planner Planner
 	var renderer Renderer
 	var gate CandidateGate
-	if h.planner != nil && h.renderer != nil && h.gate != nil {
-		planner, renderer, gate = h.planner(ch), h.renderer(ch), h.gate(ch)
-		sink.on = func(e Event, round int) { gate.Observe(e); planner.ObserveEvent(e, round) }
+	if h.gate != nil && (h.solverWithProfile != nil || h.solver != nil || h.planner != nil && h.renderer != nil) {
+		if h.solverWithProfile != nil {
+			planner, renderer = h.solverWithProfile(ch, spec.Profile)
+		} else if h.solver != nil {
+			planner, renderer = h.solver(ch)
+		} else {
+			planner, renderer = h.planner(ch), h.renderer(ch)
+		}
+		gate = h.gate(ch)
+		sink.on = func(e Event, round int) error {
+			if traces, ok := h.results.(TraceStore); ok {
+				if err := traces.AppendTrace(ctx, runID, ch.Code, e); err != nil {
+					return err
+				}
+			}
+			gate.Observe(e)
+			planner.ObserveEvent(e, round)
+			return nil
+		}
 	}
-	ag, err := h.agents.New(spec.Agent, ss, sink)
+	ag, err = h.agents.New(spec.Agent, ss, sink)
 	if err != nil {
 		cr.EndedAt = h.now()
 		return cr, err
 	}
-	defer func() { _ = ag.Close(context.Background()) }()
-	if err := ag.Start(ctx, AgentStart{Workdir: sb.Workdir, SystemPrompt: h.profile.SystemPrompt,
+	if err := ag.Start(ctx, AgentStart{Workdir: sb.Workdir, SystemPrompt: spec.Profile.SystemPrompt,
 		Provider: spec.Agent.Provider,
 		Model:    spec.Agent.Model, Thinking: spec.Agent.Thinking, Extensions: spec.Agent.Extensions,
 		Approve: spec.Agent.Approve, SessionDir: spec.Agent.SessionDir, HomeDir: spec.Agent.HomeDir}); err != nil {
@@ -499,6 +603,10 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	}
 	var used Budget
 	dryRounds, hintUsed, lastProgress := 0, 0, ch.Solved
+	restarted := false
+	var previousTurns int
+	var previousCost float64
+	recoveryNote := ""
 	hintPolicy := spec.HintPolicy
 	if hintPolicy == "" {
 		hintPolicy = HintAuto
@@ -530,27 +638,111 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		sink.setRound(round)
 		planner.Activate(it)
 		gate.SetIntent(it.ID, round)
-		res, err := ag.Round(ctx, RoundRequest{Prompt: renderer.Render(ctx, ch, it, &cr.Outcome), Round: round, IntentID: it.ID, Timeout: DefaultRoundTimeout})
+		prompt := recoveryNote + renderer.Render(ctx, ch, it, &cr.Outcome)
+		recoveryNote = ""
+		res, err := ag.Round(ctx, RoundRequest{Prompt: prompt, Round: round, IntentID: it.ID, Timeout: DefaultRoundTimeout})
 		used.MaxRounds++
 		used.MaxTurns += res.Turns
 		cr.Outcome.Rounds++
-		if err != nil && res.Err == "" {
+		if ctx.Err() != nil {
+			cr.Outcome.Reason = ReasonStopped
+			cr.Outcome.Err = "运行被取消"
 			cr.EndedAt = h.now()
-			return cr, err
+			return cr, Ef(KindCancelled, "harness.round", "运行被取消", ctx.Err())
+		}
+		if err != nil && res.Err == "" {
+			res.Err = "Agent 进程或 RPC 故障"
 		}
 		// 轮级错误必须先被识别再谈进展：0 回合 + 有错误的「跑完了」正是前身
 		// 280 run / 0 flag 的呈现方式，不能让它继续走提交与对账。
 		if res.Err != "" {
+			if err != nil && res.ProviderError == "" && !restarted {
+				restarted = true
+				planner.Settle(it, res)
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				closeErr := errors.Join(ag.Close(cleanupCtx), ss.Close(cleanupCtx))
+				cancel()
+				if closeErr != nil {
+					cr.Outcome.CleanupFailures = append(cr.Outcome.CleanupFailures, "agent", "sandbox")
+					cr.Outcome.Reason = ReasonError
+					cr.Outcome.Err = "Agent 重启前清理失败"
+					return cr, Ef(KindExecutor, "harness.restart", cr.Outcome.Err, closeErr)
+				}
+				ag, ss = nil, nil
+				previousTurns = cr.Outcome.Stats.Turns
+				previousCost = cr.Outcome.Stats.CostUSD
+				ss, err = h.sandbox.NewSession(ctx, sb)
+				if err == nil {
+					_, err = ss.Probe(ctx)
+				}
+				if err == nil {
+					ag, err = h.agents.New(spec.Agent, ss, sink)
+				}
+				if err == nil {
+					err = ag.Start(ctx, AgentStart{Workdir: sb.Workdir, SystemPrompt: spec.Profile.SystemPrompt,
+						Provider: spec.Agent.Provider, Model: spec.Agent.Model, Thinking: spec.Agent.Thinking,
+						Extensions: spec.Agent.Extensions, Approve: spec.Agent.Approve,
+						SessionDir: spec.Agent.SessionDir, HomeDir: spec.Agent.HomeDir})
+				}
+				if err != nil {
+					cr.Outcome.Reason = ReasonError
+					cr.Outcome.Err = "Agent 重启失败"
+					return cr, Ef(KindExecutor, "harness.restart", cr.Outcome.Err, err)
+				}
+				// Only host-verified counts cross the session boundary. Raw tool
+				// output, candidates, and the prior transcript are never replayed.
+				recoveryNote = fmt.Sprintf("上一 Agent 会话故障后已重启。平台已确认进度 %d/%d；已执行 %d 轮。请继续当前授权目标。\n",
+					cr.Outcome.ProgressConfirmed, cr.Outcome.ProgressTotal, cr.Outcome.Rounds)
+				continue
+			}
 			// 轮级错误必须终止**本题**：0 回合 + 有错误的「跑完了」正是前身
 			// 280 run / 0 flag 的呈现方式，不能让它继续走提交与对账。
 			//
 			// 但它不终止整次运行——v0.4 的要求是「再次失败则结束当前题目并继续
 			// 下一题」。所以这里返回错误（由 Run 记账后继续），而不是直接放弃。
+			kind := KindExecutor
 			cr.Outcome.Reason = ReasonError
+			if res.ProviderError != "" {
+				kind = KindProvider
+				cr.Outcome.Reason = ReasonProviderFailure
+			}
 			cr.Outcome.Err = res.Err
 			cr.EndedAt = h.now()
-			return cr, Ef(KindProvider, "harness.round", "轮次以错误收场", errors.New(res.Err))
+			return cr, Ef(kind, "harness.round", "轮次以错误收场", errors.New(res.Err))
 		}
+		if err := sink.Flush(ctx); err != nil {
+			// ctx 已取消时 Flush 一定回 ctx.Err()（消费者的 AppendTrace 同理）。
+			// 这两条路径必须和轮循环里的取消判定同形：否则一次 Ctrl-C 会被记成
+			// executor 故障，公开结果与 stats 里的失败类别跟着一起错。
+			if cerr := ctx.Err(); cerr != nil {
+				cr.Outcome.Reason = ReasonStopped
+				cr.Outcome.Err = "运行被取消"
+				cr.EndedAt = h.now()
+				return cr, Ef(KindCancelled, "harness.round", "运行被取消", cerr)
+			}
+			cr.Outcome.Reason = ReasonError
+			cr.EndedAt = h.now()
+			return cr, Ef(KindExecutor, "harness.events", "处理 Agent 事件失败", err)
+		}
+		stats, statsErr := ag.Stats(ctx)
+		if statsErr != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				cr.Outcome.Reason = ReasonStopped
+				cr.Outcome.Err = "运行被取消"
+				cr.EndedAt = h.now()
+				return cr, Ef(KindCancelled, "harness.round", "运行被取消", cerr)
+			}
+			cr.Outcome.Reason = ReasonError
+			cr.EndedAt = h.now()
+			return cr, Ef(KindExecutor, "harness.stats", "读取 Agent 统计失败", statsErr)
+		}
+		stats.Turns += previousTurns
+		stats.CostUSD += previousCost
+		cr.Outcome.Stats = stats
+		if stats.Turns > used.MaxTurns {
+			used.MaxTurns = stats.Turns
+		}
+		used.MaxCostUSD = stats.CostUSD
 		planner.Settle(it, res)
 		progressed := false
 		candidates := gate.New()
@@ -562,16 +754,19 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 				continue
 			}
 			eval, evalErr := h.scenario.Evaluate(ctx, ch, c.Flag)
-			gate.Mark(c.Flag, SubmitResult{Correct: eval.Accepted, Awarded: eval.Score, Duplicate: eval.Accepted && !eval.Progress, Message: eval.Message}, evalErr)
 			if evalErr != nil {
-				// 平台写超时是**不确定**的：先对账一次，能确认状态前绝不重发同一
-				// 候选（重发会打光平台配额，或把已确认的记成判错）。
-				if _, reconcileErr := h.scenario.Reconcile(ctx, ch); reconcileErr == nil {
-					continue
+				// 平台写超时后，总进度不足以证明这一条候选的状态。记录本次
+				// 提交，读取权威总进度，然后以不确定终态结束本题，禁止盲目重试。
+				gate.Mark(c.Flag, SubmitResult{}, evalErr)
+				if obj, reconcileErr := h.scenario.Reconcile(ctx, ch); reconcileErr == nil {
+					cr.Outcome.ProgressConfirmed, cr.Outcome.ProgressTotal = obj.Got, obj.Want
 				}
+				cr.Outcome.Reason = ReasonError
+				cr.Outcome.Err = "提交结果不确定"
 				cr.EndedAt = h.now()
-				return cr, evalErr
+				return cr, Ef(KindPlatform, "harness.evaluate", "提交结果不确定", evalErr)
 			}
+			gate.Mark(c.Flag, SubmitResult{Correct: eval.Accepted, Awarded: eval.Score, Duplicate: eval.Accepted && !eval.Progress, Message: eval.Message}, nil)
 			if eval.Progress {
 				progressed = true
 			}
@@ -601,6 +796,11 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		}
 		threshold := spec.Policy.DryRoundsBeforeHint
 		if threshold <= 0 {
+			if n, ok := profilePositiveInt(spec.Profile.Planner, "dryRoundsBeforeHint"); ok {
+				threshold = n
+			}
+		}
+		if threshold <= 0 {
 			threshold = 2
 		}
 		// 提示**每题最多一次**。HintAlways 也受这条守卫——v0.2 的文档写着
@@ -628,23 +828,116 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	return cr, nil
 }
 
+const (
+	eventQueueSize   = 256
+	eventMaxBytes    = 1 << 20
+	eventMaxPerRound = 10000
+)
+
+type queuedEvent struct {
+	event Event
+	round int
+	ack   chan struct{}
+}
+
 type eventSink struct {
+	ctx    context.Context
 	mu     sync.Mutex
-	events []Event
 	round  int
-	on     func(Event, int)
+	count  int
+	err    error
+	on     func(Event, int) error
+	queue  chan queuedEvent
+	stop   chan struct{}
+	done   chan struct{}
+	closed sync.Once
+}
+
+func newEventSink(ctx context.Context) *eventSink {
+	s := &eventSink{ctx: ctx, queue: make(chan queuedEvent, eventQueueSize), stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(s.done)
+		for {
+			select {
+			case item := <-s.queue:
+				if item.ack != nil {
+					close(item.ack)
+				} else if s.on != nil {
+					if err := s.on(item.event, item.round); err != nil {
+						s.mu.Lock()
+						if s.err == nil {
+							s.err = err
+						}
+						s.mu.Unlock()
+					}
+				}
+			case <-s.stop:
+				return
+			}
+		}
+	}()
+	return s
 }
 
 func (s *eventSink) Emit(e Event) {
 	s.mu.Lock()
-	s.events = append(s.events, e)
-	round, on := s.round, s.on
+	if s.err != nil {
+		s.mu.Unlock()
+		return
+	}
+	s.count++
+	if s.count > eventMaxPerRound {
+		s.err = errors.New("单轮事件数超限")
+		s.mu.Unlock()
+		return
+	}
+	round := s.round
 	s.mu.Unlock()
-	if on != nil {
-		on(e, round)
+	encoded, err := json.Marshal(e)
+	if err != nil || len(encoded) > eventMaxBytes {
+		s.mu.Lock()
+		s.err = errors.New("Agent 事件无法编码或体积超限")
+		s.mu.Unlock()
+		return
+	}
+	select {
+	case s.queue <- queuedEvent{event: e, round: round}:
+	case <-s.ctx.Done():
+	case <-s.stop:
 	}
 }
-func (s *eventSink) setRound(round int) { s.mu.Lock(); s.round = round; s.mu.Unlock() }
+
+func (s *eventSink) setRound(round int) {
+	s.mu.Lock()
+	s.round, s.count = round, 0
+	s.mu.Unlock()
+}
+
+func (s *eventSink) Flush(ctx context.Context) error {
+	ack := make(chan struct{})
+	select {
+	case s.queue <- queuedEvent{ack: ack}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.stop:
+		return errors.New("事件消费者已停止")
+	}
+	select {
+	case <-ack:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return errors.New("事件消费者已停止")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
+}
+
+func (s *eventSink) Close() {
+	s.closed.Do(func() { close(s.stop) })
+	<-s.done
+}
 
 // contains 报告 xs 里是否有 want。刻意不引 slices：根包是纯契约层，工具函数
 // 越少越好，而这里只有一处调用。
