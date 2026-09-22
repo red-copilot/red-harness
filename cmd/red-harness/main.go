@@ -54,7 +54,10 @@ func newPorts(storeDir string, spec harness.RunSpec, deploy cli.DeployOptions) (
 			SessionDir: spec.Agent.SessionDir,
 			HomeDir:    spec.Agent.HomeDir,
 		},
-		Sandbox: wire.SandboxOptions{Image: spec.Sandbox.Image},
+		// ProfileDir 来自部署选项（`--bundle`）：它是「这台机器上那份扩展包在哪」，
+		// 不是运行意图。装配层会用它补上运行级 profile 的 ExtensionBundle，
+		// 从而让 CLI 与直接调 SDK 得到同一个 ProfileDigest / BundleDigest。
+		Sandbox: wire.SandboxOptions{Image: spec.Sandbox.Image, ProfileDir: deploy.BundleDir},
 		Run: wire.RunOptions{
 			Targets:    spec.Targets,
 			Budget:     spec.Budget,

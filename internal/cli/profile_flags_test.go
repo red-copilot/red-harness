@@ -91,47 +91,72 @@ func TestRunProfileFlagRejectsBadConfigBeforeWiring(t *testing.T) {
 	}
 }
 
-// TestRunBundleFlagIsAbsolute 钉住 bundle 路径的绝对化。
+// TestRunBundleFlagGoesThroughDeployOptions 钉住 `--bundle` 的**去向**。
 //
-// bundle 会经 SandboxSpec.ProfileDir 走到 executor 的只读挂载校验，而那里要求
-// **绝对路径**。相对路径若原样传下去，会在起容器那一刻才被拒——报错点离用户
-// 输入太远，而且那时的失败形态是容器起不来，不是「你的参数写错了」。
-func TestRunBundleFlagIsAbsolute(t *testing.T) {
+// 它走部署级选项（`DeployOptions.BundleDir` → `wire.Options.Sandbox.ProfileDir`），
+// **不写进 spec.Profile**。改前的做法是写进 Profile.ExtensionBundle，代价是 CLI
+// 造出一份非空 profile、顶掉装配层的默认 profile，于是同一个 bundle 经 CLI 与经
+// SDK 跑出两个不同的 ProfileDigest——实测：
+//
+//	SDK：profileDigest=d96751574f823ad8  bundleDigest=ab83809fda521ec9
+//	CLI：profileDigest=445d6dc940f6960e  bundleDigest=ab83809fda521ec9
+//
+// bundle 摘要逐字相同而 profile 摘要不同，说明差在 profile 的其它字段（默认
+// profile 的 Name）。「同一次实验」因此在报告里被拆成两组。
+func TestRunBundleFlagGoesThroughDeployOptions(t *testing.T) {
 	eng := &fakeRunner{res: harness.RunResult{RunID: "r-1", Scenario: "fake",
 		Challenges: []harness.ChallengeResult{{Outcome: harness.OutcomeView{Reason: harness.ReasonSolved}}}}}
+	var gotDeploy DeployOptions
 	a := newTestApp()
-	a.Wire = func(string, harness.RunSpec, DeployOptions) (Ports, error) {
+	a.Wire = func(_ string, _ harness.RunSpec, deploy DeployOptions) (Ports, error) {
+		gotDeploy = deploy
 		return Ports{Harness: eng}, nil
 	}
-	// 显式用相对路径调用。
+	// 显式用相对路径调用：绝对化必须在 CLI 这一层做，因为下一站（executor 的
+	// 只读挂载校验）要求绝对路径，而那时报错离用户输入太远。
 	if code := dispatch([]string{"run", "--store", "/tmp/rh", "--bundle", "some/bundle"}, *a); code != 0 {
 		t.Fatalf("dispatch(run) = %d，期望 0", code)
 	}
-	got := eng.specs[0].Profile.ExtensionBundle
-	if !filepath.IsAbs(got) {
-		t.Fatalf("ExtensionBundle = %q，期望绝对路径", got)
+	if !filepath.IsAbs(gotDeploy.BundleDir) {
+		t.Fatalf("DeployOptions.BundleDir = %q，期望绝对路径", gotDeploy.BundleDir)
 	}
-	if !strings.HasSuffix(got, filepath.Join("some", "bundle")) {
-		t.Errorf("ExtensionBundle = %q，期望以 some/bundle 结尾", got)
+	if !strings.HasSuffix(gotDeploy.BundleDir, filepath.Join("some", "bundle")) {
+		t.Errorf("DeployOptions.BundleDir = %q，期望以 some/bundle 结尾", gotDeploy.BundleDir)
+	}
+	if got := eng.specs[0].Profile.ExtensionBundle; got != "" {
+		t.Errorf("spec.Profile.ExtensionBundle = %q，期望为空——由装配层用部署值补上，"+
+			"否则 CLI 会顶掉默认 profile 并产生另一个 ProfileDigest", got)
 	}
 }
 
-// TestRunBundleFlagOverridesProfile：flag 是更明确的那一次输入，与
-// `--image`/`--model` 覆盖装配默认值同一条规矩。
-func TestRunBundleFlagOverridesProfile(t *testing.T) {
+// TestRunBundleFlagClearsProfileBundle：同时给了 profile 文件与 --bundle 时，
+// **flag 胜出**——与 `--image`/`--model` 覆盖装配默认值是同一条规矩。
+//
+// 实现方式是把文件里那个值清掉，让部署级的值去填（wire.resolve 只在运行级为空时
+// 补）。这样既保住了优先级，又不让 CLI 自己造 profile。
+func TestRunBundleFlagClearsProfileBundle(t *testing.T) {
 	eng := &fakeRunner{res: harness.RunResult{RunID: "r-1", Scenario: "fake",
 		Challenges: []harness.ChallengeResult{{Outcome: harness.OutcomeView{Reason: harness.ReasonSolved}}}}}
+	var gotDeploy DeployOptions
 	a := newTestApp()
-	a.Wire = func(string, harness.RunSpec, DeployOptions) (Ports, error) {
+	a.Wire = func(_ string, _ harness.RunSpec, deploy DeployOptions) (Ports, error) {
+		gotDeploy = deploy
 		return Ports{Harness: eng}, nil
 	}
-	path := writeProfile(t, `{"extensionBundle":"/from/profile"}`)
+	path := writeProfile(t, `{"name":"p1","extensionBundle":"/from/profile"}`)
 	if code := dispatch([]string{"run", "--store", "/tmp/rh",
 		"--profile", path, "--bundle", "/from/flag"}, *a); code != 0 {
 		t.Fatalf("dispatch(run) = %d，期望 0", code)
 	}
-	if got := eng.specs[0].Profile.ExtensionBundle; got != "/from/flag" {
-		t.Fatalf("ExtensionBundle = %q，期望被 --bundle 覆盖成 /from/flag", got)
+	if gotDeploy.BundleDir != "/from/flag" {
+		t.Fatalf("DeployOptions.BundleDir = %q，期望 /from/flag", gotDeploy.BundleDir)
+	}
+	if got := eng.specs[0].Profile.ExtensionBundle; got != "" {
+		t.Errorf("文件里的 extensionBundle = %q，应被 --bundle 清掉（flag 更明确）", got)
+	}
+	// profile 的**其它**字段必须原样保留：清掉的只是 bundle 那一个入口。
+	if got := eng.specs[0].Profile.Name; got != "p1" {
+		t.Errorf("profile.Name = %q，期望 p1——--bundle 只该影响 bundle 那一个字段", got)
 	}
 }
 

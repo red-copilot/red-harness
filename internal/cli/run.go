@@ -177,14 +177,19 @@ func (f *runFlags) profile() (harness.SolverProfile, error) {
 			return harness.SolverProfile{}, err
 		}
 	}
-	// `--bundle` 覆盖 profile 里的 ExtensionBundle，而不是与它冲突时报错：flag 是
-	// 更明确的那一次输入，与 `--image`/`--model` 覆盖装配默认值是同一条规矩。
+	// `--bundle` **不在这里生效**：它是部署级选项（见 cli.DeployOptions.BundleDir），
+	// 由装配层经 `wire.Options.Sandbox.ProfileDir` 接管。
 	//
-	// 绝对化在这里做：bundle 路径会经 SandboxSpec.ProfileDir 走到 executor 的
-	// 只读挂载校验，而那里**要求绝对路径**——相对路径会在起容器时才被拒，
-	// 报错点离用户输入太远。
+	// 为什么不让它写进 spec.Profile.ExtensionBundle（改前的做法）：那会让 CLI 造出
+	// 一份**非空**的 profile，从而顶掉装配层的默认 profile（`{Name:"default"}`），
+	// 于是同一个 bundle 经 CLI 与经 SDK 跑出**两个不同的 ProfileDigest**——
+	// 「同一次实验」在报告里被拆成两组。实测发现的：两条路径的 bundleDigest 逐字
+	// 相同，而 profileDigest 一个是 d96751574f823ad8 一个是 445d6dc940f6960e。
+	//
+	// 若同时给了 `--profile` 文件且文件里带了 extensionBundle，**flag 仍然胜出**：
+	// 把文件里那个清掉，让部署级的值去填（wire.resolve 只在运行级为空时补）。
 	if f.bundleDir != "" {
-		p.ExtensionBundle = absStoreDir(f.bundleDir)
+		p.ExtensionBundle = ""
 	}
 	if err := p.Validate(); err != nil {
 		return harness.SolverProfile{}, err
@@ -242,6 +247,12 @@ func (a *app) run(args []string) error {
 	spec, err := f.spec()
 	if err != nil {
 		return err
+	}
+	if f.bundleDir != "" {
+		// 绝对化在这里做：bundle 路径会经 SandboxSpec.ProfileDir 走到 executor 的
+		// 只读挂载校验，而那里**要求绝对路径**——相对路径会在起容器时才被拒，
+		// 报错点离用户输入太远。
+		a.Deploy.BundleDir = absStoreDir(f.bundleDir)
 	}
 	ports, err := a.ports(f.storeDir(), spec)
 	if err != nil {

@@ -91,6 +91,15 @@ type DeployOptions struct {
 	// FakeChallenges 是离线场景（`--scenario fake`）的题目夹具 JSON 路径。
 	// 为空时装配层用内置演示题（见 internal/wire 的 loadFakeFixture）。
 	FakeChallenges string
+	// BundleDir 是要只读挂进容器的 extension bundle 目录（宿主绝对路径）。
+	//
+	// 为什么它是**部署级**而不是运行意图：它回答的是「这台机器上那份扩展包在哪」，
+	// 换台机器就是另一个路径，而运行意图（跑哪几道题、花多少预算）不变。放进
+	// RunSpec 会让「换个路径跑同一份配置」被报成配置漂移。
+	//
+	// ⚠️ 它**不是**用来表达「用哪份解法配置」的——那是 `--profile`。这里只指向
+	// 那份配置在磁盘上的位置。
+	BundleDir string
 }
 
 // WireFunc 由装配层提供：给定 storeDir、本次运行的 RunSpec 与部署选项，接出这一

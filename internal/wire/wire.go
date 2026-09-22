@@ -522,6 +522,18 @@ func (r *Runner) resolve(spec harness.RunSpec) harness.RunSpec {
 	if spec.Profile.Empty() {
 		spec.Profile = r.profile()
 	}
+	// 扩展包有**两个**入口：部署级的 `Sandbox.ProfileDir`（挂进容器）与运行级的
+	// `Profile.ExtensionBundle`（进 ProfileDigest 与内容摘要）。它们指的是同一件
+	// 东西，但只有后者会驱动 `bundleDigest`——于是「用前者配的 bundle」会被挂进
+	// 容器却算不出内容摘要，公开结果里 `BundleDigest` 是空串（= 未核验），而
+	// `stats --bundle` 对它永远筛不出来。
+	//
+	// 同一个东西两个入口、只有一个有副作用，是这个仓库反复踩的坑。这里把它们
+	// 对齐：装配层用部署级的值补上运行级的值（反向不补——调用方显式写在 profile
+	// 里的那个更具体，不该被部署默认值盖掉）。
+	if spec.Profile.ExtensionBundle == "" {
+		spec.Profile.ExtensionBundle = sb.ProfileDir
+	}
 	return spec
 }
 
