@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	harness "github.com/red-copilot/red-harness"
+	"github.com/red-copilot/red-harness/legacy"
 )
 
 // 本文件负责 events.jsonl：追加、读取、以及「撕裂末行」的处理。
@@ -135,7 +136,7 @@ func lastNewlineOffset(f *os.File, size int64) (int64, error) {
 // 的末行同样按撕裂处理：单写者 + 一次 write 写完一整行的前提下，完整行不可能
 // 损坏，所以「完整且损坏」只可能是外部改动，而那种情况下「丢一轮」仍比
 // 「整次运行不可恢复」便宜。
-func (s *FileStore) LoadEvents(afterSeq int64) ([]harness.DomainEvent, error) {
+func (s *FileStore) LoadEvents(afterSeq int64) ([]legacy.DomainEvent, error) {
 	all, err := scanEvents(s.eventsPath())
 	if err != nil {
 		return nil, err
@@ -143,7 +144,7 @@ func (s *FileStore) LoadEvents(afterSeq int64) ([]harness.DomainEvent, error) {
 	if afterSeq <= 0 {
 		return all, nil
 	}
-	out := make([]harness.DomainEvent, 0, len(all))
+	out := make([]legacy.DomainEvent, 0, len(all))
 	for _, ev := range all {
 		if ev.Seq > afterSeq {
 			out = append(out, ev)
@@ -153,7 +154,7 @@ func (s *FileStore) LoadEvents(afterSeq int64) ([]harness.DomainEvent, error) {
 }
 
 // scanEvents 逐行解析事件日志。文件不存在 ⇒ (nil, nil)（首跑）。
-func scanEvents(path string) ([]harness.DomainEvent, error) {
+func scanEvents(path string) ([]legacy.DomainEvent, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -167,12 +168,12 @@ func scanEvents(path string) ([]harness.DomainEvent, error) {
 	// 先切行、再逐行判断，这样才能知道哪一行是**最后一个物理行**（撕裂判定
 	// 需要它）。逐行流式读时「这一行是不是末行」要等到下一次读取才知道。
 	lines := splitLines(b)
-	out := make([]harness.DomainEvent, 0, len(lines))
+	out := make([]legacy.DomainEvent, 0, len(lines))
 	for i, ln := range lines {
 		if len(bytes.TrimSpace(ln)) == 0 {
 			continue
 		}
-		var ev harness.DomainEvent
+		var ev legacy.DomainEvent
 		if err := json.Unmarshal(ln, &ev); err != nil {
 			if i == len(lines)-1 {
 				// 撕裂的末行：丢掉它，返回已解析部分。

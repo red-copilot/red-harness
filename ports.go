@@ -171,21 +171,6 @@ type RoundRequest struct {
 	Timeout time.Duration
 }
 
-// ── 执行器端口 ──
-
-// Executor 是隔离执行环境。v1 只提供 Docker 实现。
-type Executor interface {
-	// Prepare 按 spec 创建容器与网络，返回句柄。
-	Prepare(ctx context.Context, spec ExecSpec) (ExecHandle, error)
-	// Exec 在句柄指向的容器里跑一条命令。
-	Exec(ctx context.Context, h ExecHandle, cmd []string, opts ExecOptions) (ExecResult, error)
-	// Reclaim 按 run label 精确回收本次运行创建的全部容器与网络。
-	// 正常结束、取消、宿主重启恢复三条路径都要能调它。
-	Reclaim(ctx context.Context, runID RunID) error
-	// Available 检查执行器本身可用（Docker 在不在）。
-	Available(ctx context.Context) error
-}
-
 // ── 规划与渲染 ──
 
 // Planner 决定下一轮做哪个意图，并把轮内事件喂给事实抽取。
@@ -365,40 +350,7 @@ type RejectedLedger interface {
 	Fingerprints() []string
 }
 
-// ── 策略 ──
-
-// RunPolicy 是运行级策略。引擎在每轮开头与每次提交前咨询它。
-type RunPolicy interface {
-	// OnRoundStart 决定本轮是否继续；返回 (false, reason) 即终止。
-	OnRoundStart(ctx context.Context, in PolicyInput) (bool, string)
-	// OnCandidate 决定一个候选是否允许提交。
-	OnCandidate(ctx context.Context, c Candidate) bool
-}
-
 // ── 存储 ──
-
-// GraphBlob 是 DAG 的序列化字节。**它是一个不透明的载荷**：store 只负责路径与
-// 原子性，不理解它的内容。
-//
-// 为什么用 []byte 而不是让 store 认识 dag 的类型：`dag/store.go` 的 schema 1 +
-// migrate 是前向兼容的**唯一**实现，store 再写一份 DAG 序列化就会有第二份实现
-// （v0.2 的 `dag.FlagFingerprint` 就是被这样分叉出来的）。而且 store 一旦导入
-// dag，两者就不能并行开发了——而它们本来就是不同波次的独立子系统。
-type GraphBlob = []byte
-
-// GraphStore 是 DAG 落盘的旁路端口。
-//
-// **为什么 DAG 不走 Store.Append**：领域事件流是「引擎状态」的日志，而 DAG 是
-// 一个独立的、由 Planner 拥有的数据结构——它自己决定何时落盘（v0.2 是每轮末，
-// 由轮循环驱动而不是由事件回调驱动：Observe 每个事件都被调用，在那里落盘等于
-// 每轮写几十次完整图，而且发生在 reader 协程里会阻塞事件消费、进而把 pi 的
-// stdout 管道填满）。
-//
-// 引擎每轮末调它一次。为 nil 表示不落盘（干跑与离线测试）。
-type GraphStore interface {
-	PutGraph(blob GraphBlob) error
-	GetGraph() (GraphBlob, error)
-}
 
 // 图落盘的失败阶段。GraphSaver 的实现须用它们包裹失败原因——原始错误留在
 // err 链上（不参与序列化），公开结果只放这两个枚举值。理由与
@@ -436,26 +388,4 @@ var (
 // 为 nil 表示不落盘（干跑、离线测试，以及不关心图研究的调用方）。
 type GraphSaver interface {
 	SaveGraph(ctx context.Context, runID RunID, ch Challenge) error
-}
-
-// Store 是运行的持久化端口。
-//
-// **Append 的顺序不可颠倒**：先写事件日志，再原子写快照。先快照后事件会在
-// 崩溃时产生「快照指向不存在的事件」，恢复时无法重放。
-type Store interface {
-	Append(ev DomainEvent) error
-	Snapshot(ctx context.Context) (Snapshot, error)
-	LoadEvents(afterSeq int64) ([]DomainEvent, error)
-	// Private 返回私密账本。**公开文件里绝不能出现候选明文**，明文只在这里。
-	Private() EvidenceStore
-	Dir() string
-}
-
-// EvidenceStore 是私密证据账本。目录权限 0700，文件 0600。
-type EvidenceStore interface {
-	PutCandidate(c Candidate) error
-	PutEvidence(ref string, data []byte) error
-	GetEvidence(ref string) ([]byte, error)
-	// Rejected 返回已判错答案的指纹集（明文不出 private/）。
-	Rejected() ([]string, error)
 }

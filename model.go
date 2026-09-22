@@ -374,28 +374,7 @@ type PlannerInput struct {
 	Round int
 }
 
-// PolicyInput 是 RunPolicy.OnRoundStart 的入参。
-type PolicyInput struct {
-	Challenge  Challenge
-	Outcome    OutcomeView
-	BudgetUsed Budget
-	Round      int
-}
-
-// ── 运行摘要与体检 ──
-
-// RunSummary 是 List 的返回项：足以在 CLI 里列出一次运行，且**不含任何明文**。
-type RunSummary struct {
-	RunID     RunID     `json:"runId"`
-	State     RunState  `json:"state"`
-	Scenario  string    `json:"scenario"`
-	Targets   []string  `json:"targets,omitempty"`
-	StartedAt time.Time `json:"startedAt"`
-	EndedAt   time.Time `json:"endedAt,omitempty"`
-	Reason    string    `json:"reason,omitempty"`
-	Objective Objective `json:"objective"`
-	Score     int       `json:"score"`
-}
+// ── 体检 ──
 
 // DoctorReport 是 Engine.Doctor 的结果。任何 Fatal 检查失败 ⇒ 退出码非 0。
 type DoctorReport struct {

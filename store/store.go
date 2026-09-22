@@ -3,7 +3,7 @@
 //
 // ── 它是什么 ──
 //
-// 一个 `harness.Store` + `harness.GraphStore` 的文件实现，零第三方依赖。
+// 一个 `legacy.Store` + `legacy.GraphStore` 的文件实现，零第三方依赖。
 // 目录布局见设计文档 §6：
 //
 //	<StoreDir>/runs/<runID>/
@@ -48,6 +48,7 @@ import (
 	"strings"
 
 	harness "github.com/red-copilot/red-harness"
+	"github.com/red-copilot/red-harness/legacy"
 )
 
 // 目录与文件名常量。集中在这里是为了让「布局」这件事只有一处定义——
@@ -86,8 +87,8 @@ const (
 //   - 一个 Store 实例要能服务多个 run（`Engine.List` 需要扫全部 run 目录），
 //     所以 run 是**每次取用**的视图而不是构造参数。
 //
-// 取某个 run 的视图用 `ForRun(id)`；它返回的 `*FileStore` 满足 `harness.Store`
-// 与 `harness.GraphStore` 两个契约接口（编译期断言见文件末尾）。
+// 取某个 run 的视图用 `ForRun(id)`；它返回的 `*FileStore` 满足 `legacy.Store`
+// 与 `legacy.GraphStore` 两个契约接口（编译期断言见文件末尾）。
 type FileStore struct {
 	root string
 	// runID 为空时这是「根句柄」，只能用来列 run 或取 run 视图；非空时
@@ -261,7 +262,7 @@ func (s *FileStore) PutReport(name string, data []byte) error {
 	return nil
 }
 
-// ── harness.Store ──
+// ── legacy.Store ──
 
 // Append 追加一条领域事件，然后原子写快照。
 //
@@ -274,7 +275,7 @@ func (s *FileStore) PutReport(name string, data []byte) error {
 // 快照写失败时**事件已经落盘**，函数返回 KindPersistence 错误：调用方（引擎）
 // 必须知道这次进展没被记进快照。这不矛盾——重放时快照落后于日志是安全的
 // （恢复以 min(快照, 日志) 为基线重放），反过来才不安全。
-func (s *FileStore) Append(ev harness.DomainEvent) error {
+func (s *FileStore) Append(ev legacy.DomainEvent) error {
 	if s.runID == "" {
 		return &harness.Error{
 			Kind: harness.KindConfig, Op: "store.append",
@@ -307,7 +308,7 @@ func (s *FileStore) Append(ev harness.DomainEvent) error {
 }
 
 // checkSeq 校验序号单调性，并回填 lastSeq 缓存。
-func (s *FileStore) checkSeq(ev harness.DomainEvent) error {
+func (s *FileStore) checkSeq(ev legacy.DomainEvent) error {
 	last, err := s.LastSeq()
 	if err != nil {
 		return err
@@ -360,7 +361,7 @@ func (s *FileStore) LastSeq() (int64, error) {
 // 下必须原子完成的事：把 `lastAppliedSeq` 推到刚写入的事件上。若快照还不
 // 存在（引擎还没写过），就按事件的 RunID 造一个最小快照——恢复路径要求
 // run.json 与 events.jsonl 同时存在，缺一个都无法判定「这是首跑还是损坏」。
-func (s *FileStore) writeSnapshotFromEvent(ev harness.DomainEvent) error {
+func (s *FileStore) writeSnapshotFromEvent(ev legacy.DomainEvent) error {
 	if s.snapshotHook != nil {
 		if err := s.snapshotHook(); err != nil {
 			return &harness.Error{
@@ -374,8 +375,8 @@ func (s *FileStore) writeSnapshotFromEvent(ev harness.DomainEvent) error {
 		if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		snap = harness.Snapshot{
-			SchemaVersion: harness.SchemaVersion,
+		snap = legacy.Snapshot{
+			SchemaVersion: legacy.SchemaVersion,
 			RunID:         ev.RunID,
 			State:         harness.RunCreated,
 		}
@@ -389,7 +390,7 @@ func (s *FileStore) writeSnapshotFromEvent(ev harness.DomainEvent) error {
 
 // PutSnapshot 原子写快照（run.json）。
 //
-// 它在 `harness.Store` 之外——引擎每轮末需要写完整的快照（State/Objective/
+// 它在 `legacy.Store` 之外——引擎每轮末需要写完整的快照（State/Objective/
 // BudgetUsed/Public），而 `Append` 只带得动 lastAppliedSeq。恢复路径只依赖
 // `Snapshot()`，所以这个额外方法不扩大契约的语义面。
 //
@@ -397,7 +398,7 @@ func (s *FileStore) writeSnapshotFromEvent(ev harness.DomainEvent) error {
 // 就是这样），恢复以快照为基线重放即可。反过来（快照超过日志末尾）由
 // `LastSeq` 取较大值来兜底，不需要在这里拒绝——拒绝会让「崩溃后无法续跑」
 // 变成「崩溃后连修都不能修」。
-func (s *FileStore) PutSnapshot(snap harness.Snapshot) error {
+func (s *FileStore) PutSnapshot(snap legacy.Snapshot) error {
 	if s.runID == "" {
 		return &harness.Error{
 			Kind: harness.KindConfig, Op: "store.put_snapshot",
@@ -407,7 +408,7 @@ func (s *FileStore) PutSnapshot(snap harness.Snapshot) error {
 	if snap.SchemaVersion == 0 {
 		// 零值 schema 会让恢复路径无法判断兼容性（它按 SchemaVersion 判），
 		// 静默补上当前版本号是安全的：调用方显式设过的话就不会是 0。
-		snap.SchemaVersion = harness.SchemaVersion
+		snap.SchemaVersion = legacy.SchemaVersion
 	}
 	b, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -430,9 +431,9 @@ func (s *FileStore) PutSnapshot(snap harness.Snapshot) error {
 // 为什么「不存在」与「损坏」必须是两个可区分的错误：调用方靠
 // `errors.Is(err, os.ErrNotExist)` 判定「这是首跑，可以新建」，而把一次损坏
 // 伪装成「不存在」会让调用方把整个 run 从头再跑一遍（重复向平台提交）。
-func (s *FileStore) Snapshot(_ context.Context) (harness.Snapshot, error) {
+func (s *FileStore) Snapshot(_ context.Context) (legacy.Snapshot, error) {
 	if s.runID == "" {
-		return harness.Snapshot{}, &harness.Error{
+		return legacy.Snapshot{}, &harness.Error{
 			Kind: harness.KindConfig, Op: "store.snapshot",
 			Msg: "根句柄不能读快照：先用 ForRun 取运行视图",
 		}
@@ -441,14 +442,14 @@ func (s *FileStore) Snapshot(_ context.Context) (harness.Snapshot, error) {
 }
 
 // readSnapshot 读并解析 run.json（不做 runID 校验，Append 内部也要用）。
-func (s *FileStore) readSnapshot() (harness.Snapshot, error) {
+func (s *FileStore) readSnapshot() (legacy.Snapshot, error) {
 	b, err := os.ReadFile(s.snapshotPath())
 	if err != nil {
-		return harness.Snapshot{}, fmt.Errorf("读快照 %s 失败: %w", s.snapshotPath(), err)
+		return legacy.Snapshot{}, fmt.Errorf("读快照 %s 失败: %w", s.snapshotPath(), err)
 	}
-	var snap harness.Snapshot
+	var snap legacy.Snapshot
 	if err := json.Unmarshal(b, &snap); err != nil {
-		return harness.Snapshot{}, &harness.Error{
+		return legacy.Snapshot{}, &harness.Error{
 			Kind: harness.KindPersistence, Op: "store.snapshot", RunID: s.runID,
 			Msg: "快照解析失败（run.json 被截断或被人工改坏）", Err: err,
 		}
@@ -457,11 +458,11 @@ func (s *FileStore) readSnapshot() (harness.Snapshot, error) {
 }
 
 // Private 返回私密账本。明文只在这里（设计文档 §3.3）。
-func (s *FileStore) Private() harness.EvidenceStore {
+func (s *FileStore) Private() legacy.EvidenceStore {
 	return &evidenceStore{runDir: s.dir}
 }
 
-// ── harness.GraphStore ──
+// ── legacy.GraphStore ──
 
 // PutGraph 原子写 DAG 载荷（graph.json）。
 //
@@ -469,7 +470,7 @@ func (s *FileStore) Private() harness.EvidenceStore {
 // 兼容的唯一实现，store 再写一份 DAG 序列化就会有第二份实现（v0.2 的
 // `dag.FlagFingerprint` 就是这样被分叉出来的）。而且 store 一旦导入 dag，
 // 两个包就不能并行开发了——它们本来就是不同波次的独立子系统。
-func (s *FileStore) PutGraph(blob harness.GraphBlob) error {
+func (s *FileStore) PutGraph(blob legacy.GraphBlob) error {
 	if s.runID == "" {
 		return &harness.Error{
 			Kind: harness.KindConfig, Op: "store.put_graph",
@@ -488,7 +489,7 @@ func (s *FileStore) PutGraph(blob harness.GraphBlob) error {
 // GetGraph 读回 DAG 载荷。文件不存在 ⇒ 包装了 os.ErrNotExist 的错误，调用方
 // 据此区分「首跑」（用题目新建一张图）与「损坏」（必须让用户知道，不能悄悄
 // 新建空图——那等于把已积累的事实全部丢掉）。
-func (s *FileStore) GetGraph() (harness.GraphBlob, error) {
+func (s *FileStore) GetGraph() (legacy.GraphBlob, error) {
 	if s.runID == "" {
 		return nil, &harness.Error{
 			Kind: harness.KindConfig, Op: "store.get_graph",
@@ -560,6 +561,6 @@ func validRunID(id harness.RunID) error {
 
 // 编译期断言：run 视图必须同时满足两个契约接口。
 var (
-	_ harness.Store      = (*FileStore)(nil)
-	_ harness.GraphStore = (*FileStore)(nil)
+	_ legacy.Store      = (*FileStore)(nil)
+	_ legacy.GraphStore = (*FileStore)(nil)
 )

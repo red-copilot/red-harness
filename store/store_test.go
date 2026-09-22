@@ -11,6 +11,7 @@ import (
 	"time"
 
 	harness "github.com/red-copilot/red-harness"
+	"github.com/red-copilot/red-harness/legacy"
 	"github.com/red-copilot/red-harness/store"
 )
 
@@ -35,24 +36,24 @@ func newRun(t *testing.T, s *store.FileStore, id harness.RunID, seq int64) *stor
 	if err != nil {
 		t.Fatalf("ForRun: %v", err)
 	}
-	if err := r.Append(ev(seq, harness.EvRunCreated, id)); err != nil {
+	if err := r.Append(ev(seq, legacy.EvRunCreated, id)); err != nil {
 		t.Fatalf("Append 首事件: %v", err)
 	}
 	return r
 }
 
-func ev(seq int64, typ harness.DomainEventType, id harness.RunID) harness.DomainEvent {
-	return harness.DomainEvent{
+func ev(seq int64, typ legacy.DomainEventType, id harness.RunID) legacy.DomainEvent {
+	return legacy.DomainEvent{
 		Seq: seq, At: time.Unix(1700000000+seq, 0).UTC(),
 		Type: typ, RunID: id,
 		Payload: json.RawMessage(`{"note":"no plaintext here"}`),
 	}
 }
 
-func snap(id harness.RunID, lastSeq int64) harness.Snapshot {
+func snap(id harness.RunID, lastSeq int64) legacy.Snapshot {
 	spec := harness.RunSpec{Scenario: "fake", Targets: []string{"demo-1"}}
-	return harness.Snapshot{
-		SchemaVersion:  harness.SchemaVersion,
+	return legacy.Snapshot{
+		SchemaVersion:  legacy.SchemaVersion,
 		RunID:          id,
 		State:          harness.RunRunning,
 		Spec:           spec,
@@ -120,7 +121,7 @@ func TestSeqMustBeMonotonic(t *testing.T) {
 	r := newRun(t, s, "run-seq", 1)
 
 	for _, bad := range []int64{1, 3, 0, -1, 99} {
-		err := r.Append(ev(bad, harness.EvRoundStarted, "run-seq"))
+		err := r.Append(ev(bad, legacy.EvRoundStarted, "run-seq"))
 		if err == nil {
 			t.Fatalf("Seq=%d 应被拒", bad)
 		}
@@ -131,12 +132,12 @@ func TestSeqMustBeMonotonic(t *testing.T) {
 			t.Fatalf("被拒的事件不得落盘，现有 %d 条", got)
 		}
 	}
-	if err := r.Append(ev(2, harness.EvRoundStarted, "run-seq")); err != nil {
+	if err := r.Append(ev(2, legacy.EvRoundStarted, "run-seq")); err != nil {
 		t.Fatalf("Seq=2 应被接受: %v", err)
 	}
 }
 
-func mustLoad(t *testing.T, r *store.FileStore, after int64) []harness.DomainEvent {
+func mustLoad(t *testing.T, r *store.FileStore, after int64) []legacy.DomainEvent {
 	t.Helper()
 	got, err := r.LoadEvents(after)
 	if err != nil {
@@ -156,7 +157,7 @@ func TestAppendOrderEventBeforeSnapshot(t *testing.T) {
 	boom := errors.New("注入的快照写失败")
 	r.SetSnapshotHook(func() error { return boom })
 
-	err := r.Append(ev(2, harness.EvRoundStarted, "run-order"))
+	err := r.Append(ev(2, legacy.EvRoundStarted, "run-order"))
 	if err == nil {
 		t.Fatal("快照写失败必须透出")
 	}
@@ -187,7 +188,7 @@ func TestAppendThenSnapshotConsistent(t *testing.T) {
 	s := newStore(t)
 	r := newRun(t, s, "run-consist", 1)
 	for seq := int64(2); seq <= 5; seq++ {
-		if err := r.Append(ev(seq, harness.EvRoundStarted, "run-consist")); err != nil {
+		if err := r.Append(ev(seq, legacy.EvRoundStarted, "run-consist")); err != nil {
 			t.Fatalf("Append(%d): %v", seq, err)
 		}
 		snap, err := r.Snapshot(t.Context())
@@ -210,7 +211,7 @@ func TestLoadEventsAfterSeq(t *testing.T) {
 	s := newStore(t)
 	r := newRun(t, s, "run-after", 1)
 	for seq := int64(2); seq <= 4; seq++ {
-		if err := r.Append(ev(seq, harness.EvRoundStarted, "run-after")); err != nil {
+		if err := r.Append(ev(seq, legacy.EvRoundStarted, "run-after")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -226,7 +227,7 @@ func TestLoadEventsAfterSeq(t *testing.T) {
 	}
 }
 
-func seqs(evs []harness.DomainEvent) []int64 {
+func seqs(evs []legacy.DomainEvent) []int64 {
 	out := make([]int64, 0, len(evs))
 	for _, e := range evs {
 		out = append(out, e.Seq)
@@ -239,7 +240,7 @@ func seqs(evs []harness.DomainEvent) []int64 {
 func TestLoadEventsSkipsTornLastLine(t *testing.T) {
 	s := newStore(t)
 	r := newRun(t, s, "run-torn", 1)
-	if err := r.Append(ev(2, harness.EvRoundStarted, "run-torn")); err != nil {
+	if err := r.Append(ev(2, legacy.EvRoundStarted, "run-torn")); err != nil {
 		t.Fatal(err)
 	}
 	// 手工追加半行（模拟「写事件日志写了一半就被 kill」）。
@@ -257,7 +258,7 @@ func TestLoadEventsSkipsTornLastLine(t *testing.T) {
 		t.Fatalf("应跳过残缺末行返回 [1 2]，实际 %v", seqs(got))
 	}
 	// 从最后一个完整事件继续：Seq=3 必须仍被接受（lastSeq 取自完整行）。
-	if err := r.Append(ev(3, harness.EvRoundStarted, "run-torn")); err != nil {
+	if err := r.Append(ev(3, legacy.EvRoundStarted, "run-torn")); err != nil {
 		t.Fatalf("残缺末行之后的 Seq=3 应被接受: %v", err)
 	}
 }
@@ -270,7 +271,7 @@ func TestLoadEventsRejectsCorruptMiddleLine(t *testing.T) {
 	s := newStore(t)
 	r := newRun(t, s, "run-corrupt", 1)
 	for seq := int64(2); seq <= 4; seq++ {
-		if err := r.Append(ev(seq, harness.EvRoundStarted, "run-corrupt")); err != nil {
+		if err := r.Append(ev(seq, legacy.EvRoundStarted, "run-corrupt")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -375,7 +376,7 @@ func TestGraphRoundTrip(t *testing.T) {
 func TestPrivateNeverLeaksPlaintext(t *testing.T) {
 	s := newStore(t)
 	r := newRun(t, s, "run-leak", 1)
-	if err := r.Append(ev(2, harness.EvCandidateSeen, "run-leak")); err != nil {
+	if err := r.Append(ev(2, legacy.EvCandidateSeen, "run-leak")); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.PutGraph([]byte(`{"schema":1,"nodes":[{"content":"无明文"}]}`)); err != nil {
@@ -558,14 +559,14 @@ func TestEvidenceRoundTrip(t *testing.T) {
 func TestNoTmpLeftBehind(t *testing.T) {
 	s := newStore(t)
 	r := newRun(t, s, "run-tmp", 1)
-	if err := r.Append(ev(2, harness.EvRoundStarted, "run-tmp")); err != nil {
+	if err := r.Append(ev(2, legacy.EvRoundStarted, "run-tmp")); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.PutGraph([]byte(`{"schema":1}`)); err != nil {
 		t.Fatal(err)
 	}
 	r.SetSnapshotHook(func() error { return errors.New("注入失败") })
-	_ = r.Append(ev(3, harness.EvRoundStarted, "run-tmp"))
+	_ = r.Append(ev(3, legacy.EvRoundStarted, "run-tmp"))
 
 	err := filepath.WalkDir(s.Dir(), func(p string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -621,11 +622,11 @@ func TestSingleWriterAssumption(t *testing.T) {
 		t.Fatalf("b 的基线 = %d, %v，期望 1", last, err)
 	}
 	// a 先写。
-	if err := a.Append(ev(2, harness.EvRoundStarted, "run-sw")); err != nil {
+	if err := a.Append(ev(2, legacy.EvRoundStarted, "run-sw")); err != nil {
 		t.Fatal(err)
 	}
 	// b 用同一个序号写：必须被拒（而不是写出交错日志）。
-	err = b.Append(ev(2, harness.EvRoundStarted, "run-sw"))
+	err = b.Append(ev(2, legacy.EvRoundStarted, "run-sw"))
 	if !harness.IsKind(err, harness.KindPersistence) {
 		t.Fatalf("过期写者必须被拒，实际 %v", err)
 	}
@@ -676,7 +677,7 @@ func TestListRuns(t *testing.T) {
 // 上下文，任何读写都必须明确报错，而不是落到存储根目录上。
 func TestRootHandleRejectsRunOps(t *testing.T) {
 	s := newStore(t)
-	if err := s.Append(ev(1, harness.EvRunCreated, "x")); !harness.IsKind(err, harness.KindConfig) {
+	if err := s.Append(ev(1, legacy.EvRunCreated, "x")); !harness.IsKind(err, harness.KindConfig) {
 		t.Errorf("根句柄 Append 应 KindConfig，实际 %v", err)
 	}
 	if _, err := s.Snapshot(t.Context()); !harness.IsKind(err, harness.KindConfig) {
@@ -694,8 +695,8 @@ func TestRootHandleRejectsRunOps(t *testing.T) {
 func TestDirAndPrivate(t *testing.T) {
 	s := newStore(t)
 	r := newRun(t, s, "run-iface", 1)
-	var _ harness.Store = r
-	var _ harness.GraphStore = r
+	var _ legacy.Store = r
+	var _ legacy.GraphStore = r
 	if !strings.HasSuffix(r.Dir(), filepath.Join("runs", "run-iface")) {
 		t.Errorf("Dir() = %s，期望以 runs/run-iface 结尾", r.Dir())
 	}
@@ -836,12 +837,12 @@ func TestCrashThenResumeIsRecoverable(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Append(ev(1, harness.EvRunCreated, "run-crash")); err != nil {
+	if err := r.Append(ev(1, legacy.EvRunCreated, "run-crash")); err != nil {
 		t.Fatal(err)
 	}
 	// 第 2 条事件写完之后快照写失败 ⇒ 崩溃点。
 	r.SetSnapshotHook(func() error { return errors.New("崩溃") })
-	if err := r.Append(ev(2, harness.EvRoundStarted, "run-crash")); err == nil {
+	if err := r.Append(ev(2, legacy.EvRoundStarted, "run-crash")); err == nil {
 		t.Fatal("注入的崩溃必须透出")
 	}
 	// 手工制造两处半行（进程被杀时最常见的形态）。
@@ -870,7 +871,7 @@ func TestCrashThenResumeIsRecoverable(t *testing.T) {
 		t.Fatalf("重放 = %v，期望 [2]", seqs(replay))
 	}
 	// 下一条事件的序号必须是 3（半行的 3 不算，日志末尾完整的是 2）。
-	if err := r2.Append(ev(3, harness.EvRoundStarted, "run-crash")); err != nil {
+	if err := r2.Append(ev(3, legacy.EvRoundStarted, "run-crash")); err != nil {
 		t.Fatalf("崩溃后必须能继续追加: %v", err)
 	}
 	// 已确认的候选不得被当成「未提交」（否则恢复后会重复提交）。

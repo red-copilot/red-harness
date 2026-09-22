@@ -10,6 +10,7 @@ import (
 
 	harness "github.com/red-copilot/red-harness"
 	"github.com/red-copilot/red-harness/answer"
+	"github.com/red-copilot/red-harness/legacy"
 )
 
 // 本文件是**候选明文账本**。它是整个仓库里唯一允许出现候选明文的地方
@@ -45,7 +46,7 @@ type ledgerRecord struct {
 	SubmitError string `json:"submitError,omitempty"`
 }
 
-// evidenceStore 实现 harness.EvidenceStore。
+// evidenceStore 实现 legacy.EvidenceStore。
 type evidenceStore struct {
 	runDir string
 }
@@ -321,4 +322,4 @@ func ensureLedger(runDir string) error {
 	return nil
 }
 
-var _ harness.EvidenceStore = (*evidenceStore)(nil)
+var _ legacy.EvidenceStore = (*evidenceStore)(nil)

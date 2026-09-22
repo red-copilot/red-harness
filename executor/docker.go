@@ -12,9 +12,10 @@ import (
 	"time"
 
 	harness "github.com/red-copilot/red-harness"
+	"github.com/red-copilot/red-harness/legacy"
 )
 
-// Docker 是 harness.Executor 的 Docker 实现。
+// Docker 是 legacy.Executor 与 harness.Sandbox 的 Docker 实现。
 //
 // 它的职责边界刻意划得很窄：**只管容器与网络的生命周期**。它不知道 pi、不知道
 // 题目、不知道候选答案——那些是 agent 与场景层的事。这样做的理由是可测性：
@@ -26,11 +27,12 @@ type Docker struct {
 	proxies map[harness.RunID]*providerProxy
 }
 
-// 编译期断言：Docker 必须满足 harness.Executor。
+// 编译期断言：Docker 必须同时满足 legacy.Executor（v0.3 端口）与 harness.Sandbox
+// （v0.4 生产端口）——同一份实现服务两代端口，这一行是那件事的显式记录。
 //
 // 为什么写在这里而不是留给使用方发现：契约漂移（有人在 Executor 接口上加了
 // 方法）会在**装配层**才炸，而那里通常离改动最远。断言把它拉回改动现场。
-var _ harness.Executor = (*Docker)(nil)
+var _ legacy.Executor = (*Docker)(nil)
 var _ harness.Sandbox = (*Docker)(nil)
 
 // NewDocker 构造 Docker 执行器。

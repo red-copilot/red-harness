@@ -1,8 +1,10 @@
-package harness
+package legacy
 
 import (
 	"context"
 	"time"
+
+	harness "github.com/red-copilot/red-harness"
 )
 
 // SchemaVersion 是快照与事件日志的 schema 版本。
@@ -16,22 +18,22 @@ const SchemaVersion = 1
 // ⚠️ **Snapshot 没有 Flags 字段。** 候选明文只在 private/ 账本与 OutcomeView
 // （返回值）里。快照会被写进 run.json、被 CLI 打印、被看板读——那些都是公开面。
 type Snapshot struct {
-	SchemaVersion int      `json:"schemaVersion"`
-	RunID         RunID    `json:"runId"`
-	State         RunState `json:"state"`
-	Spec          RunSpec  `json:"spec"`
+	SchemaVersion int              `json:"schemaVersion"`
+	RunID         harness.RunID    `json:"runId"`
+	State         harness.RunState `json:"state"`
+	Spec          harness.RunSpec  `json:"spec"`
 	// SpecDigest 是 Spec.Digest() 的结果。恢复时与当前 RunSpec 比对，
 	// 不一致 ⇒ fail closed 并指出漂移字段。
 	SpecDigest string `json:"specDigest"`
 	// LastAppliedSeq 是已经应用到快照上的最后一个事件序号。恢复以它为基线重放。
-	LastAppliedSeq int64         `json:"lastAppliedSeq"`
-	Objective      Objective     `json:"objective"`
-	BudgetUsed     Budget        `json:"budgetUsed"`
-	StartedAt      time.Time     `json:"startedAt"`
-	EndedAt        time.Time     `json:"endedAt,omitempty"`
-	Reason         string        `json:"reason,omitempty"`
-	Err            string        `json:"err,omitempty"`
-	Public         PublicSummary `json:"public"`
+	LastAppliedSeq int64             `json:"lastAppliedSeq"`
+	Objective      harness.Objective `json:"objective"`
+	BudgetUsed     harness.Budget    `json:"budgetUsed"`
+	StartedAt      time.Time         `json:"startedAt"`
+	EndedAt        time.Time         `json:"endedAt,omitempty"`
+	Reason         string            `json:"reason,omitempty"`
+	Err            string            `json:"err,omitempty"`
+	Public         PublicSummary     `json:"public"`
 }
 
 // PublicSummary 是可以公开展示的计数。**只有计数与指纹，没有任何明文。**
@@ -58,7 +60,7 @@ type PublicSummary struct {
 //   - Pause/Resume/Cancel 是幂等的：对已处于目标状态的运行调用它们不报错。
 //   - Wait 阻塞到运行终局，返回最终快照。
 type RunHandle interface {
-	ID() RunID
+	ID() harness.RunID
 	Snapshot(ctx context.Context) (Snapshot, error)
 	Events(ctx context.Context, afterSeq int64) (<-chan DomainEvent, error)
 	Pause(ctx context.Context) error

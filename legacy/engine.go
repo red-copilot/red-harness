@@ -1,10 +1,12 @@
-package harness
+package legacy
 
 import (
 	"context"
 	"errors"
 	"strings"
 	"time"
+
+	harness "github.com/red-copilot/red-harness"
 )
 
 // Engine 是 v0.3 的顶层入口。它取代了 v0.2 的 `Session.Run`。
@@ -14,10 +16,10 @@ import (
 //   - 运行可以被暂停、恢复、取消；恢复以事件日志重放为基线。
 //   - 一次 run 可以跑多道题（`RunSpec.Targets`），而不是一次一道。
 type Engine interface {
-	Start(ctx context.Context, spec RunSpec) (RunHandle, error)
-	Resume(ctx context.Context, id RunID) (RunHandle, error)
+	Start(ctx context.Context, spec harness.RunSpec) (RunHandle, error)
+	Resume(ctx context.Context, id harness.RunID) (RunHandle, error)
 	List(ctx context.Context) ([]RunSummary, error)
-	Doctor(ctx context.Context) (DoctorReport, error)
+	Doctor(ctx context.Context) (harness.DoctorReport, error)
 }
 
 // Options 是引擎的装配参数。
@@ -29,12 +31,12 @@ type Engine interface {
 // 是**静默退化**（DAG 零事实、所有包自测全绿）。构造即校验把这类故障提前到
 // 启动的第一秒。
 type Options struct {
-	Platform Platform
+	Platform harness.Platform
 	Executor Executor
-	Agents   AgentFactory
+	Agents   harness.AgentFactory
 	Store    Store
 	// Scenarios 以名为键。RunSpec.Scenario 必须命中其中一个。
-	Scenarios map[string]Scenario
+	Scenarios map[string]harness.Scenario
 
 	// Graph 是 DAG 落盘的旁路端口（见 GraphStore 的注释）。为 nil 表示不落盘。
 	// 生产实现在装配层接 `dag.Graph.Save`/`Load`——engine 不导入 dag。
@@ -49,7 +51,7 @@ type Options struct {
 	//
 	// ⚠️ 这是**工厂**而不是实例：一道 run 可能跑多道题，而 gate 是每题独立的
 	// （v0.2 里 `gate.NewGate(desc)` 就是每题新建）。
-	Gate func(ch Challenge) CandidateGate
+	Gate func(ch harness.Challenge) harness.CandidateGate
 
 	// Planner / Renderer 为 nil 时引擎按每道题构造 dag 的实例。
 	//
@@ -57,14 +59,14 @@ type Options struct {
 	// 就与「每个子包独立并行开发」的编排直接冲突（engine 的开发者会被
 	// dag/gate 的编译状态卡住）。默认实现放在装配层 `internal/wire/wire.go`。
 	// engine/ 自己只依赖根包契约 + store/，测试用注入的 fake。
-	Planner  func(ch Challenge) Planner
-	Renderer func(ch Challenge) Renderer
+	Planner  func(ch harness.Challenge) harness.Planner
+	Renderer func(ch harness.Challenge) harness.Renderer
 
 	// OnEvent 是流式事件回调（transcript / 日志）。在 runLoop goroutine 上调用。
 	//
 	// **不要在这里做 IO，也不要在这里改状态**——它是唯一的消费者路径上的一环，
 	// 慢回调会反压整个引擎。
-	OnEvent func(Event)
+	OnEvent func(harness.Event)
 
 	// Now 可注入时钟（测试用）。nil 时用 time.Now。
 	Now func() time.Time
@@ -78,8 +80,8 @@ type Options struct {
 // 全绿），所以这条错误必须在启动的第一秒就点名缺哪个端口。
 func New(opts Options) (Engine, error) {
 	if missing := opts.MissingPorts(); len(missing) > 0 {
-		return nil, &Error{
-			Kind: KindConfig,
+		return nil, &harness.Error{
+			Kind: harness.KindConfig,
 			Op:   "engine.new",
 			Msg:  "缺少必需端口: " + strings.Join(missing, ", "),
 		}
@@ -87,25 +89,31 @@ func New(opts Options) (Engine, error) {
 	return newEngine(opts)
 }
 
-// newEngine 由 engine 包通过这个变量注入。
+// newEngine 是引擎实现的注入点，默认是「未注册」。
 //
-// 为什么用注入而不是让根包直接实现：根包必须是**纯契约**（类型 + 接口，零实现）。
-// 一旦根包开始实现引擎，它就又变回 v0.2 那个「契约与实现混在一起」的包，
-// 而并行化的前提正是拆开它们。
+// why 注入而不是就地实现：这个包是**契约叶子**（只 import 标准库与根包）。
+// 一旦它开始实现引擎，它就变成了一个实现包，而「实现包之间互不 import」那条
+// 规矩会让依赖它的人被它的编译状态卡住。
 //
-// 为什么用变量而不是让根包 import engine：那会成环（engine 依赖根包契约）。
+// ⚠️ **v0.5 的现状：这个变量从来没有被填充过。** `engine/` 目录不存在，
+// `RegisterEngine` 全仓零调用方（含测试），所以下面那条错误消息是**唯一可达**的
+// 结果——v0.3 的引擎注册表一直是一块空壳。保留它是因为删掉是公开 API 的破坏性
+// 变更，而不是因为它在工作。
 var newEngine = func(opts Options) (Engine, error) {
-	return nil, &Error{
-		Kind: KindConfig,
+	return nil, &harness.Error{
+		Kind: harness.KindConfig,
 		Op:   "engine.new",
-		Msg:  "引擎实现未注册（引擎实现由 engine 包在 init 时通过 harness.RegisterEngine 注册）",
+		Msg:  "引擎实现未注册（引擎实现由 engine 包在 init 时通过 legacy.RegisterEngine 注册）",
 	}
 }
 
-// RegisterEngine 由 engine 包在 init 中调用，把自己的构造函数交给根包。
+// RegisterEngine 让引擎实现在 init 中把自己的构造函数注册进来。
 //
-// 这不是「可选接线点」——CLI 与 example 都会走 harness.New。漏注册的表现是
-// 启动第一秒就拿到一个明确的 KindConfig 错误，而不是静默退化。
+// ⚠️ 它**不是**「可选接线点」，但也**不是**生产路径：v0.3 的注释写着「CLI 与
+// example 都会走 harness.New」，那句话早已失效——CLI 走的是
+// `internal/cli` → `internal/wire` → `harness.NewHarness`（v0.4 的同步门面，
+// 完全不经过本注册表）。漏注册的表现仍然是启动第一秒拿到一个明确的 KindConfig
+// 错误，但那正是今天**每一次**调用的结果。
 func RegisterEngine(fn func(Options) (Engine, error)) {
 	if fn != nil {
 		newEngine = fn
@@ -142,18 +150,18 @@ func (o Options) MissingPorts() []string {
 // 子命令返回它，T14 把它们逐个换成真实现时，测试会从「断言返回未实现」
 // 变成「断言真的跑通了」。
 func ErrNotImplemented(what string) error {
-	return &Error{Kind: KindConfig, Op: what, Msg: what + " 尚未实现"}
+	return &harness.Error{Kind: harness.KindConfig, Op: what, Msg: what + " 尚未实现"}
 }
 
 // ErrNotFound 报告某个 RunID 不存在。
-func ErrNotFound(id RunID) error {
-	return &Error{Kind: KindConfig, Op: "engine.resume", RunID: id, Msg: "运行不存在"}
+func ErrNotFound(id harness.RunID) error {
+	return &harness.Error{Kind: harness.KindConfig, Op: "engine.resume", RunID: id, Msg: "运行不存在"}
 }
 
 // IsTerminal 报告 err 是否表示「对终态 run 调了 Resume」。
 func IsTerminal(err error) bool {
-	var e *Error
-	return errors.As(err, &e) && e.Kind == KindConfig && e.Op == "engine.resume" && e.Msg == errTerminalMsg
+	var e *harness.Error
+	return errors.As(err, &e) && e.Kind == harness.KindConfig && e.Op == "engine.resume" && e.Msg == errTerminalMsg
 }
 
 const errTerminalMsg = "运行已处于终态，拒绝恢复"
