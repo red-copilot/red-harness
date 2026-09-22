@@ -93,18 +93,32 @@ func NewResultStore(dir string) (*ResultFileStore, error) {
 // 它是**存储层自己的**结构，不是根包契约：加字段只影响新写的文件，读旧文件
 // 由 encoding/json 的零值语义兜住（缺字段 = 0 / 空）。
 type publicResult struct {
-	RunID         string            `json:"runId"`
-	Scenario      string            `json:"scenario"`
-	ProfileDigest string            `json:"profileDigest,omitempty"`
-	BundleDigest  string            `json:"bundleDigest,omitempty"`
-	Model         string            `json:"model,omitempty"`
-	StartedAt     time.Time         `json:"startedAt"`
-	EndedAt       time.Time         `json:"endedAt"`
-	Completed     bool              `json:"completed"`
-	State         string            `json:"state,omitempty"`
-	Reason        string            `json:"reason,omitempty"`
-	Err           string            `json:"errorClass,omitempty"`
-	Challenges    []publicChallenge `json:"challenges,omitempty"`
+	RunID         string    `json:"runId"`
+	Scenario      string    `json:"scenario"`
+	ProfileDigest string    `json:"profileDigest,omitempty"`
+	BundleDigest  string    `json:"bundleDigest,omitempty"`
+	Model         string    `json:"model,omitempty"`
+	StartedAt     time.Time `json:"startedAt"`
+	EndedAt       time.Time `json:"endedAt"`
+	Completed     bool      `json:"completed"`
+	State         string    `json:"state,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	Err           string    `json:"errorClass,omitempty"`
+	// ReclaimedStale / PendingStale 是启动前那次遗留资源回收的两个计数。
+	//
+	// 它们是 **run 级**，不放进 publicChallenge：回收发生在任何一道题开始之前，
+	// 扫的是宿主全局的 Docker label，与题目无关。放进题级会让同一份报告读起来像
+	// 「这道题回收了几个」，而那个数字根本不存在。
+	//
+	// ⚠️ 只放计数。`Pending` 的明细（哪个 runID、哪种资源、为什么没删）是本机资源
+	// 拓扑，进这份文件就等于把它拷进会被转发、归档、贴工单的结果里。
+	//
+	// 为什么要落盘：`Pending` 非空意味着宿主上躺着**归属无法证明**的容器与网络。
+	// 旧签名把这一整类判定丢掉了，于是「回收跑过了、什么都没删」与「宿主上本来
+	// 就没有孤儿」在结果里完全同形——而这两者的处置完全不同。
+	ReclaimedStale int               `json:"reclaimedStale,omitempty"`
+	PendingStale   int               `json:"pendingStale,omitempty"`
+	Challenges     []publicChallenge `json:"challenges,omitempty"`
 	// Manifest 是本次运行实际生效的配置与产物身份。
 	//
 	// 用 omitzero：直接构造的 RunResult（测试、旧调用方）没有清单，不该在文件里
@@ -216,7 +230,9 @@ func toPublic(r harness.RunResult) publicResult {
 		StartedAt: r.StartedAt, EndedAt: r.EndedAt, Completed: r.Completed,
 		State:  sanitizeState(r.State),
 		Reason: sanitizeReason(r.Reason), Err: sanitizeErrorClass(r.Err),
-		Manifest: toPublicManifest(r.Manifest)}
+		ReclaimedStale: sanitizeCount(r.ReclaimedStale),
+		PendingStale:   sanitizeCount(r.PendingStale),
+		Manifest:       toPublicManifest(r.Manifest)}
 	for _, c := range r.Challenges {
 		p.Challenges = append(p.Challenges, publicChallenge{Code: c.Challenge.Code,
 			Category: c.Challenge.Category, StartedAt: c.StartedAt, EndedAt: c.EndedAt,
@@ -404,6 +420,7 @@ func fromPublic(p publicResult) harness.RunResult {
 		ProfileDigest: p.ProfileDigest, BundleDigest: p.BundleDigest, Model: p.Model,
 		StartedAt: p.StartedAt, EndedAt: p.EndedAt, State: harness.RunState(p.State),
 		Completed: p.Completed, Reason: p.Reason, Err: p.Err,
+		ReclaimedStale: p.ReclaimedStale, PendingStale: p.PendingStale,
 		Manifest: fromPublicManifest(p.Manifest)}
 	for _, c := range p.Challenges {
 		r.Challenges = append(r.Challenges, harness.ChallengeResult{

@@ -550,6 +550,7 @@ func TestResultFilePinsNewFieldNames(t *testing.T) {
 	}
 	saveRun(t, rs, harness.RunResult{RunID: "run-keys", StartedAt: baseTime,
 		State: harness.RunFinished, BundleDigest: bundleDigestSample,
+		ReclaimedStale: 4, PendingStale: 6,
 		Challenges: []harness.ChallengeResult{{
 			Challenge: harness.Challenge{Code: "c1"},
 			Outcome: harness.OutcomeView{BranchesAbandoned: 2,
@@ -561,9 +562,10 @@ func TestResultFilePinsNewFieldNames(t *testing.T) {
 	}
 	for _, want := range []string{`"state":"finished"`, `"bundleDigest":"` + bundleDigestSample + `"`,
 		`"branchesAbandoned":2`,
-		// N0 新增的三个键。它们的**存在性**是这条测试的全部内容：值对不对由
+		// N0 新增的五个键。它们的**存在性**是这条测试的全部内容：值对不对由
 		// TestPublicCountsRoundTrip 与 TestGraphStatePublicIsWhitelisted 负责。
-		`"attempts":5`, `"auditIncomplete":true`, `"graphState":"saved"`} {
+		`"attempts":5`, `"auditIncomplete":true`, `"graphState":"saved"`,
+		`"reclaimedStale":4`, `"pendingStale":6`} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("公开结果里缺少 %s: %s", want, b)
 		}
@@ -586,6 +588,9 @@ func TestPublicCountsRoundTrip(t *testing.T) {
 	}
 	saveRun(t, rs, harness.RunResult{RunID: "run-counts", StartedAt: baseTime,
 		State: harness.RunFinished, Completed: true,
+		// 启动前那次回收：删了 2 个，另有 3 个**归属无法证明**留着待人工处置。
+		// 后者非零正是这条修复要让人看得见的东西。
+		ReclaimedStale: 2, PendingStale: 3,
 		Challenges: []harness.ChallengeResult{{
 			Challenge: harness.Challenge{Code: "c1"},
 			Outcome: harness.OutcomeView{
@@ -606,13 +611,22 @@ func TestPublicCountsRoundTrip(t *testing.T) {
 	}
 	// 键名是持久化契约：下游报告与 stats 按名字读，改名等于静默破坏所有现存文件。
 	for _, want := range []string{`"duplicates":3`, `"rejected":4`, `"attempts":9`,
-		`"auditIncomplete":true`, `"graphState":"failed"`} {
+		`"auditIncomplete":true`, `"graphState":"failed"`,
+		`"reclaimedStale":2`, `"pendingStale":3`} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("公开结果里缺少 %s: %s", want, b)
 		}
 	}
 	if strings.Contains(string(b), `"branchesAbandoned"`) {
 		t.Fatalf("负计数应被折成 0 并由 omitempty 抹掉整个键: %s", b)
+	}
+	// 回收明细（哪个 runID、哪种资源、为什么没删）是本机资源拓扑，**不得**进这份
+	// 文件——它会被转发、归档、贴工单。只准进计数。
+	for _, never := range []string{"owner_mismatch", "owner_unknown", "unparsable",
+		"runID", `"pending"`, `"pendingObjects"`} {
+		if strings.Contains(string(b), never) {
+			t.Fatalf("回收明细泄漏进了公开面（只准进计数）: %s 出现在 %s", never, b)
+		}
 	}
 
 	got, err := rs.Get(context.Background(), "run-counts")
@@ -634,6 +648,11 @@ func TestPublicCountsRoundTrip(t *testing.T) {
 	}
 	if oc.BranchesAbandoned != 0 {
 		t.Fatalf("负计数应被折成 0，实际 %d", oc.BranchesAbandoned)
+	}
+	// 回收计数是 **run 级**：它读回来必须落在 RunResult 上，而不是某道题上。
+	if got.ReclaimedStale != 2 || got.PendingStale != 3 {
+		t.Fatalf("回收计数往返不一致: reclaimed=%d pending=%d，期望 2 / 3",
+			got.ReclaimedStale, got.PendingStale)
 	}
 	// 写侧已经把矛盾折掉了（以失败阶段为准），所以读回来必须与文件里的一致。
 	if oc.GraphState != harness.GraphFailed {
@@ -666,7 +685,8 @@ func TestPublicCountsOmitZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, never := range []string{`"attempts"`, `"auditIncomplete"`, `"graphState"`,
-		`"duplicates"`, `"rejected"`, `"branchesAbandoned"`} {
+		`"duplicates"`, `"rejected"`, `"branchesAbandoned"`,
+		`"reclaimedStale"`, `"pendingStale"`} {
 		if strings.Contains(string(b), never) {
 			t.Fatalf("零值字段 %s 不该落盘（omitempty 应让它整个消失）: %s", never, b)
 		}
