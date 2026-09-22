@@ -62,6 +62,21 @@ func NewResultStore(dir string) (*ResultFileStore, error) {
 	if err := mkdirAllPrivate(filepath.Join(abs, resultsDirName), dirPerm); err != nil {
 		return nil, harness.Ef(harness.KindPersistence, "resultstore.new", "创建结果目录失败", err)
 	}
+	// private/ 也在构造时建出来，**不能留给第一次写 trace 时惰性创建**。
+	//
+	// 为什么：`bridge.privateStderrPath` 要求这个目录**已经存在**，否则返回空串
+	// ——而空串的后果是桥的 stderr 被静默丢弃。桥的 stderr 是平台侧异常（例如
+	// 提交被平台以未识别状态码拒绝）唯一能看到响应体的地方，而桥恰恰是在
+	// 第一次写 trace **之前**启动的：那时 private/ 还不存在，于是出故障时想要的
+	// 证据正好没了。实测踩到过：一次提交报平台 501，`bridge-stderr.log` 根本
+	// 没生成，只能事后手工预建目录再复现。
+	//
+	// 建在这里而不是让 bridge 自己建：private/ 的生命周期属于 store（bridge 的
+	// 注释也是这么写的），而这条路径与 AppendTrace 落盘的那条是同一个——
+	// `<dir>/private/`，权限同为 0700。
+	if err := mkdirAllPrivate(filepath.Join(abs, privateDirName), dirPerm); err != nil {
+		return nil, harness.Ef(harness.KindPersistence, "resultstore.new", "创建私密目录失败", err)
+	}
 	return &ResultFileStore{root: filepath.Join(abs, resultsDirName)}, nil
 }
 

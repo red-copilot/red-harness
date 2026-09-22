@@ -108,6 +108,30 @@ func TestResultFileStoreNeverPersistsCandidatePlaintext(t *testing.T) {
 	}
 }
 
+// TestNewResultStoreCreatesPrivateDir：private/ 必须在**构造时**就存在。
+//
+// 回归：它原先只由第一次写 trace 惰性创建，而 bridge 在写 trace **之前**启动，
+// 且 `bridge.privateStderrPath` 要求目录已存在——否则返回空串、桥的 stderr 被
+// 静默丢弃。桥的 stderr 是平台侧异常（例如提交被平台以未识别状态码拒绝）唯一
+// 能看到响应体的地方，于是出故障时想要的证据正好没了。
+func TestNewResultStoreCreatesPrivateDir(t *testing.T) {
+	root := t.TempDir()
+	if _, err := NewResultStore(root); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(filepath.Join(root, privateDirName))
+	if err != nil {
+		t.Fatalf("private/ 没有被建出来: %v", err)
+	}
+	if !st.IsDir() {
+		t.Fatal("private/ 不是目录")
+	}
+	// 权限与 §3.3 一致：目录 0700、文件 0600。
+	if perm := st.Mode().Perm(); perm != 0o700 {
+		t.Errorf("private/ 权限 = %o，期望 700", perm)
+	}
+}
+
 func TestResultRoundTripKeepsMetricsAndDropsPlaintext(t *testing.T) {
 	rs := newResultStore(t)
 	ended := baseTime.Add(90 * time.Second)

@@ -37,7 +37,10 @@ func (s *ResultFileStore) AppendTrace(ctx context.Context, runID harness.RunID, 
 		return harness.Ef(harness.KindPersistence, "resultstore.trace", "单条 trace 超限", nil)
 	}
 	sum := sha256.Sum256([]byte(challenge))
-	dir := filepath.Join(filepath.Dir(s.root), "private", string(runID))
+	// 用 privateDirName 而不是字面量：这条路径必须与 NewResultStore 在构造时
+	// 建出来的那个、以及 bridge 的 PrivateDir 是**同一个**——三处写字面量迟早漂移，
+	// 而漂移的表现是「trace 写到 A、桥的 stderr 找 B」，两边都看着正常。
+	dir := filepath.Join(filepath.Dir(s.root), privateDirName, string(runID))
 	if err := mkdirAllPrivate(dir, dirPerm); err != nil {
 		return err
 	}
