@@ -143,9 +143,19 @@ func TestIntegrationCLIFakeDocker(t *testing.T) {
 	}
 
 	resultDir := t.TempDir()
+	// `--bundle` 走生产路径：它同时决定只读挂进容器的目录与公开结果里的
+	// BundleDigest。这条断言针对的是一个**真实存在过的口径差**——CLI 装配层
+	// 此前既不传 Profile 也不传 Sandbox.ProfileDir，于是 CLI 跑出来的
+	// BundleDigest **恒为空串**（未核验），`stats --bundle` 在 CLI 路径上永远
+	// 筛不出东西，而同一个能力对直接调 SDK 的调用方是有的。
+	bundleDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundleDir, "ext.js"), []byte("// bundle v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	var stdout, stderr bytes.Buffer
 	code := cli.Main([]string{"run", "--scenario", "fake", "--store", resultDir,
-		"--image", image, "--submit", "--budget-rounds", "2"}, &stdout, &stderr)
+		"--image", image, "--submit", "--budget-rounds", "2",
+		"--bundle", bundleDir}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("CLI exit %d: stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -160,6 +170,11 @@ func TestIntegrationCLIFakeDocker(t *testing.T) {
 	run := runs[0]
 	if !run.Completed || len(run.Challenges) != 1 || run.Challenges[0].Outcome.Submitted != 1 {
 		t.Fatalf("Fake platform did not confirm the sandbox answer: %+v", run)
+	}
+	// `--bundle` 必须真的走到内容摘要。空串在这个字段上的语义是「未核验」，
+	// 所以它非空就证明 CLI 路径与直接 SDK 调用在这一项上同口径了。
+	if run.BundleDigest == "" {
+		t.Fatal("--bundle 没有产生 BundleDigest：CLI 路径与 SDK 路径仍然不同口径")
 	}
 	for _, kind := range []string{"ps", "network ls"} {
 		args := []string{"ps", "--all", "--quiet"}

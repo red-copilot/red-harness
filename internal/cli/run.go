@@ -42,6 +42,9 @@ type runFlags struct {
 
 	policyMaxAttempts int
 	policyDryRounds   int
+
+	profileFile string
+	bundleDir   string
 }
 
 // register 把 flag 挂到一个 FlagSet 上。名字即 CLI 的公开面，改名字是破坏性变更。
@@ -72,6 +75,9 @@ func (f *runFlags) register(fs *flag.FlagSet) {
 
 	fs.IntVar(&f.policyMaxAttempts, "max-attempts", 0, "同一意图的最大重试轮数（0 表示用默认）")
 	fs.IntVar(&f.policyDryRounds, "dry-rounds-before-hint", 0, "连续无进展多少轮后允许请求提示（0 表示用默认）")
+
+	fs.StringVar(&f.profileFile, "profile", "", "solver profile 的 JSON 文件（未知键/非法值在起跑前拒绝）")
+	fs.StringVar(&f.bundleDir, "bundle", "", "只读挂进容器的 extension bundle 目录（同时决定 BundleDigest）")
 }
 
 // budget 把 flag 折成 harness.Budget。
@@ -116,7 +122,11 @@ func (f *runFlags) budget() harness.Budget {
 // 提不提交。运行目录与凭据来源属于**部署配置**，由装配层持有（见 storeDir 的
 // 注释）——它们曾经在 RunSpec 里，代价是每次都被装配层盖掉，调用方以为自己
 // 填的值生效了。
-func (f *runFlags) spec() harness.RunSpec {
+func (f *runFlags) spec() (harness.RunSpec, error) {
+	profile, err := f.profile()
+	if err != nil {
+		return harness.RunSpec{}, err
+	}
 	return harness.RunSpec{
 		Scenario: f.scenario,
 		Targets:  splitList(f.targets),
@@ -137,7 +147,45 @@ func (f *runFlags) spec() harness.RunSpec {
 			MaxAttemptsPerIntent: f.policyMaxAttempts,
 			DryRoundsBeforeHint:  f.policyDryRounds,
 		},
+		Profile: profile,
+	}, nil
+}
+
+// profile 把 `--profile` 与 `--bundle` 折成 harness.SolverProfile。
+//
+// 为什么要从文件读，而不是给 profile 的每个键各开一个 flag：profile 的键是
+// **带 schema 的配置面**（PlannerConfig / PromptConfig），一个键一个 flag 会让
+// 每加一个键就要动三处（flag、spec 组装、帮助文本），而 schema 校验在文件入口
+// 上是一处——`harness.LoadProfile` 就是那个入口。
+//
+// ⚠️ 解析失败必须在**任何副作用之前**返回：`--profile` 指向一份写错的配置时，
+// 不该先起容器、起题、花掉平台额度再报错。这里的调用点在 `a.ports(...)` 之前，
+// 而 ports 是装配（会建目录）的那一步。
+func (f *runFlags) profile() (harness.SolverProfile, error) {
+	var p harness.SolverProfile
+	if f.profileFile != "" {
+		fh, err := os.Open(f.profileFile)
+		if err != nil {
+			return p, harness.Ef(harness.KindConfig, "cli.run", "打开 profile 文件失败", err)
+		}
+		defer fh.Close()
+		if p, err = harness.LoadProfile(fh); err != nil {
+			return harness.SolverProfile{}, err
+		}
 	}
+	// `--bundle` 覆盖 profile 里的 ExtensionBundle，而不是与它冲突时报错：flag 是
+	// 更明确的那一次输入，与 `--image`/`--model` 覆盖装配默认值是同一条规矩。
+	//
+	// 绝对化在这里做：bundle 路径会经 SandboxSpec.ProfileDir 走到 executor 的
+	// 只读挂载校验，而那里**要求绝对路径**——相对路径会在起容器时才被拒，
+	// 报错点离用户输入太远。
+	if f.bundleDir != "" {
+		p.ExtensionBundle = absStoreDir(f.bundleDir)
+	}
+	if err := p.Validate(); err != nil {
+		return harness.SolverProfile{}, err
+	}
+	return p, nil
 }
 
 // storeDir 把 `--store` 折成绝对路径，是**唯一**该用来喂装配层（`a.ports`）的
@@ -187,7 +235,10 @@ func (a *app) run(args []string) error {
 		return err
 	}
 
-	spec := f.spec()
+	spec, err := f.spec()
+	if err != nil {
+		return err
+	}
 	ports, err := a.ports(f.storeDir(), spec)
 	if err != nil {
 		return err
