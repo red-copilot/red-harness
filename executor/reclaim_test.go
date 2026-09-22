@@ -156,115 +156,230 @@ func TestJudgeStaleEmpty(t *testing.T) {
 	}
 }
 
-// TestParseScan 钉住扫描输出的解析。
+// TestClassifyScanned 钉住「标签表 → 对象列表」这一层的判定。
 //
-// 输入形态取自 `docker ps --format '{{json .Labels}}'` 与
-// `docker network ls --format '{{json .Labels}}'` 的真实输出（本机 Docker 29.8
-// 实测：模板函数 `json` 在两种对象上都可用）。
-func TestParseScan(t *testing.T) {
+// 输入是**标签表**而不是扫描输出的文本：这一层与扫描方式无关（它是 parseInspect
+// 翻译完之后的样子），所以能表驱动地测而不用造 Docker。
+//
+// ⚠️ 这里刻意**不**测任何输出形态。上一版把形态与判定混在一个用例里，结果是
+// 夹具编造了一个 docker 并不打印的形态（见 TestParseInspect 上那段），判定逻辑
+// 因此从未被真正执行过——**绿的空转**。
+func TestClassifyScanned(t *testing.T) {
 	cases := []struct {
-		name string
-		kind string
-		out  string
-		want []scanObject
+		name   string
+		kind   string
+		labels []map[string]string
+		want   []scanObject
 	}{
 		{
 			name: "完整标签",
 			kind: "container",
-			out:  `{"red-harness.attempt":"1","red-harness.challenge":"ab12","red-harness.owner":"box/0","red-harness.role":"runner","red-harness.run":"run-1"}`,
+			labels: []map[string]string{{
+				LabelRun: "run-1", LabelOwner: "box/0",
+				LabelChallenge: "ab12", LabelAttempt: "1", LabelRole: "runner",
+			}},
 			want: []scanObject{{Kind: "container", Parsed: true, RunID: "run-1", Owner: "box/0"}},
-		},
-		{
-			name: "完整的网络标签",
-			kind: "network",
-			out:  `{"red-harness.owner":"box/0","red-harness.role":"network","red-harness.run":"run-1"}`,
-			want: []scanObject{{Kind: "network", Parsed: true, RunID: "run-1", Owner: "box/0"}},
 		},
 		{
 			// 升级前的旧资源：有 run 标签、没有 owner 标签 ⇒ 仍然 Parsed（它的归属是
 			// 「无主」，那是判定阶段的事，不是解析阶段的事）。
-			name: "缺少 owner 标签",
-			kind: "container",
-			out:  `{"red-harness.run":"run-1"}`,
-			want: []scanObject{{Kind: "container", Parsed: true, RunID: "run-1"}},
+			name:   "缺少 owner 标签",
+			kind:   "container",
+			labels: []map[string]string{{LabelRun: "run-1"}},
+			want:   []scanObject{{Kind: "container", Parsed: true, RunID: "run-1"}},
 		},
 		{
-			name: "owner 标签为空串",
-			kind: "container",
-			out:  `{"red-harness.owner":"","red-harness.run":"run-1"}`,
-			want: []scanObject{{Kind: "container", Parsed: true, RunID: "run-1"}},
+			name:   "owner 标签为空串",
+			kind:   "container",
+			labels: []map[string]string{{LabelRun: "run-1", LabelOwner: ""}},
+			want:   []scanObject{{Kind: "container", Parsed: true, RunID: "run-1"}},
 		},
 		{
-			// 扫描命令带了 label 存在性过滤，所以读不出 run 只可能是格式变了。
-			name: "缺少 run 标签",
-			kind: "network",
-			out:  `{"red-harness.owner":"box/0"}`,
-			want: []scanObject{{Kind: "network"}},
+			// 无标签的容器实测是 `{}`（不是 null，见 TestParseInspect）。
+			name:   "空标签表",
+			kind:   "container",
+			labels: []map[string]string{{}},
+			want:   []scanObject{{Kind: "container"}},
 		},
 		{
-			name: "run 标签为空串",
-			kind: "network",
-			out:  `{"red-harness.run":""}`,
-			want: []scanObject{{Kind: "network"}},
+			// nil 标签表：inspect 的字段位变了（比如容器改成把标签放顶层）就会走到
+			// 这里。它必须与「空标签表」同档，归 unparsable，而不是被丢掉。
+			name:   "nil 标签表",
+			kind:   "container",
+			labels: []map[string]string{nil},
+			want:   []scanObject{{Kind: "container"}},
 		},
 		{
-			// 这一条是那个已知的坑：旧版 docker 的 `{{.Label "x"}}` 会打印
-			// `key=value`（多个标签时甚至拼成 `k=v,k=v`）。它必须解析失败。
-			name: "旧版的 key=value 形态",
-			kind: "container",
-			out:  "red-harness.run=run-1",
-			want: []scanObject{{Kind: "container"}},
+			// 扫描命令带了 label 存在性过滤，所以读不出 run 只可能是标签值真是空串。
+			name:   "run 标签为空串",
+			kind:   "network",
+			labels: []map[string]string{{LabelOwner: "box/0", LabelRun: ""}},
+			want:   []scanObject{{Kind: "network"}},
 		},
 		{
-			name: "非 JSON 的裸值",
-			kind: "container",
-			out:  "run-1",
-			want: []scanObject{{Kind: "container"}},
+			// run 标签值里的空白**要 trim**（它是 docker 给的字符串，可能带换行）。
+			// ⚠️ 但 owner 的值不 trim —— 见 classifyScanned 的注释，规范化 owner
+			// 会把两个不同的 owner 合并成一个，方向是「外来的看起来像我的」。
+			name:   "run 标签值带空白",
+			kind:   "container",
+			labels: []map[string]string{{LabelRun: "  run-1\n", LabelOwner: " box/0 "}},
+			want:   []scanObject{{Kind: "container", Parsed: true, RunID: "run-1", Owner: " box/0 "}},
 		},
 		{
-			// docker 在没有任何标签时会打印 null（nil map 的 JSON 形态）。
-			name: "null",
-			kind: "container",
-			out:  "null",
-			want: []scanObject{{Kind: "container"}},
-		},
-		{
-			name: "空输出",
-			kind: "container",
-			out:  "",
-			want: nil,
-		},
-		{
-			name: "只有空行",
-			kind: "container",
-			out:  "\n\n",
-			want: nil,
-		},
-		{
-			name: "空行与行尾换行",
-			kind: "container",
-			out:  "\n{\"red-harness.run\":\"run-1\"}\n\n",
-			want: []scanObject{{Kind: "container", Parsed: true, RunID: "run-1"}},
-		},
-		{
-			// 一行坏掉不得影响别的行：丢掉它等于「扫不到」，而扫不到的表现是
+			// 一条坏的不影响别的：丢掉它等于「扫不到」，而扫不到的表现是
 			// 「ReclaimStale 说无事可做，宿主上却躺着孤儿」。
-			name: "坏行夹在好行之间",
+			name: "坏对象夹在好对象之间",
 			kind: "container",
-			out:  "{\"red-harness.run\":\"run-1\"}\nnot-json\n{\"red-harness.run\":\"run-2\"}",
+			labels: []map[string]string{
+				{LabelRun: "run-1"},
+				nil,
+				{LabelRun: "run-2"},
+			},
 			want: []scanObject{
 				{Kind: "container", Parsed: true, RunID: "run-1"},
 				{Kind: "container"},
 				{Kind: "container", Parsed: true, RunID: "run-2"},
 			},
 		},
+		{
+			name:   "没有对象",
+			kind:   "container",
+			labels: nil,
+			want:   []scanObject{},
+		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := parseScan(c.kind, c.out)
+			got := classifyScanned(c.kind, c.labels)
 			if !reflect.DeepEqual(got, c.want) {
-				t.Errorf("parseScan(%q, ...) = %+v, 期望 %+v", c.kind, got, c.want)
+				t.Errorf("classifyScanned(%q, ...) = %+v, 期望 %+v", c.kind, got, c.want)
+			}
+		})
+	}
+}
+
+// TestParseInspect 钉住 `docker inspect` 输出的解析。
+//
+// ⚠️ **这些夹具是实测抓下来的，不是手写的。** 上一版这个用例的夹具是手写的
+// `{"red-harness.run":"run-1"}`，而它的注释声称「取自 `{{json .Labels}}` 的真实
+// 输出」——两句话都是假的：真实的 `{{json .Labels}}` 打印的是一个 **JSON 字符串**
+// （逗号拼接的 `k=v`），照对象去解析**每一行都失败**。判定逻辑因此在生产路径上
+// 从未被执行过，而用例是绿的。**夹具的出处要是谎话，测试就是谎话的放大器。**
+//
+// 出处：本机 Docker 29.8，`docker inspect <id> | jq` 截取**代码实际读取的那两个
+// 字段位**（容器 `.Config.Labels`、网络顶层 `.Labels`）。只截子树不截整份是因为
+// 整份有几十个字段、上千行；而 inspectObject 只声明需要的字段，多余字段被忽略
+// 这件事本身由下面的「多余字段」一例钉住。
+func TestParseInspect(t *testing.T) {
+	// 实测：容器把用户标签放在 .Config.Labels，且**没有**顶层 Labels（顶层的
+	// MountLabel / ProcessLabel 是 SELinux 的东西，与用户标签无关，Go 的 json
+	// 也不会把它们匹配到 `Labels` 上）。
+	const containerReal = `[{"Config":{"Labels":{"red-harness.owner":"probe-owner","red-harness.run":"probe-run"}}}]`
+
+	// 实测：网络把用户标签放在**顶层** .Labels（没有 Config 这一层）。
+	const networkReal = `[{"Labels":{"red-harness.owner":"box/0","red-harness.role":"network","red-harness.run":"it-stale"}}]`
+
+	cases := []struct {
+		name    string
+		kind    string
+		out     string
+		want    []scanObject
+		wantErr bool
+	}{
+		{
+			name: "容器（实测形态）",
+			kind: "container",
+			out:  containerReal,
+			want: []scanObject{{Kind: "container", Parsed: true, RunID: "probe-run", Owner: "probe-owner"}},
+		},
+		{
+			name: "网络（实测形态）",
+			kind: "network",
+			out:  networkReal,
+			want: []scanObject{{Kind: "network", Parsed: true, RunID: "it-stale", Owner: "box/0"}},
+		},
+		{
+			// 竞态：ls 与 inspect 之间对象消失了。实测 docker 的行为是
+			// **exit 1 但 stdout 仍含有效对象**，且数组里**不再有**消失的那个。
+			// 所以「已消失」自然等价于「无需回收」——scanLabeled 据此让
+			// 解析先于判错。
+			name: "竞态后只剩一个（实测形态）",
+			kind: "container",
+			out:  containerReal,
+			want: []scanObject{{Kind: "container", Parsed: true, RunID: "probe-run", Owner: "probe-owner"}},
+		},
+		{
+			// 实测：全部 ID 都不存在时 docker 打印 `[]` 并 exit 1。
+			name: "空数组",
+			kind: "container",
+			out:  "[]",
+			want: []scanObject{},
+		},
+		{
+			// 实测：`docker inspect` 无参数时 exit 1、stdout 为空 —— 所以
+			// scanLabeled 必须在没有 ID 时提前返回，不能把空串喂进来。
+			name:    "空输出（inspect 无参数）",
+			kind:    "container",
+			out:     "",
+			wantErr: true,
+		},
+		{
+			name:    "被截断的 JSON",
+			kind:    "container",
+			out:     `[{"Config":{"Labels":{"red-harness.run":"run-1"}}`,
+			wantErr: true,
+		},
+		{
+			// 形态变了（比如某天 docker 让 inspect 也能出 NDJSON）必须**报错**，
+			// 而不是降级成一堆 unparsable 对象——那等于给形态变化编一份假报告。
+			name:    "NDJSON（形态变了）",
+			kind:    "container",
+			out:     "{\"Config\":{\"Labels\":{\"red-harness.run\":\"run-1\"}}}\n{\"Config\":{}}",
+			wantErr: true,
+		},
+		{
+			// inspectObject 只声明需要的字段，多余字段被忽略。整份 inspect 输出有
+			// 几十个字段，这条钉住「只截子树当夹具」是成立的。
+			name: "多余字段被忽略",
+			kind: "container",
+			out: `[{"Id":"e3e15080f6c6","Created":"2026-09-22T00:19:15Z",` +
+				`"MountLabel":"","ProcessLabel":"",` +
+				`"State":{"Status":"running","Running":true},` +
+				`"Config":{"Hostname":"rh-x","Labels":{"red-harness.run":"run-9"}}}]`,
+			want: []scanObject{{Kind: "container", Parsed: true, RunID: "run-9"}},
+		},
+		{
+			// 实测：没有标签的容器是 `{}`（不是 null）。它必须归 unparsable。
+			name: "容器无标签（实测空对象）",
+			kind: "container",
+			out:  `[{"Config":{"Labels":{}}}]`,
+			want: []scanObject{{Kind: "container"}},
+		},
+		{
+			// 把网络当容器解析（kind 传错）会读到 nil 标签表 ⇒ unparsable ⇒
+			// **不删**。这是刻意的退化方向：kind 错配绝不能退化成「删除」。
+			name: "kind 错配只退化成不删",
+			kind: "container",
+			out:  networkReal,
+			want: []scanObject{{Kind: "container"}},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseInspect(c.kind, c.out)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("parseInspect 应当报错, got %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseInspect 不该报错: %v", err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("parseInspect(%q, ...) = %+v, 期望 %+v", c.kind, got, c.want)
 			}
 		})
 	}
@@ -276,14 +391,20 @@ func TestParseScan(t *testing.T) {
 // 单独测两半会漏掉它们之间的接口（比如解析把 owner 放错字段），所以这里再串一次。
 func TestScanRoundsTripToJudge(t *testing.T) {
 	self := mustOwner(t, "box", 0)
-	out := strings.Join([]string{
-		`{"red-harness.owner":"box/0","red-harness.run":"mine"}`,
-		`{"red-harness.owner":"other-box/0","red-harness.run":"theirs"}`,
-		`{"red-harness.run":"ancient"}`,
-		"garbage",
-	}, "\n")
+	// 一整段**实测形态**的 inspect 输出（数组，元素的 .Config.Labels 是标签表）：
+	// 自己的、别人的、升级前的无主资源、以及一条读不出 run 的。
+	out := `[` +
+		`{"Config":{"Labels":{"red-harness.owner":"box/0","red-harness.run":"mine"}}},` +
+		`{"Config":{"Labels":{"red-harness.owner":"other-box/0","red-harness.run":"theirs"}}},` +
+		`{"Config":{"Labels":{"red-harness.run":"ancient"}}},` +
+		`{"Config":{"Labels":{}}}` +
+		`]`
 
-	rep := judgeStale(parseScan("container", out), self, nil)
+	objs, err := parseInspect("container", out)
+	if err != nil {
+		t.Fatalf("parseInspect: %v", err)
+	}
+	rep := judgeStale(objs, self, nil)
 
 	if !reflect.DeepEqual(rep.Reclaimed, []harness.RunID{"mine"}) {
 		t.Errorf("Reclaimed = %v, 期望只删 mine", rep.Reclaimed)

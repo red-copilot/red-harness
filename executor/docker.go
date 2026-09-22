@@ -356,34 +356,88 @@ func (d *Docker) ReclaimStale(ctx context.Context, live map[harness.RunID]bool) 
 }
 
 // scanLabeled 扫描宿主上带 LabelRun 标签的对象，返回**逐个对象**的归属信息
-// （run 标签 + owner 标签 + 种类）。解析交给纯函数 parseScan。
+// （run 标签 + owner 标签 + 种类）。
 //
-// 为什么输出形态固定成 `{{json .Labels}}`：`{{.Label "x"}}` 只会打印一个标签的
-// **值**，某些 Docker 版本/对象类型下会退化成打印 `key=value`（甚至多个标签用逗号
-// 拼成 `k=v,k=v`）——而「只认其中一种」的后果是静默的：扫不到任何 run，
-// ReclaimStale 报「无事可做」，宿主上却躺着重启前的孤儿容器。JSON 没有这个歧义，
-// 而且一次调用就带回 owner。见 parseScan 里为什么不用「模板 + 分隔符」。
+// # 为什么是两次调用（先 ls 拿 ID，再 inspect）
+//
+// 一次调用拿不到「标签表」。`ls --format '{{json .Labels}}'` 看着像，实际打印的是
+// 一个 **JSON 字符串**（逗号拼接的 `k=v`）而不是 JSON 对象——照对象去解析会每一行
+// 都失败，于是每个对象都变成 unparsable，而 `unparsable ⇒ 只报告` 让回收**永远
+// 什么都不删且完全静默**。详见 parseInspect 上那段。
+//
+// inspect 才是结构源，但它要 ID。所以两步：ls 只取 ID（不带模板），inspect 取结构。
+// 代价是两次调用之间对象可能消失（另一个 run 刚清掉它）——那正是下面「解析先于
+// 判错」处理的那一档：**已经消失 ≡ 无需回收**，不是错误。
 func (d *Docker) scanLabeled(ctx context.Context, kind string) ([]scanObject, error) {
-	out, err := d.run(ctx, nil, d.staleScanArgv(kind)[1:]...)
+	ids, err := d.staleListIDs(ctx, kind)
 	if err != nil {
-		return nil, harness.Ef(harness.KindExecutor, "executor.reclaim",
-			fmt.Sprintf("扫描 %s 标签失败", kind), err)
+		return nil, err
 	}
-	return parseScan(kind, out), nil
+	if len(ids) == 0 {
+		// 不是优化：`docker inspect` 不带参数会 exit 1 且 stdout 为空，那会被
+		// 下面当成「docker 坏了」。没有 ID 就是没有对象，直接返回。
+		return nil, nil
+	}
+
+	out, err := d.run(ctx, nil, d.staleInspectArgv(ids)[1:]...)
+
+	// 解析**先于**判错。inspect 的退出码非零而 stdout 仍然有效是合理场景：
+	// ls 与 inspect 之间有对象消失了，docker 为一个不存在的 ID 报错并 exit 1，
+	// 但剩下的对象照常打印。而「对象已经消失」恰好等于「无需回收」。
+	// ⚠️ 反过来（先判错再解析）会让这个竞态变成一条假的执行器错误，而它的
+	// 出现概率恰好在**宿主重启恢复**这条路径上最高——那正是回收唯一要干活的场景。
+	if objs, perr := parseInspect(kind, out); perr == nil {
+		return objs, nil
+	} else if err == nil {
+		// exit 0 却解析不出数组：不是竞态，是输出形态变了。如实报出来，
+		// 不要降级成「一堆 unparsable 对象」——那等于给形态变化编一份假报告。
+		return nil, harness.Ef(harness.KindExecutor, "executor.reclaim",
+			fmt.Sprintf("扫描 %s 标签：inspect 输出不是 JSON 数组", kind), perr)
+	}
+	return nil, harness.Ef(harness.KindExecutor, "executor.reclaim",
+		fmt.Sprintf("扫描 %s 标签失败", kind), err)
 }
 
-// staleScanArgv 渲染「按 label 列出对象」的 argv。
+// staleListIDs 列出带 LabelRun 标签的对象 ID（第一段：只有身份，没有标签）。
 //
 // `--filter label=<LabelRun>`（只给键、不给值）是**存在性**过滤：任何带 run 标签的
 // 对象都要被看见，因为「看见了但不该删」要能进 Pending，而看不见就无法报告。
-func (d *Docker) staleScanArgv(kind string) []string {
-	const format = "{{json .Labels}}"
+//
+// 用 `--quiet` 而不是 `--format '{{.ID}}'`：少一个模板就少一处「Docker 改了模板
+// 函数行为」的面，而本文件这条教训正是从模板来的。`--quiet` 在 `docker ps` 与
+// `docker network ls` 上都是「只打印 ID」（本机 Docker 29.8 实测）。
+func (d *Docker) staleListIDs(ctx context.Context, kind string) ([]string, error) {
+	out, err := d.run(ctx, nil, d.staleListArgv(kind)[1:]...)
+	if err != nil {
+		return nil, harness.Ef(harness.KindExecutor, "executor.reclaim",
+			fmt.Sprintf("列出 %s 失败", kind), err)
+	}
+	var ids []string
+	for _, line := range strings.Split(out, "\n") {
+		if id := strings.TrimSpace(line); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// staleListArgv 渲染「按 label 列出对象 ID」的 argv。
+func (d *Docker) staleListArgv(kind string) []string {
 	switch kind {
 	case "network":
-		return []string{d.cfg.Binary, "network", "ls", "--filter", "label=" + LabelRun, "--format", format}
+		return []string{d.cfg.Binary, "network", "ls", "--quiet", "--filter", "label=" + LabelRun}
 	default:
-		return []string{d.cfg.Binary, "ps", "--all", "--filter", "label=" + LabelRun, "--format", format}
+		return []string{d.cfg.Binary, "ps", "--all", "--quiet", "--filter", "label=" + LabelRun}
 	}
+}
+
+// staleInspectArgv 渲染「拿 ID 换完整对象」的 argv。
+//
+// **刻意不带 `--format`**：默认输出是 docker 的规范 JSON 数组（数组元素里
+// `.Config.Labels` 是容器的用户标签、`.Labels` 是网络的）。要的正是这个结构，
+// 而不是某个人对表格输出的重新渲染——见 parseInspect。
+func (d *Docker) staleInspectArgv(ids []string) []string {
+	return append([]string{d.cfg.Binary, "inspect"}, ids...)
 }
 
 // ── 内部：进程调用 ──

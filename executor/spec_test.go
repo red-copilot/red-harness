@@ -946,31 +946,60 @@ func TestReclaimUsesRunLabel(t *testing.T) {
 	}
 }
 
-// ReclaimStale 的扫描 argv 也必须按 label 走（宿主重启恢复路径）。
+// ReclaimStale 的扫描分两段，两段的 argv 形态都是**冻结的**。
 //
-// 并且**输出格式是冻结的**：`{{json .Labels}}`。理由是那个已知的解析坑——
-// `{{.Label "x"}}` 在某些 Docker 版本/对象类型下会退化成打印 `key=value`
-// （多个标签时甚至拼成 `k=v,k=v`），而解析歧义的方向是「把别人的归属读成自己的」。
-// 换回单值模板或换成「模板 + 分隔符」都会让 parseScan 的那条防线失效。
-func TestReclaimStaleScansByLabel(t *testing.T) {
+// ⚠️ 这条用例上一版把 `{{json .Labels}}` 当契约钉死了——而那个模板在 `docker ps`
+// 与 `docker network ls` 上打印的是 **JSON 字符串**（逗号拼接的 `k=v`）而不是 JSON
+// 对象，解析**每一行都失败**，于是回收永远什么都不删。**测试把缺陷钉成了契约，
+// 是这次事故里最值得记住的一环**：一条关于外部命令输出形态的断言，如果不来自对
+// 那个命令的实测，它就在保护 bug。
+//
+// 现在钉的是「哪一段用哪种形态」：
+//   - 第一段只取 ID（`--quiet`，不带任何模板）——ID 是 docker 自己的十六进制串，
+//     没有 `key=value` 那种歧义，也就不需要模板。
+//   - 第二段 `docker inspect` 取结构（不带 `--format`）——它输出的是 docker 的
+//     规范 JSON 数组，是唯一一个**结构**源。
+func TestReclaimStaleScanArgvIsFrozen(t *testing.T) {
 	c := &Docker{cfg: defaultDockerConfig()}
-	argv := c.staleScanArgv("container")
-	if !strings.Contains(argvString(argv), "label="+LabelRun) {
-		t.Errorf("宿主重启恢复必须按 label 扫描: %v", argv)
-	}
-	if argv := c.staleScanArgv("network"); !strings.Contains(argvString(argv), "label="+LabelRun) {
-		t.Errorf("网络扫描也必须按 label: %v", argv)
-	}
-	// 过滤只给键、不给值：owner 不匹配的资源也要被**看见**（它们进 Pending，
-	// 而看不见就无法报告）。
+
 	for _, kind := range []string{"container", "network"} {
-		joined := argvString(c.staleScanArgv(kind))
-		if !strings.Contains(joined, "--filter label="+LabelRun+" ") &&
-			!strings.HasSuffix(joined, "--filter label="+LabelRun) {
-			t.Errorf("%s 扫描的过滤条件必须是「标签存在」: %s", kind, joined)
+		joined := argvString(c.staleListArgv(kind))
+
+		// 过滤只给键、不给值：owner 不匹配的资源也要被**看见**（它们进 Pending，
+		// 而看不见就无法报告）。
+		if !strings.Contains(joined, "label="+LabelRun) {
+			t.Errorf("%s 的列表必须按 label 过滤: %s", kind, joined)
 		}
-		if !strings.Contains(joined, "{{json .Labels}}") {
-			t.Errorf("%s 扫描的输出格式必须是 {{json .Labels}}（单值模板有 `key=value` 的歧义）: %s", kind, joined)
+		if !strings.Contains(joined, "--quiet") {
+			t.Errorf("%s 的列表必须只取 ID（--quiet）: %s", kind, joined)
+		}
+		// 这一条是那次事故的直接防线：任何回到模板的改动都必须在这里变红，
+		// 因为 `{{json .Labels}}` 打印的是字符串，`{{.Labels}}` 是逗号拼接的
+		// `k=v`，两者都不是 JSON 对象。
+		if strings.Contains(joined, "{{") {
+			t.Errorf("%s 的列表不得带模板（模板输出的是表格的重新渲染，不是结构）: %s", kind, joined)
+		}
+	}
+
+	// 容器扫描必须含已停止的容器：崩溃恢复时容器常常已经是 Exited，
+	// 只列运行中的会漏掉它，留下一个永不回收的容器。
+	if joined := argvString(c.staleListArgv("container")); !strings.Contains(joined, "--all") {
+		t.Errorf("容器扫描必须含已停止的容器: %s", joined)
+	}
+
+	// 第二段：inspect 的 ID 必须逐个出现，且**不得带 --format**（带了就不再是
+	// 规范结构，退回「某个人对输出的重新渲染」）。
+	iargv := c.staleInspectArgv([]string{"aaa111", "bbb222"})
+	joined := argvString(iargv)
+	if !strings.Contains(joined, "inspect") {
+		t.Errorf("第二段必须是 inspect: %s", joined)
+	}
+	if strings.Contains(joined, "--format") {
+		t.Errorf("inspect 不得带 --format（要的是规范 JSON 数组）: %s", joined)
+	}
+	for _, id := range []string{"aaa111", "bbb222"} {
+		if !strings.Contains(joined, id) {
+			t.Errorf("inspect 必须带上每个 ID（%s）: %s", id, joined)
 		}
 	}
 }

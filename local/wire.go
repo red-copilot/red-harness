@@ -514,7 +514,7 @@ func auditReady(rs harness.ResultStore) bool {
 // 它是**拒绝**判据，不是归一化：白名单外的字符一律拒绝，绝不替换。
 // 替换的方向是「把两个不同的身份变成同一个」，而 owner 是删除闸门的输入——
 // 「外来的看起来像我的」正是那道闸门唯一不能出的错（见 harness.ResolveOwner
-// 与 parseScan 里「owner 不做任何规范化」的同一条理由）。
+// 与 executor 的 classifyScanned 里「owner 不做任何规范化」的同一条理由）。
 //
 // 允许 `/`：派生形态就是 `host/uid`（harness.ResolveOwner），显式覆盖时也应该
 // 能表达同一个形态。长度上限取 128：这个值会进 Docker label，并被

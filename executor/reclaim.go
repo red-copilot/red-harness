@@ -340,9 +340,13 @@ func (d *Docker) runBinary(ctx context.Context, bin string, args ...string) (str
 // （`runID ∉ live`）只写在 ReclaimStale 的循环里，于是「哪些情况不该删」既不可读、
 // 也无法单独测试，而漏掉的那几条恰恰是删错对象的成因。
 //
-// 分层：parseScan 只负责「把扫描输出变成对象」，judgeStale 只负责「该不该删」，
-// 执行删除留在 ReclaimStale。三者分开之后，「解析歧义」与「归属不匹配」这两种
-// 完全不同的失败不会被混成同一件事。
+// 分层：parseInspect 只负责「把某种输出形态翻译成对象」，classifyScanned 只负责
+// 「标签表 → 归属」，judgeStale 只负责「该不该删」，执行删除留在 ReclaimStale。
+// 分开之后，「解析歧义」与「归属不匹配」这两种完全不同的失败不会被混成同一件事。
+//
+// ⚠️ 归类（classifyScanned）与形态（parseInspect）**必须**是两层：它们曾经是一层，
+// 于是「归类逻辑对不对」从未被真正执行过——夹具编的是我们**以为** docker 会打印的
+// 形态，而 docker 打印的是另一种，每一行都解析失败，全部归到 unparsable。测试是绿的。
 
 // scanObject 是一次 label 扫描读到的**单个**对象。
 type scanObject struct {
@@ -360,35 +364,82 @@ type scanObject struct {
 	Owner  harness.OwnerID
 }
 
-// parseScan 把一次 label 扫描的原始输出解析成对象列表。
+// inspectObject 是 `docker inspect` 数组元素里我们关心的那部分。
 //
-// **为什么是 JSON 而不是「复合模板 + 分隔符」**：runID 由调用方提供，取值域不设
-// 限，分隔符一旦出现在它里面，`{{.Label "run"}}|{{.Label "owner"}}` 就会把字段切
-// 错——而切错的方向是「把别人的 owner 读成自己的」，也就是删除。`{{json .Labels}}`
-// 没有这个问题：JSON 的转义是完备的，取值域再大也不会与结构混淆。
+// 两个标签位是**实测**出来的（本机 Docker 29.8），不是照着文档猜的：
+//   - 容器把用户标签放在 `.Config.Labels`
+//   - 网络把用户标签放在顶层 `.Labels`
 //
-// ⚠️ 解析不出来的一行**绝不能被丢掉**（见 scanObject.Parsed）：它变成一条
-// Parsed=false 的对象，最终进 Pending(unparsable)。
+// 只声明需要的字段，不做全量映射：`docker inspect` 的输出有几十个字段，全量映射
+// 会在 Docker 升级改掉某个字段类型时整体解析失败——而失败的方向是「解析不出来
+// ⇒ 不删」，那会把一次无害的升级变成回收**永久静默失效**。
+type inspectObject struct {
+	Config struct {
+		Labels map[string]string `json:"Labels"`
+	} `json:"Config"`
+	Labels map[string]string `json:"Labels"`
+}
+
+// labelsOf 按对象类型取标签表。容器与网络的标签位不同是 Docker 的输出形态，
+// 不是我们的选择（见 inspectObject 上那段实测记录）。
+func (o inspectObject) labelsOf(kind string) map[string]string {
+	if kind == "network" {
+		return o.Labels
+	}
+	return o.Config.Labels
+}
+
+// parseInspect 把一次 `docker inspect <ids...>` 的输出解析成对象列表。
+//
+// **为什么不是 `ls --format '{{json .Labels}}'`**——这是本文件最贵的一条教训：
+// 那个模板函数在 `docker ps --all` 与 `docker network ls` 上打印的是一个 **JSON
+// 字符串**（`"k=v,k=v"`，逗号拼接），**不是** JSON 对象。照 JSON 对象去
+// `json.Unmarshal` 会**每一行都失败**，于是每个对象都变成 Parsed=false
+// （unparsable），而 `unparsable ⇒ 只报告` 这条安全性质让整件事**完全静默**：
+// 回收永远什么都不删，宿主上的孤儿容器永远躺着。
+//
+// 注意「不删」本身是安全方向，但**「因为解析器坏了所以不删」不是**——它把 N0.2
+// 的出口门「不属于该 owner 的资源不可删除」变成了**空转成立**（什么都不删，所以
+// 「不删别人的」平凡为真）。这就是为什么这一层的测试夹具不能手写：手写的夹具编出
+// 来的正是我们**以为**docker 会打印的东西。
+//
+// inspect 没有这个歧义：它的输出是 docker 的**规范结构**（数组 + 类型化字段），
+// 我们拿到的是真 JSON 对象，而不是某个人对表格输出的重新渲染。
+//
+// ⚠️ 整体解析失败**返回 error 而不是一堆 Parsed=false**：调用方（scanLabeled）
+// 对「docker 真的坏了」与「解析不出某个对象」的处置不同（见那里的退出码处理）。
+// 把前者降级成后者，就等于给一个坏掉的 docker 编一份「都很可疑」的报告。
 //
 // ⚠️ owner 的值**不做任何规范化**（不 trim、不大小写折叠）：规范化只会把两个
 // 不同的 owner 合并成一个，而合并的方向恰好是「外来的看起来像我的」。
-func parseScan(kind, out string) []scanObject {
-	var objs []scanObject
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var labels map[string]string
-		if err := json.Unmarshal([]byte(line), &labels); err != nil {
-			objs = append(objs, scanObject{Kind: kind})
-			continue
-		}
-		runID := strings.TrimSpace(labels[LabelRun])
+func parseInspect(kind, out string) ([]scanObject, error) {
+	var raw []inspectObject
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &raw); err != nil {
+		return nil, fmt.Errorf("解析 docker inspect 输出：%w", err)
+	}
+	labels := make([]map[string]string, 0, len(raw))
+	for _, o := range raw {
+		labels = append(labels, o.labelsOf(kind))
+	}
+	return classifyScanned(kind, labels), nil
+}
+
+// classifyScanned 把「逐个对象的标签表」判成对象列表。它是扫描方式无关的纯函数，
+// 所以能被表驱动地测，而不必造 Docker——parseInspect 只负责把某种输出形态翻译成
+// 这一层的输入。
+//
+// ⚠️ 解析不出来（标签表里没有 run）的**绝不能被丢掉**（见 scanObject.Parsed）：
+// 它变成一条 Parsed=false 的对象，最终进 Pending(unparsable)。`nil` 标签表与
+// 「标签表里 run 为空」在这里是同一档，都归 unparsable。
+func classifyScanned(kind string, labels []map[string]string) []scanObject {
+	objs := make([]scanObject, 0, len(labels))
+	for _, l := range labels {
+		runID := strings.TrimSpace(l[LabelRun])
 		if runID == "" {
-			// 扫描命令带了 `--filter label=red-harness.run`，所以「有标签」是前置
-			// 条件；这里为空只可能是格式变了或标签值真的是空串。两种情况都无法
-			// 归属，归到 unparsable，而不是「一个没有 run 的资源」。
+			// 扫描命令带了 `--filter label=red-harness.run`（ls 那一步），所以
+			// 「有标签」是前置条件；这里为空只可能是标签值真是空串，或者是
+			// inspect 的字段位变了。两种情况都无法归属，归到 unparsable，
+			// 而不是「一个没有 run 的资源」。
 			objs = append(objs, scanObject{Kind: kind})
 			continue
 		}
@@ -396,7 +447,7 @@ func parseScan(kind, out string) []scanObject {
 			Kind:   kind,
 			Parsed: true,
 			RunID:  harness.RunID(runID),
-			Owner:  harness.OwnerID(labels[LabelOwner]),
+			Owner:  harness.OwnerID(l[LabelOwner]),
 		})
 	}
 	return objs

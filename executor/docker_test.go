@@ -845,6 +845,100 @@ func TestIntegrationReclaimStaleKeepsForeignObjects(t *testing.T) {
 	}
 }
 
+// TestIntegrationReclaimStaleFindsContainerOnlyRun 钉住「只有容器、没有网络的孤儿」
+// 能被扫描**看见**并被回收。
+//
+// ⚠️ **为什么必须单独有这一条。** 上面两条回收用例（`TestIntegrationReclaimStale`、
+// `TestV04ReclaimStaleRemovesCrashLeftover`）都**看不见「容器扫描坏了」**：它们造的
+// 孤儿同时有容器与网络，两者共享 runID，所以只要网络被扫到，`ReclaimStale` 就会拿
+// 这个 runID 去调 `Reclaim`，而 `Reclaim` 是**按 label 过滤重新定位**的——它把容器
+// 顺带删掉了。
+//
+// 这不是推测，是实测：把 labelsOf 改成「一律读顶层 Labels」（容器上恒为 nil，于是
+// 每个容器都退化成 Parsed=false/unparsable），那两条用例**依然全绿**，整个包只有
+// Pending 那条负例变红。也就是说，一个「容器永远扫不到」的实现能通过那两条门。
+//
+// 所以这条用例刻意**只造容器、不造网络**：runID 只以容器的形式存在，`Reclaimed`
+// 里出现它就只能来自容器扫描本身，没有任何东西能替它兜底。
+func TestIntegrationReclaimStaleFindsContainerOnlyRun(t *testing.T) {
+	d, ctx := newTestDocker(t)
+	self := harness.OwnerID(d.cfg.Owner)
+	runID := harness.RunID("it-c-only-orphan")
+
+	// 用**原始 docker** 造，不走执行器：走执行器就会顺带建一个同 runID 的网络，
+	// 遮蔽立刻回来（见函数头）。
+	if _, err := d.run(ctx, nil, "create",
+		"--name", string(runID),
+		"--label", LabelRun+"="+string(runID),
+		"--label", LabelOwner+"="+string(self),
+		"--label", LabelRole+"="+roleRunner,
+		testImage(), "sleep", "infinity"); err != nil {
+		t.Fatalf("造孤儿容器: %v", err)
+	}
+	// 清理也走原始 docker：ReclaimStale 成功时它已经没了，失败时它还在（那正是要看的）。
+	t.Cleanup(func() {
+		_, _ = d.run(context.Background(), nil, "rm", "-f", string(runID))
+	})
+
+	// 前置条件：宿主上确实没有这个 runID 的网络。前提不成立遮蔽就回来了，而它会
+	// **静默地**让下面的断言变成空转——所以这里 Fatal 而不是 Error。
+	if out, _ := d.run(ctx, nil, "network", "ls", "--filter", "label="+LabelRun+"="+string(runID), "--format", "{{.Name}}"); strings.TrimSpace(out) != "" {
+		t.Fatalf("前置条件不成立：%s 有网络（%q），遮蔽会回来", runID, out)
+	}
+
+	// ── 扫描面：修复所在的那一层 ──
+	var objs []scanObject
+	for _, kind := range []string{"container", "network"} {
+		part, err := d.scanLabeled(ctx, kind)
+		if err != nil {
+			t.Fatalf("扫描 %s: %v", kind, err)
+		}
+		objs = append(objs, part...)
+	}
+	var seen *scanObject
+	for i := range objs {
+		if objs[i].RunID == runID {
+			seen = &objs[i]
+		}
+	}
+	if seen == nil {
+		t.Fatalf("扫描没看见孤儿容器 %s（objs=%+v）：宿主上的孤儿永远不会被回收", runID, objs)
+	}
+	if !seen.Parsed {
+		t.Fatalf("孤儿容器被判成 Parsed=false（%+v）：它归到 unparsable 就**永不删除**，"+
+			"而这正是 `{{json .Labels}}` 那次事故的形态（每个对象都 unparsable ⇒ 回收恒为空）", *seen)
+	}
+	if seen.Kind != "container" {
+		t.Errorf("孤儿被报成 %q, 期望 container", seen.Kind)
+	}
+	if seen.Owner != self {
+		t.Errorf("孤儿的 owner = %q, 期望 %q（owner 读错位会让本部署的孤儿被判成外来的）", seen.Owner, self)
+	}
+
+	// ── 删除面：端到端 ──
+	// live 用宿主快照再摘掉自己，而不是传 nil：传 nil 意味着「宿主上除我之外全是
+	// 孤儿」，会把同一台宿主上另一个 worktree 正在用的容器一起收掉（同机同 owner）。
+	live := liveRunsOnHost(t, ctx, d)
+	delete(live, runID)
+
+	rep, err := d.ReclaimStale(ctx, live)
+	if err != nil {
+		t.Fatalf("ReclaimStale: %v", err)
+	}
+	found := false
+	for _, id := range rep.Reclaimed {
+		if id == runID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ReclaimStale 应回收 %s, got %v", runID, rep.Reclaimed)
+	}
+	if out, _ := d.run(ctx, nil, "ps", "--all", "--filter", "label="+LabelRun+"="+string(runID), "--format", "{{.ID}}"); strings.TrimSpace(out) != "" {
+		t.Errorf("ReclaimStale 之后孤儿容器仍在: %q", out)
+	}
+}
+
 // 挂载面：宿主状态目录**绝不**出现在容器里。这条断言在真容器上再验一遍——
 // argv 断言保证「没写进去」，这里保证「即使写了也没生效」（比如具名卷的坑）。
 func TestIntegrationNoHostStateVisibleInContainer(t *testing.T) {
