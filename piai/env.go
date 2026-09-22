@@ -122,13 +122,13 @@ func childEnv(envMap map[string]string, binDir string) []string {
 // 针对直接调用 sandboxEnv 的场景。
 func sandboxEnv(envMap map[string]string, provider, home string) []string {
 	merged := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin"}
-	for k, v := range envMap {
-		merged[k] = v
-	}
+	// A shared .env may also contain the platform token. Only the selected
+	// provider's credential names may cross into the untrusted sandbox.
 	// 进程环境**补位**：.env 里有的以 .env 为准（显式配置优先），进程环境只补
 	// .env 没有的。注入的名字只限 provider 凭据族——不是「把宿主环境搬进去」。
 	for _, name := range providerCredentialNames(provider) {
-		if merged[name] != "" {
+		if v := envMap[name]; v != "" {
+			merged[name] = v
 			continue
 		}
 		if v := strings.TrimSpace(os.Getenv(name)); v != "" {

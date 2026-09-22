@@ -295,7 +295,7 @@ func (a *Agent) Start(ctx context.Context, req harness.AgentStart) error {
 		a.Workdir = abs
 	}
 
-	var bin string
+	var bin, probeVersion string
 	if a.Session != nil {
 		// Probe 是**管理检查**：确认镜像可用、容器/session 就绪，并回报容器内的
 		// 工作目录（Launch 的 Workdir 与 --session-dir 都以它为基准）。
@@ -305,6 +305,7 @@ func (a *Agent) Start(ctx context.Context, req harness.AgentStart) error {
 			return fmt.Errorf("piai: sandbox 探测失败: %w", err)
 		}
 		a.containerWorkdir = probe.Workdir
+		probeVersion = probe.PiVersion
 		// 容器内没有宿主二进制：缺省用容器 PATH 上的 "pi"（runner 镜像里在
 		// /usr/local/bin/pi，而 sandboxEnv 钉的 PATH 含 /usr/local/bin）。
 		// 这里**刻意不调 DiscoverBin**——它探的是宿主，宿主上有没有 pi 与容器里
@@ -349,23 +350,13 @@ func (a *Agent) Start(ctx context.Context, req harness.AgentStart) error {
 	}
 
 	if a.Session != nil {
-		// ── 版本校验在 sandbox 路径上的取舍（**这是已知的验证缺口**）──
-		//
-		// v0.4 要求「Probe 在**同一镜像**里核验 pi 版本与运行位置」。当前契约
-		// 做不到：ProbeResult 只有 {ContainerID, PID, Image, Workdir}，没有版本
-		// 字段；而 checkVersion 走的是宿主 exec.Command(bin, "--version")——在
-		// sandbox 路径上那正是被禁止的宿主进程启动，而且探的还是宿主上那个 pi
-		// （与镜像里那份完全无关）。
-		//
-		// 所以这里**没有**拿 ProbeResult 去核对版本，也**没有**填一个看起来像
-		// 版本的假值："sandbox" 是「未校验」的显式标记，不是版本号。Version()
-		// 的调用方看到它就知道版本校验这条防线没有生效。
-		//
-		// 真正的修法不在本包：ProbeResult 需要带上镜像内 pi 的版本（由 sandbox
-		// 实现在同一镜像里执行 `pi --version` 得到），piai 再做区间校验。在那之前
-		// 这里必须留一条明确的缺口记录，而不是用注释把它说成「已由协议握手覆盖」
-		// ——协议握手验的是 RPC 形状，与版本区间是两件事。
-		a.version = "sandbox"
+		// Probe executes pi --version in the exact image used by Launch.
+		// An empty or unsupported version fails before any agent process starts.
+		v, err := validateVersion(probeVersion, a.versionRange())
+		if err != nil {
+			return err
+		}
+		a.version = v
 	} else {
 		if v, err := checkVersion(ctx, bin, env, a.versionRange()); err != nil {
 			return err

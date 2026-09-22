@@ -331,7 +331,7 @@ func newSandboxAgent(t *testing.T, containerWorkdir string) (*Agent, *fakeSessio
 		containerWorkdir = defaultContainerWorkdir
 	}
 	sess := &fakeSession{probeResult: harness.ProbeResult{
-		ContainerID: "fake-container-id", Image: "red-harness-runner:v0.3.0", Workdir: containerWorkdir}}
+		ContainerID: "fake-container-id", Image: "red-harness-runner:v0.3.0", Workdir: containerWorkdir, PiVersion: "0.86.0"}}
 	a := &Agent{
 		Session:      sess,
 		EnvFile:      envFile,
@@ -482,19 +482,24 @@ func TestSandboxUsesProbeWorkdir(t *testing.T) {
 	}
 }
 
-// TestSandboxVersionIsNotVerifiedMarker：sandbox 路径下**没有**做版本校验
-// （ProbeResult 不带版本，宿主 exec 又是被禁的）。这里把「未校验」这件事钉住：
-// Version() 返回的是显式标记而不是一个看起来像版本号的假值。
-//
-// 这是**已知缺口**的记录，不是「已经验证过」的证明：v0.4 要求 Probe 在同一
-// 镜像里核验 pi 版本，需要 ProbeResult 先带上版本字段（不在本包内）。
-func TestSandboxVersionIsNotVerifiedMarker(t *testing.T) {
-	a, _ := newSandboxAgent(t, "")
-	// 一个不可能满足的区间：宿主路径下 Start 会在这里失败。
+func TestSandboxVersionValidatedBeforeLaunch(t *testing.T) {
+	a, sess := newSandboxAgent(t, "")
 	a.VersionRange = VersionRange{Min: "9.0.0", Max: "9.9.9"}
+	if err := a.Start(context.Background(), harness.AgentStart{Workdir: a.Workdir}); err == nil {
+		t.Fatal("镜像内 pi 版本超出支持区间时必须拒绝启动")
+	}
+	if sess.launchCount() != 0 {
+		t.Fatal("版本不支持后仍启动了容器主进程")
+	}
+	a, sess = newSandboxAgent(t, "")
+	sess.probeResult.PiVersion = ""
+	if err := a.Start(context.Background(), harness.AgentStart{Workdir: a.Workdir}); err == nil {
+		t.Fatal("镜像内 pi 版本为空时必须拒绝启动")
+	}
+	a, _ = newSandboxAgent(t, "")
 	startSandboxAgent(t, a)
-	if got := a.Version(); got != "sandbox" {
-		t.Errorf("Version() = %q，期望显式的未校验标记 \"sandbox\"", got)
+	if got := a.Version(); got != "0.86.0" {
+		t.Errorf("Version() = %q，期望镜像内版本", got)
 	}
 }
 
@@ -637,7 +642,7 @@ func TestSandboxCloseKillsManagedProcess(t *testing.T) {
 // （没有 session 就只能回落宿主进程，而那条路径是禁止的），事件出口也不能缺。
 func TestFactoryRequiresSessionAndSink(t *testing.T) {
 	f := &Factory{}
-	sess := &fakeSession{probeResult: harness.ProbeResult{Workdir: "/work"}}
+	sess := &fakeSession{probeResult: harness.ProbeResult{Workdir: "/work", PiVersion: "0.86.0"}}
 	sink := &recSink{}
 
 	ag, err := f.New(harness.AgentSpec{}, nil, sink)
@@ -678,7 +683,7 @@ func TestFactoryDoesNotDoubleEmit(t *testing.T) {
 	t.Setenv("OPENCODE_API_KEY", "")
 	t.Setenv("OPENCODE_GO_API_KEY", "")
 
-	sess := &fakeSession{probeResult: harness.ProbeResult{Workdir: "/work"}}
+	sess := &fakeSession{probeResult: harness.ProbeResult{Workdir: "/work", PiVersion: "0.86.0"}}
 	sink := &recSink{}
 	f := &Factory{EnvFile: envFile}
 	ag, err := f.New(harness.AgentSpec{Provider: "opencode-go", Model: "deepseek-v4-flash"}, sess, sink)
@@ -745,8 +750,8 @@ func TestSandboxEnvNeverInheritsHostEnv(t *testing.T) {
 	if _, ok := got["BENCHMARK_TOKEN"]; ok {
 		t.Error("宿主的平台 token 被继承进 sandbox 环境了")
 	}
-	if got["A"] != "1" {
-		t.Errorf("A = %q", got["A"])
+	if _, ok := got["A"]; ok {
+		t.Error("非 provider 的 .env 项被注入 sandbox")
 	}
 	if got["HOME"] != "/work/.home" {
 		t.Errorf("HOME 缺省 = %q，期望容器内可写路径 /work/.home", got["HOME"])

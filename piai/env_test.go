@@ -3,6 +3,7 @@ package piai
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -100,6 +101,21 @@ func TestLoadEnvMissingIsNotError(t *testing.T) {
 func TestResolveEnvFileExplicitMustExist(t *testing.T) {
 	if _, _, err := resolveEnvFile(filepath.Join(t.TempDir(), "nope.env"), t.TempDir()); err == nil {
 		t.Fatal("显式指定的 .env 不存在时必须报错（显式配置静默降级是事故温床）")
+	}
+}
+
+func TestSandboxEnvExcludesPlatformToken(t *testing.T) {
+	got := sandboxEnv(map[string]string{
+		"OPENCODE_API_KEY": "test-provider-canary",
+		"BENCHMARK_TOKEN":  "test-platform-canary",
+		"PATH":             "/host-only",
+	}, "opencode-go", "/work/.home")
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "test-provider-canary") {
+		t.Fatal("provider credential did not reach sandbox")
+	}
+	if strings.Contains(joined, "test-platform-canary") || strings.Contains(joined, "/host-only") {
+		t.Fatal("host-only environment reached sandbox")
 	}
 }
 

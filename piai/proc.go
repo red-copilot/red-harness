@@ -150,9 +150,19 @@ func checkVersion(ctx context.Context, bin string, env []string, rng VersionRang
 		return "", fmt.Errorf("piai: 无法执行 `%s --version`: %w", bin, err)
 	}
 	got := strings.TrimSpace(string(out))
+	return validateVersion(got, rng)
+}
+
+func validateVersion(got string, rng VersionRange) (string, error) {
+	if strings.TrimSpace(got) == "" {
+		// 消息必须对两条路径都成立：宿主路径（checkVersion）与 sandbox 路径
+		// （镜像内 `pi --version`）共用这个校验，写成「镜像内」会让宿主上的
+		// 空输出被误报成镜像问题。
+		return "", fmt.Errorf("piai: pi --version 输出为空，版本无法核验")
+	}
 	cur, ok := parseVersion(got)
 	if !ok {
-		return got, fmt.Errorf("piai: 无法解析 `%s --version` 的输出 %q", bin, got)
+		return got, fmt.Errorf("piai: 无法解析 pi --version 的输出 %q", got)
 	}
 	if rng.Min != "" {
 		if min, ok := parseVersion(rng.Min); ok && cmpVersion(cur, min) < 0 {

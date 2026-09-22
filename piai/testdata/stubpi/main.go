@@ -34,6 +34,7 @@
 //	providerr    provider 失败：stopReason=error + 空 content + 照常 settled
 //	provider1st  第 1 轮 provider 失败、第 2 轮起正常（测 ProviderError 的轮级语义）
 //	big          单帧 512 KB（reader 缓冲上限回归）
+//	solve        离线 Docker 闭环：从工具输出报告 Fake 场景的测试答案与容器身份
 package main
 
 import (
@@ -418,8 +419,15 @@ func (s *stub) runTurn() {
 		os.Exit(9)
 	}
 
+	toolCommand, toolOutput := "ls -la", "total 0\n"
+	if s.scenario == "solve" {
+		toolCommand = "hostname"
+		selfHost, _ := os.Hostname()
+		toolHost, _ := exec.Command("hostname").Output()
+		toolOutput = "flag{demo-offline-acceptance}\nagent-host=" + selfHost + " tool-host=" + strings.TrimSpace(string(toolHost)) + "\n"
+	}
 	s.send(map[string]any{"type": "tool_execution_start", "toolCallId": "call_1", "toolName": "bash",
-		"args": map[string]any{"command": "ls -la"}})
+		"args": map[string]any{"command": toolCommand}})
 
 	if s.scenario == "ui" {
 		s.dialogs()
@@ -428,7 +436,7 @@ func (s *stub) runTurn() {
 	s.send(map[string]any{"type": "tool_execution_end", "toolCallId": "call_1", "toolName": "bash",
 		"isError": false,
 		"result": map[string]any{
-			"content": []any{map[string]any{"type": "text", "text": "total 0\n"}},
+			"content": []any{map[string]any{"type": "text", "text": toolOutput}},
 			"details": map[string]any{"report_fact": map[string]any{
 				"facts":  []any{map[string]any{"kind": "service", "content": "nginx 1.18"}},
 				"next":   "试试 /admin",
