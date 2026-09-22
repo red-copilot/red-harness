@@ -104,6 +104,9 @@ sequenceDiagram
 
 ## 5. 当前状态与验收口径
 
-截至本文更新，`go test ./... -count=1` 与 `go test -race ./... -count=1` 均通过；**M1 的真实容器纵向闭环已实测通过**（`go test -tags integration ./cmd/red-harness/... -count=1`，本机 Docker 29.8 / root / runner 镜像在位，14.3s）：stub pi 与其子工具回报同一个容器 hostname 并等于 `Probe` 返回的容器 ID，provider key 不出现在任何一次 docker argv 里，正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
+截至本文更新，`go test ./... -count=1` 与 `go test -race ./... -count=1` 均通过；**两条真实容器门都已实测通过**：
 
-**尚未证明**：默认拒绝出站的真机复核、授权 TSecBench 平台上的线上通过率与召回率口径。这两项不由离线测试或 Fake 场景代替，授权环境不可用时发布门保持未通过。
+- **新同步入口的纵向闭环**（`go test -tags integration ./cmd/red-harness/... -count=1`，本机 Docker 29.8 / root / runner 镜像在位，10.7s）：stub pi 与其子工具回报同一个容器 hostname 并等于 `Probe` 返回的容器 ID，provider key 不出现在任何一次 docker argv 里，正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
+- **隔离性质**（`go test -tags integration ./executor/... -count=1`，25 条全通过）：只读 rootfs 与有界 tmpfs、非 root、资源上限、宿主状态在容器内不可见、非授权端点不可达、provider 仅经白名单代理可达、按 run label 的回收与遗留回收。
+
+**尚未证明**：授权 TSecBench 平台上的线上通过率与召回率口径，以及「目标可达 / 非目标不可达」在真实靶场（而非本地 Docker）的复核。这些不由离线测试或 Fake 场景代替，授权环境不可用时发布门保持未通过。

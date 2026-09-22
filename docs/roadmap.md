@@ -13,7 +13,7 @@ v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`�
 | 阶段 | 优先级 / 状态 | 交付范围 | 可观察出口门 |
 |---|---|---|---|
 | M1 离线真实容器闭环 | P0 / **已通过** | Fake + stub pi 经 CLI、同步 Harness 和真实 SandboxSession 完成一题 | pi 与工具同处目标容器；提交由 Fake 确认；正常、取消和启动失败后资源零遗留 |
-| M2 上线前隔离与凭据门 | P0 / **进行中** | 凭据传递、镜像内版本核验、网络与文件系统隔离 | canary 不进 argv/公开输出（**已实测**）；版本可核验（**已落地**）；未授权端点不可达（**待真机复核**）；隔离测试全绿 |
+| M2 上线前隔离与凭据门 | P0 / **离线门已通过** | 凭据传递、镜像内版本核验、网络与文件系统隔离 | canary 不进 argv/公开输出（**已实测**）；版本可核验（**已实测**）；隔离测试全绿（**25 条全通过**）；未授权端点不可达仅在本地 Docker 验证，真实靶场未复核 |
 | M3 运行可靠性 | P0 / **已完成（离线）** | 有界事件、真实预算、平台对账、恢复策略与清理 | 故障注入得到确定的题级终态；取消后仍保存安全结果；无残留资源；**事实型停滞与换支已落地** |
 | M4 指标与发布验收 | P0/P1 / **进行中** | 冻结 profile、私密 trace、指标修正、真实 pi 与授权平台冒烟 | 指标可重算（**已落地**）；公开面无明文（**已落地**）；真实 pi 与授权平台冒烟**未通过** |
 
@@ -28,10 +28,11 @@ v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`�
 **实测状态（2026-09-22，本机 Docker 29.8 / root / runner 镜像在位）**：
 `go test -tags integration ./cmd/red-harness/... -count=1` 14.3s 全绿，覆盖了上面第 1、3 条与第 2 条里的**生命周期**部分——同容器身份（stub pi 与其子工具回报同一个 hostname，且等于 `Probe` 的容器 ID）、provider key 不进任何一次 docker argv、正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
 
-**尚未覆盖**：只读 rootfs、有界 tmpfs、非 root、CPU/内存/PID/墙钟限制这四项**性质**。
-它们在 `executor` 侧是按配置下发的，但**本阶段新增的**集成用例只证明「跑通了」，没有对
-运行中的容器逐项取证；而旧 `Executor` 端口里那两条**试图**取证的用例目前是失败的
-（见 M2 的实测状态表）。所以在这四项补齐之前，M1 标为「出口门已通过、交付范围部分覆盖」。
+**隔离性质的取证在旧 `Executor` 端口上，且已全绿**：只读 rootfs、有界 tmpfs、非 root、
+资源上限、宿主状态不可见、未授权端点不可达等 25 条集成用例全部通过（见 M2 的实测状态）。
+**本阶段新增的**同步入口用例（`cmd/red-harness`）证明的是编排闭环本身——同容器身份、
+凭据不进 argv、三条路径零遗留——不重复取证隔离性质。所以 M1 标为「出口门已通过、
+隔离性质由 M2 侧的用例覆盖」。
 
 ## M2：上线前隔离与凭据门
 
@@ -40,24 +41,27 @@ v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`�
 - 从 `Scenario.Prepare` 的目标生成 IP:port 白名单，测试目标可达、非目标、宿主监听端口及公网默认不可达，provider 仅经白名单代理可达。明确记录同一 Docker bridge 内流量不经过当前 iptables 规则的边界，避免将其误报为已隔离。
 - 任一凭据、版本或隔离检查失败，即停止在离线阶段，不执行授权平台冒烟。
 
-**实测状态（2026-09-22）**：前两条已落地并实测——provider key 走 0600 的
-`--env-file` 而非 `-e KEY=value`（argv canary 有集成回归，实测通过），`Probe` 在运行所用
-镜像里跑 `pi --version` 并回报 `PiVersion`，空值拒绝启动。
+**实测状态（2026-09-22）**：三条均已落地并实测——provider key 走 0600 的
+`--env-file` 而非 `-e KEY=value`（argv canary 有集成回归，实测通过）；`Probe` 在运行所用
+镜像里跑 `pi --version` 并回报 `PiVersion`，空值拒绝启动；**隔离测试全绿**：
+`go test -tags integration ./executor/... -count=1` 25 条全通过，含只读 rootfs、
+非 root（`TestIntegrationRunsAsNonRoot`）、资源上限、宿主状态在容器内不可见
+（`TestIntegrationNoHostStateVisibleInContainer`）、非授权端点不可达
+（`TestIntegrationUnauthorizedEndpointUnreachable`）与 provider 仅经白名单代理可达。
 
-**⚠️ 第三条「隔离测试全绿」尚未满足**：`go test -tags integration ./executor/... -count=1`
-当前有 **2 个失败**，且都是**先于本轮改动**就存在的（在改动前的 `8d40807` 上逐条复现，
-非本轮引入）。两者都在**旧 `Executor` 端口**（`executor/docker.go`），v0.4 的同步入口
-不走这条路径（它用 `SandboxSession.Launch` + `ManagedProcess`），但 M2 的出口门写着
-「隔离测试全绿」，所以这里如实记为未通过：
+补齐这条门时先发现旧 `Executor` 端口有 2 个**先于本轮**就存在的失败（在改动前的
+`8d40807` 上逐条复现），已定位并修复：
 
-| 用例 | 现象 | 已定位的原因 |
+| 用例 | 现象 | 原因 |
 |---|---|---|
-| `TestIntegrationReadOnlyRootfs` | 容器内写 `/` 确实失败（退出码非 0），但 `ExecResult.Stderr` 恒为空，断言「失败原因含 read-only」永远不成立 | `docker.go:212` 用 `stderrOf(ee)` 取 stderr，而 `runCmdStdin` 把 stderr 收进了局部 buffer（`cmd.Stderr = &stderr`）——Go 只在走 `Output()` 时才填 `ExitError.Stderr`，所以它恒为 nil。真正的消息在返回的 error 里，但 `Exec` 在「命令非零退出」这条分支上把它丢了 |
-| `TestIntegrationWallClockTimeout` | `sleep 60` 超时后容器**没了**，后续 `echo alive` 失败（退出码 1、无输出） | `docker.go:412` 的超时补刀是 `pkill -f -- <cmd[0]>`，对本例即 `pkill -f sleep`——它同时匹配容器的 PID 1（`sleep infinity`），把容器本身杀掉。这正是历史记录里那条「pkill-kills-exec-session」猜想 |
+| `TestIntegrationReadOnlyRootfs` | 容器内写 `/` 确实被拒（退出码非 0），但 `ExecResult.Stderr` **恒为空**，断言「失败原因含 read-only」永不成立 | `Exec` 用 `stderrOf(ee)` 取 stderr，而 `runCmdStdin` 已把它收进局部 buffer——Go 只在走 `Output()` 时才填 `ExitError.Stderr`，显式设过 `cmd.Stderr` 的情况下它恒为 nil |
+| `TestIntegrationWallClockTimeout` | `sleep 60` 超时后容器**没了**，后续 `echo alive` 失败 | 超时补刀是 `pkill -f -- <cmd[0]>`，对本例即 `pkill -f sleep`——它同时匹配容器的 PID 1（`sleep infinity`），杀的是容器本身 |
 
-容器与 `docker exec` 本身在这个环境里是正常的（用同样的
-`--read-only --user 65534:65534 -v <host>:/work --workdir /work` 手工复现，两条命令的
-输出与退出码都符合预期）。所以这两个失败是**旧端口自身的缺陷**，不是环境问题。
+两者都不是环境问题：用同样的 `--read-only --user 65534:65534 -v <host>:/work
+--workdir /work` 手工起容器，`docker exec` 的输出与退出码都符合预期。
+
+**仍需授权环境**：同一 bridge 内流量不经过当前 iptables 规则的边界已有文字记录，
+但「目标可达 / 非目标不可达」的真机结论只在本机 Docker 上验证过，未在真实靶场复核。
 
 ## M3：运行可靠性
 
