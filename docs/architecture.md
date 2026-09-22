@@ -107,7 +107,10 @@ sequenceDiagram
 截至本文更新，`go test ./... -count=1` 与 `go test -race ./... -count=1` 均通过。三条真实容器/真实平台的门：
 
 - **新同步入口的纵向闭环**（`go test -tags integration ./cmd/red-harness/... -count=1`，10.7s）：stub pi 与其子工具回报同一个容器 hostname 并等于 `Probe` 返回的容器 ID，provider key 不出现在任何一次 docker argv 里，正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
-- **执行器隔离用例**（`go test -tags integration ./executor/... -count=1`）：只读 rootfs 与有界 tmpfs、非 root、资源上限、宿主状态不可见、非授权端点不可达、provider 仅经白名单代理可达。⚠️ **在 master 上这批是 12 条，且全部走旧 `Exec` 端口（`executor/docker.go`）**——覆盖 `SandboxSession`（v0.4 生产路径，`executor/session.go`）的 13 条 `TestV04*` 只存在于未合并分支 `v04-container-lifecycle`，**本文件此前记的「25 条」在 master 上不可复现**。所以这段证明的是**旧入口**的执行器，**既不能**代替对装配路径的验证（见下），**也不能**代替对 v0.4 session 路径的验证。
+- **执行器隔离用例**（`go test -tags integration ./executor/... -count=1`，**25 条，实测 84.1s 全绿、0 跳过**）：只读 rootfs 与有界 tmpfs、非 root、资源上限、宿主状态不可见、非授权端点不可达、provider 仅经白名单代理可达。这 25 条由两部分组成，**取证范围不同**：
+  - **12 条 `TestIntegration*`** 走旧 `Exec` 端口（`executor/docker.go`）；
+  - **13 条 `TestV04*`** 走 **`SandboxSession`（v0.4 生产路径，`executor/session.go`）**，2026-09-22 从不合并分支 `v04-container-lifecycle` 抢救回 master（`828d904`），并暴露出该路径上一个真缺口（`Launch` 的 Workdir 绕过校验、且一次被拒即永久废掉 session，见 `ededebb`）。
+  两部分都**用 `DefaultDockerConfig()` 构造执行器**，所以它们证明的是执行器与 session 本身，**不能**代替对**装配路径**的验证（见下）——生产装配曾经把隔离开关整片落成零值，而那 25 条照样全绿。
 - **授权 TSecBench 真跑（首次打通）**：`list_challenges` 拿到 63 题；`start_challenge` 起容器后本地 sandbox 内 pi `0.85.1` 跑了 58 次真实工具调用，从靶场拿到 `HTTP/1.1 200 OK`；217 条事件落入 `private/`，成本 $0.0117。提交被平台以 `app_error (http 501)` 挡下，harness 按设计以「提交结果不确定」结束本题并**正确关闭了题目容器**（平台侧确认 `stopped`，无遗留）。
 
 **同一次真跑暴露了两个缺陷，均已修复**：

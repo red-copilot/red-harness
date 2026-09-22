@@ -28,11 +28,13 @@ v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`�
 **实测状态（2026-09-22，本机 Docker 29.8 / root / runner 镜像在位）**：
 `go test -tags integration ./cmd/red-harness/... -count=1` 14.3s 全绿，覆盖了上面第 1、3 条与第 2 条里的**生命周期**部分——同容器身份（stub pi 与其子工具回报同一个 hostname，且等于 `Probe` 的容器 ID）、provider key 不进任何一次 docker argv、正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
 
-**隔离性质的取证在旧 `Executor` 端口上，且那批用例全绿**：只读 rootfs、有界 tmpfs、非 root、
-资源上限、宿主状态不可见、未授权端点不可达等集成用例全部通过（见 M2 的实测状态）。
-⚠️ **但 master 上这批是 12 条，且全部走旧 `Exec` 端口**——覆盖 v0.4 `SandboxSession`
-（生产路径）的 13 条 `TestV04*` 只存在于未合并分支 `v04-container-lifecycle`。本文此前记的
-「25 条」是那个分支的数字，**在 master 上不可复现**；抢救该套件是 M2 的待办（见 M2 末段）。
+**隔离性质的取证分两条路径，都全绿**（`go test -tags integration ./executor/... -count=1`，
+**实测 25 条 / 84.1s / 0 跳过**）：只读 rootfs、有界 tmpfs、非 root、资源上限、宿主状态
+不可见、未授权端点不可达等。其中 12 条走旧 `Exec` 端口，13 条 `TestV04*` 走 v0.4 的
+**`SandboxSession`（生产路径）**——后者 2026-09-22 从不合并分支 `v04-container-lifecycle`
+抢救回 master（`828d904`），并当场暴露出该路径上的一个真缺口（`Launch` 的 Workdir 绕过
+校验、且一次被拒即永久废掉 session，已修 `ededebb`）。此前记的「25 条」是**那个分支的
+数字**，在 master 上不可复现——现在它可复现了。
 **本阶段新增的**同步入口用例（`cmd/red-harness`）证明的是编排闭环本身——同容器身份、
 凭据不进 argv、三条路径零遗留——不重复取证隔离性质。
 
