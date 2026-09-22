@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -175,6 +176,40 @@ func TestIntegrationCLIFakeDocker(t *testing.T) {
 	// 所以它非空就证明 CLI 路径与直接 SDK 调用在这一项上同口径了。
 	if run.BundleDigest == "" {
 		t.Fatal("--bundle 没有产生 BundleDigest：CLI 路径与 SDK 路径仍然不同口径")
+	}
+	// 候选审计对账（R1 出口条件）：生产装配路径上必须真的落出审计行，且行数与
+	// 公开面的提交数一致。这条**只能在真实装配里验**——离线用例用的是假件，
+	// 证明不了「装起来之后这个端口是接上的」。
+	auditPath := filepath.Join(resultDir, "private", string(run.RunID), "submissions.jsonl")
+	auditBytes, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("生产路径没有落出候选审计 %s: %v", auditPath, err)
+	}
+	auditLines := strings.Split(strings.TrimSpace(string(auditBytes)), "\n")
+	if len(auditLines) != run.Challenges[0].Outcome.Submitted {
+		t.Fatalf("审计行数 = %d，公开的 Submitted = %d——两者必须对得上",
+			len(auditLines), run.Challenges[0].Outcome.Submitted)
+	}
+	var rec struct {
+		Flag        string `json:"flag"`
+		Fingerprint string `json:"fingerprint"`
+		Correct     bool   `json:"correct"`
+		SubmittedAt string `json:"submittedAt"`
+	}
+	if err := json.Unmarshal([]byte(auditLines[0]), &rec); err != nil {
+		t.Fatalf("审计行不是合法 JSON: %v", err)
+	}
+	if !rec.Correct || rec.Fingerprint == "" || rec.SubmittedAt == "" || rec.Flag == "" {
+		t.Fatalf("审计行缺少「提交了什么、平台怎么判的」所需的字段: %+v", rec)
+	}
+	// 公开面不得出现这条明文。用审计行自己的 flag 当 canary，所以不需要在用例里
+	// 写死任何真实答案。
+	publicBytes, err := os.ReadFile(filepath.Join(resultDir, "results", string(run.RunID)+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(publicBytes), rec.Flag) {
+		t.Fatalf("公开结果泄漏了候选明文: %s", publicBytes)
 	}
 	for _, kind := range []string{"ps", "network ls"} {
 		args := []string{"ps", "--all", "--quiet"}

@@ -222,6 +222,9 @@ type stubScenario struct {
 	evalErr        error
 	cleanupErr     error
 	discoverErr    error
+	// evalHook 让用例按候选内容给不同判定（确认 / 幂等重复 / 判错）。
+	// 为 nil 时走默认的「对不对」二值判定。
+	evalHook func(flag string) Evaluation
 }
 
 func (s *stubScenario) Discover(context.Context, RunSpec) ([]Challenge, error) {
@@ -253,6 +256,9 @@ func (s *stubScenario) Evaluate(_ context.Context, ch Challenge, flag string) (E
 		return Evaluation{}, s.evalErr
 	}
 	s.submitted = append(s.submitted, flag)
+	if s.evalHook != nil {
+		return s.evalHook(flag), nil
+	}
 	ok := flag == s.answers[ch.Code]
 	return Evaluation{Accepted: ok, Progress: ok, Completed: ok, Score: boolScore(ok)}, nil
 }
@@ -1485,12 +1491,15 @@ func (g *stubGate) NewAll() []Candidate {
 	return out
 }
 
-func (g *stubGate) Mark(flag string, res Evaluation, err error) {
+func (g *stubGate) Mark(flag string, res Evaluation, err error) SubmissionVerdict {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	c, ok := g.seen[flag]
 	if !ok {
-		return
+		return SubmissionVerdict{}
+	}
+	if c.Submitted {
+		return SubmissionVerdict{}
 	}
 	c.Submitted = true
 	c.Correct = res.Accepted
@@ -1498,6 +1507,8 @@ func (g *stubGate) Mark(flag string, res Evaluation, err error) {
 	// 在这里漂移的话，编排测试断言的「重复计入确认」就会与生产行为不符。
 	c.Duplicate = res.Accepted && !res.Progress
 	g.seen[flag] = c
+	v := SubmissionVerdict{Correct: res.Accepted, Duplicate: c.Duplicate, Rejected: !res.Accepted && err == nil, Uncertain: err != nil}
+	return v
 }
 
 func (g *stubGate) SetIntent(string, int) {}

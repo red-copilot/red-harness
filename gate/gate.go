@@ -562,22 +562,28 @@ func (g *Gate) NewAll() []harness.Candidate {
 // （Accepted）但没有让进度前进（!Progress），等价于「这个答案此前已被确认过」。
 // 派生放在这里而不是调用方，是为了让「什么算重复」只有一个定义——两处各写一遍
 // 必然漂移，而漂移的表现是幂等命中被记成新增确认，通过率系统性偏高。
-func (g *Gate) Mark(flag string, res harness.Evaluation, err error) {
+func (g *Gate) Mark(flag string, res harness.Evaluation, err error) harness.SubmissionVerdict {
 	if g == nil {
-		return
+		return harness.SubmissionVerdict{}
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	c, ok := g.byFlag[flag]
 	if !ok {
-		return
+		return harness.SubmissionVerdict{}
 	}
 	if c.Submitted {
-		return
+		// 已经提交过：不再改账本，也**不返回判定**。
+		//
+		// 返回一个非零结论会让调用方把一次被丢弃的重提记成一次真实提交——而
+		// 「同一答案永不重提」正是这条分支存在的理由，它的统计后果必须与它的
+		// 行为一致：什么都没发生。
+		return harness.SubmissionVerdict{}
 	}
 	c.Submitted = true
 	g.stats.Submitted++
 	duplicate := res.Accepted && !res.Progress
+	v := harness.SubmissionVerdict{Duplicate: duplicate}
 	switch {
 	case err != nil:
 		// 传输/平台错误：记在 SubmitError，**不动 RejectReason**——族别归因
@@ -585,13 +591,16 @@ func (g *Gate) Mark(flag string, res harness.Evaluation, err error) {
 		// 合并会永久丢掉前一个答案（这是根包契约把 Reject 拆成
 		// RejectReason/SubmitError 两个字段的原因）。
 		c.SubmitError = err.Error()
+		v.Uncertain = true
 	case duplicate:
 		c.Duplicate = true
 		c.Correct = true
 		g.stats.Correct++
+		v.Correct = true
 	case res.Accepted:
 		c.Correct = true
 		g.stats.Correct++
+		v.Correct = true
 	default:
 		// 判错的说明用平台原样返回的文本（已被 Scenario 折进 Message 的
 		// 安全子集）；为空时退回一个固定标识，不留空串——空串与「没有判错」
@@ -601,7 +610,9 @@ func (g *Gate) Mark(flag string, res harness.Evaluation, err error) {
 			c.SubmitError = res.Message
 		}
 		g.stats.Rejected++
+		v.Rejected = true
 	}
+	return v
 }
 
 // SetProvenance 把一个候选显式**升**到某一族。降级请求一律被忽略。

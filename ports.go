@@ -292,6 +292,27 @@ type Candidate struct {
 	SubmitError string
 }
 
+// SubmissionVerdict 是 Gate 从一次平台判定里**派生**出来的账本结论。
+//
+// 为什么由 Mark 返回它，而不是让调用方自己看 Evaluation 的字段：Duplicate 的
+// 定义是派生的（`Accepted && !Progress` ⇒ 幂等命中），「什么算重复」必须只有
+// 一个定义。调用方各写一遍必然漂移，而漂移的表现是**幂等命中被记成新增确认**，
+// 通过率系统性偏高——报告上完全看不出来。
+//
+// 四个字段互斥性由 Gate 保证：Uncertain 与非 Uncertain 互斥，Duplicate 蕴含
+// Correct，Rejected 表示平台明确判错。
+type SubmissionVerdict struct {
+	// Correct 为真表示平台确认了这个答案（**幂等命中也算**）。
+	Correct bool
+	// Duplicate 为真表示平台确认过、但进度没有前进 ⇒ 这次是幂等命中。
+	Duplicate bool
+	// Rejected 为真表示平台明确判错（既没确认，也没有出错）。
+	Rejected bool
+	// Uncertain 为真表示这次提交的**结果未知**（平台写超时、传输错误）。
+	// 它与 Rejected 是两件事：不知道结果不等于判错。
+	Uncertain bool
+}
+
 // CandidateGate 是候选答案的账本与证据闸。
 //
 // 契约要点：
@@ -322,13 +343,16 @@ type CandidateGate interface {
 	New() []Candidate
 	// NewAll 返回本次新增、未提交的 observed + derived 候选（v0.4 视图）。
 	NewAll() []Candidate
-	// Mark 用**平台无关的** Evaluation 回填一次提交的判定。
+	// Mark 用**平台无关的** Evaluation 回填一次提交的判定，并返回它派生的结论。
 	//
 	// 为什么收 Evaluation 而不是平台层的 SubmitResult：gate 的账本是通用模型
 	// 的一部分，让它依赖某个平台的响应结构，等于把平台字段一路漏进调度与报告。
 	// 平台特有的字段由 Scenario 在 Evaluate 里映射掉，映射不进来的（例如
 	// CorrectFlagCount 这类）本就该由 Reconcile 的权威进度承担，而不是塞进账本。
-	Mark(flag string, res Evaluation, err error)
+	//
+	// 返回值见 SubmissionVerdict：调用方（轮循环与候选审计）读它，而不是自己
+	// 从 Evaluation 再推一遍「什么算重复」。
+	Mark(flag string, res Evaluation, err error) SubmissionVerdict
 	SetIntent(intentID string, round int)
 }
 

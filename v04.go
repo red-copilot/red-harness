@@ -263,6 +263,48 @@ type TraceStore interface {
 	AppendTrace(context.Context, RunID, string, Event) error
 }
 
+// CandidateAudit 是一条**私密**的候选审计记录：这次提交了什么，平台怎么判的。
+//
+// 为什么必须有它，而不是靠 trace 反推：trace 只接 agent 事件（`sink.on` 的输入
+// 全是 agent Emit），而 `Evaluate` / `Mark` 的结果**从不经过**它。于是「提交了
+// 哪一条、平台怎么判的」在落盘面上不可回答——公开结果只有聚合计数，判定只在
+// 内存里活到本题结束。一次真跑里「147 次提交、146 条判错」这种事实，事后只能靠
+// 数聚合计数去猜，而「猜」正是这份记录要消灭的东西。
+//
+// ⚠️ **这是私密面**：Flag 是明文，Message 是平台原话。实现方必须把它写进
+// 0700/0600 的私密目录，绝不能进公开结果、CLI 输出或图。
+//
+// Fingerprint **不在这里**：它是 `answer.Fingerprint` 的产物，而根包不许 import
+// 任何子包（`answer` 是子包）。所以由实现方（store 已 import answer）用那个唯一
+// 实现算出来写进审计行——见 store/audit.go。
+type CandidateAudit struct {
+	// Source / Provenance / IntentID / Round 是这条候选的出处与推导链锚点。
+	Source     string
+	Provenance string
+	IntentID   string
+	Round      int
+	// SubmittedAt 是**发起**这次提交的宿主时间。
+	SubmittedAt time.Time
+	// Verdict 是 Gate 派生出的判定（含 Duplicate 的派生）。
+	Verdict SubmissionVerdict
+	// Score 是平台给的本次得分。
+	Score int
+	// Message 是平台原样返回的说明，用于诊断。只进私密面。
+	Message string
+	// SubmitError 是平台侧判错/出错的信息。只进私密面。
+	SubmitError string
+	// Flag 是候选**明文**。它与结果一起构成「提交了什么」的完整答案。
+	Flag string
+}
+
+// AuditStore is an optional private candidate-audit sink.
+//
+// 与 TraceStore 同形（可选端口，按类型断言取用），理由也一样：不接它不影响任何
+// 一次运行的成败，但**不接就等于没有审计**——所以它必须能被单独看见。
+type AuditStore interface {
+	AppendAudit(ctx context.Context, runID RunID, challenge string, rec CandidateAudit) error
+}
+
 // RunLocker 是**跨进程**的单运行锁。
 //
 // 为什么必须有它，而进程内的 Mutex 不够：同一台宿主上两个 red-harness 进程
@@ -454,12 +496,15 @@ func (m *RunManifest) observeProbe(p ProbeResult) {
 // Harness is the synchronous v0.4 façade. It intentionally contains no pause,
 // resume, control socket or web lifecycle.
 type Harness struct {
-	scenario          Scenario
-	sandbox           Sandbox
-	agents            AgentFactory
-	results           ResultStore
-	locker            RunLocker
-	graphs            GraphSaver
+	scenario Scenario
+	sandbox  Sandbox
+	agents   AgentFactory
+	results  ResultStore
+	locker   RunLocker
+	graphs   GraphSaver
+	// audits 是**可选**的私密候选审计落点，从 Results 上取（两者是同一棵树上的
+	// 两个目录，由同一个实现提供）。nil 表示不接审计。
+	audits            AuditStore
 	gate              func(Challenge) CandidateGate
 	solverWithProfile func(Challenge, SolverProfile) (Planner, Renderer)
 	solver            func(Challenge) (Planner, Renderer)
@@ -527,15 +572,25 @@ func NewHarness(opts HarnessOptions) (*Harness, error) {
 	if opts.Locker == nil {
 		missing = append(missing, "Locker")
 	}
+	// Profile 是装配层的**默认** profile（RunSpec 里那份非空时它不生效）。它配错
+	// 了必须在构造时炸，而不是等某次运行跑到轮循环里才发现——那时容器已经起了、
+	// 预算已经开始花了。
+	if err := opts.Profile.Validate(); err != nil {
+		return nil, err
+	}
 	if len(missing) > 0 {
 		return nil, Ef(KindConfig, "harness.new", "缺少必需端口: "+strings.Join(missing, ", "), nil)
 	}
+	// 审计端口是**可选**的，所以不进 missing 列表：不接它不影响任何一次运行的
+	// 成败。但接了就要被看见（Doctor 会打印一行），而且它是从 Results 上取的
+	// ——公开结果与私密审计是同一棵树上的两个目录。
+	audits, _ := opts.Results.(AuditStore)
 	now := opts.Now
 	if now == nil {
 		now = time.Now
 	}
 	return &Harness{scenario: opts.Scenario, sandbox: opts.Sandbox, agents: opts.Agents,
-		results: opts.Results, locker: opts.Locker, graphs: opts.Graphs, gate: opts.Gate, solverWithProfile: opts.SolverWithProfile, solver: opts.Solver, planner: opts.Planner,
+		results: opts.Results, locker: opts.Locker, graphs: opts.Graphs, audits: audits, gate: opts.Gate, solverWithProfile: opts.SolverWithProfile, solver: opts.Solver, planner: opts.Planner,
 		renderer: opts.Renderer, profile: opts.Profile, now: now}, nil
 }
 
@@ -548,6 +603,18 @@ func graphSaverDetail(h *Harness) string {
 		return "未接入：本次运行不会落盘 DAG（<StoreDir>/runs/<runID>/graph.json 不会出现）"
 	}
 	return "已接入：每题终态落盘 DAG"
+}
+
+// auditDetail 报告候选审计是否接线。
+//
+// ⚠️ 这是**装配在位**的断言（只看端口非 nil），不是「本次真的写出了审计行」的
+// 证明——与 graph_saver 同一档。文案必须把这两件事分开，否则读者会把它当成后者。
+func auditDetail(h *Harness) string {
+	if h == nil || h.audits == nil {
+		return "未接入：私密面不会出现候选审计（<ResultDir>/private/<runID>/submissions.jsonl 不会出现）" +
+			"；公开面仍有提交/判错计数，但「提交了哪一条、平台怎么判的」将不可回答"
+	}
+	return "已接入：每次提交落一行私密审计（写明是否真的写出仍需看该文件）"
 }
 
 // graphSaveStage 把图落盘的失败折成公开面允许的枚举值。
@@ -579,6 +646,12 @@ func (h *Harness) Doctor(ctx context.Context) DoctorReport {
 	// 缺失，而 open items 那套判据正是拿「有没有人看得见」当标准的。
 	checks = append(checks, DoctorCheck{Name: "graph_saver", OK: h != nil && h.graphs != nil, Fatal: false,
 		Detail: graphSaverDetail(h)})
+	// 候选审计同样是可选端口，同样必须被看得见：不接它时「这次运行没有审计」
+	// 与「这次运行没提交过任何候选」在公开面上长得一模一样，而这两件事指向
+	// 完全不同的结论。判据取 `h.results` 是否实现了 AuditStore ——审计落点
+	// 与公开结果是同一棵树上的两个目录，由同一个实现提供。
+	checks = append(checks, DoctorCheck{Name: "candidate_audit", OK: h != nil && h.audits != nil, Fatal: false,
+		Detail: auditDetail(h)})
 	if h != nil && h.sandbox != nil {
 		// Reclaim is deliberately not called here: doctor must not mutate runtime
 		// state. Presence checks are enough at this layer.
@@ -733,6 +806,44 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 		return result, errors.Join(firstErr, Ef(KindPersistence, "harness.result", "保存运行指标失败", err))
 	}
 	return result, firstErr
+}
+
+// appendAudit 把一次提交写进私密候选审计。
+//
+// **尽力而为，不中断本题。** 判断依据是：能写坏这次追加的机器，紧接着也会写坏
+// `results.Save`——而那一处是致命的（Run 直接返回 KindPersistence）。所以把这里
+// 也做成致命不会多拦下任何东西，只会把「平台提交已经发生、账本已经记了 Submitted」
+// 的那一步砍断，让公开计数与审计行数对不上——而「对得上」正是这份审计的验收条件。
+//
+// ⚠️ 因此这里**显式丢弃**错误是有意的：审计写不进去的可见性是「公开结果本身
+// 写不进去」，不是这一条。
+func (h *Harness) appendAudit(ctx context.Context, runID RunID, code string, c Candidate,
+	v SubmissionVerdict, eval Evaluation, evalErr error, at time.Time) {
+	audits, ok := h.results.(AuditStore)
+	if !ok {
+		// 没接审计端口。与 GraphSaver 同档：可选端口，不接不影响任何一次运行的
+		// 成败。但「没接」必须是**可见的**——否则「这次运行没有审计」会与
+		// 「这次运行没提交过」长得一样。见 Doctor 的 candidate_audit 一行。
+		return
+	}
+	rec := CandidateAudit{
+		Source: c.Source, Provenance: string(c.Provenance),
+		IntentID: c.IntentID, Round: c.Round,
+		SubmittedAt: at, Verdict: v,
+		Score: eval.Score, Message: eval.Message,
+		Flag: c.Flag,
+	}
+	// SubmitError 只装**传输/平台异常**的文本；判错的说明在 Message 里（平台
+	// 原话）。两者分开的理由与根包契约相同（见 Candidate 的 RejectReason /
+	// SubmitError 注释）：合成一个字段会让「平台说它错了」与「我们没能问成平台」
+	// 变成同一件事，而这两者的处置完全相反——前者不该重试，后者要先对账。
+	//
+	// ⚠️ `c` 是 Mark **之前**从 gate 取出的副本，所以 c.SubmitError 在这里恒为
+	// 空（它是 Mark 填的）。不要从这里读它。
+	if evalErr != nil {
+		rec.SubmitError = evalErr.Error()
+	}
+	_ = audits.AppendAudit(ctx, runID, code, rec)
 }
 
 // reclaimStale 回收上一次运行留下的、本次不用的沙箱资源。
@@ -1107,10 +1218,15 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 				continue
 			}
 			eval, evalErr := h.scenario.Evaluate(ctx, ch, c.Flag)
+			// 审计在**两条**路径上都要落：正常判定与「结果不确定」。后者尤其
+			// 重要——它正是「平台写超时、这一条到底算不算提交」的那一档，而
+			// 只记成功的审计恰好答不出这个问题。
+			submittedAt := h.now()
 			if evalErr != nil {
 				// 平台写超时后，总进度不足以证明这一条候选的状态。记录本次
 				// 提交，读取权威总进度，然后以不确定终态结束本题，禁止盲目重试。
-				gate.Mark(c.Flag, Evaluation{}, evalErr)
+				v := gate.Mark(c.Flag, Evaluation{}, evalErr)
+				h.appendAudit(ctx, runID, ch.Code, c, v, Evaluation{}, evalErr, submittedAt)
 				if obj, reconcileErr := h.scenario.Reconcile(ctx, ch); reconcileErr == nil {
 					cr.Outcome.ProgressConfirmed, cr.Outcome.ProgressTotal = obj.Got, obj.Want
 				}
@@ -1121,16 +1237,31 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 			}
 			// 判定原样交给 gate：把 Evaluation 映射成账本字段（含 Duplicate 的
 			// 派生）是 gate 的职责，放在这里等于让每个调用方各抄一份映射。
-			gate.Mark(c.Flag, eval, nil)
+			// 它返回的 SubmissionVerdict 就是那份派生的结论——下面按它计数，
+			// 而不是自己再判一次 `Accepted && !Progress`（两处各写一遍必然漂移，
+			// 漂移的表现是幂等命中被记成新增确认，通过率系统性偏高）。
+			v := gate.Mark(c.Flag, eval, nil)
+			h.appendAudit(ctx, runID, ch.Code, c, v, eval, nil, submittedAt)
 			if eval.Progress {
 				progressed = true
 			}
-			if eval.Accepted {
+			// 计数口径（三者互斥，由 verdict 保证）：
+			//   Correct   —— 平台确认（**含幂等命中**），进 Flags 与 Submitted；
+			//   Duplicate —— Correct 的子集，另记一笔「这次是重复确认」；
+			//   Rejected  —— 平台明确判错。
+			// Uncertain 不会走到这里：它在上面就 return 了，由一个私密审计行
+			// 与本题的 ReasonError 承担，不需要一个公开计数。
+			if v.Correct {
 				cr.Outcome.Flags = append(cr.Outcome.Flags, c.Flag)
 				cr.Outcome.Submitted++
+				if v.Duplicate {
+					cr.Outcome.Duplicates++
+				}
 				if eval.Score > cr.Outcome.Score {
 					cr.Outcome.Score = eval.Score
 				}
+			} else if v.Rejected {
+				cr.Outcome.Rejected++
 			}
 		}
 		if obj, e := h.scenario.Reconcile(ctx, ch); e == nil {
