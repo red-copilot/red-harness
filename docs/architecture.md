@@ -104,9 +104,15 @@ sequenceDiagram
 
 ## 5. 当前状态与验收口径
 
-截至本文更新，`go test ./... -count=1` 与 `go test -race ./... -count=1` 均通过；**两条真实容器门都已实测通过**：
+截至本文更新，`go test ./... -count=1` 与 `go test -race ./... -count=1` 均通过。三条真实容器/真实平台的门：
 
-- **新同步入口的纵向闭环**（`go test -tags integration ./cmd/red-harness/... -count=1`，本机 Docker 29.8 / root / runner 镜像在位，10.7s）：stub pi 与其子工具回报同一个容器 hostname 并等于 `Probe` 返回的容器 ID，provider key 不出现在任何一次 docker argv 里，正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
-- **隔离性质**（`go test -tags integration ./executor/... -count=1`，25 条全通过）：只读 rootfs 与有界 tmpfs、非 root、资源上限、宿主状态在容器内不可见、非授权端点不可达、provider 仅经白名单代理可达、按 run label 的回收与遗留回收。
+- **新同步入口的纵向闭环**（`go test -tags integration ./cmd/red-harness/... -count=1`，10.7s）：stub pi 与其子工具回报同一个容器 hostname 并等于 `Probe` 返回的容器 ID，provider key 不出现在任何一次 docker argv 里，正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
+- **执行器隔离用例**（`go test -tags integration ./executor/... -count=1`，25 条）：只读 rootfs 与有界 tmpfs、非 root、资源上限、宿主状态不可见、非授权端点不可达、provider 仅经白名单代理可达。**注意这批用例用 `DefaultDockerConfig()` 构造执行器**——它们证明的是执行器本身，**不能**代替对装配路径的验证（见下）。
+- **授权 TSecBench 真跑（首次打通）**：`list_challenges` 拿到 63 题；`start_challenge` 起容器后本地 sandbox 内 pi `0.85.1` 跑了 58 次真实工具调用，从靶场拿到 `HTTP/1.1 200 OK`；217 条事件落入 `private/`，成本 $0.0117。提交被平台以 `app_error (http 501)` 挡下，harness 按设计以「提交结果不确定」结束本题并**正确关闭了题目容器**（平台侧确认 `stopped`，无遗留）。
 
-**尚未证明**：授权 TSecBench 平台上的线上通过率与召回率口径，以及「目标可达 / 非目标不可达」在真实靶场（而非本地 Docker）的复核。这些不由离线测试或 Fake 场景代替，授权环境不可用时发布门保持未通过。
+**同一次真跑暴露了两个缺陷，均已修复**：
+
+1. **生产装配路径的网络隔离整片失效**（`internal/wire`）。装配层手写 `DockerConfig{ProviderAllowHosts: hosts}`，其余字段落零值，而零值里所有 bool 都是 false = 关掉隔离；容器内实测公网可达、非授权内网可达、无任何 `*_PROXY` 变量。已改为从 `DefaultDockerConfig()` 起手并加装配级回归断言。**修复后尚未重跑授权环境**——那次现场不能作为「已隔离」的证据。
+2. **题目耗时恒为 0**：`OutcomeView.StartedAt/EndedAt` 从未被赋值，而 CLI 摘要、公开结果 `durationSeconds`、stats 累计耗时三处都读 `OutcomeView.Duration()`。已回填。
+
+**尚未证明**：修复后的隔离在授权环境里的复核；提交路径上平台 `app_error (http 501)` 的成因（我方请求形状还是平台侧）；线上通过率与召回率口径。

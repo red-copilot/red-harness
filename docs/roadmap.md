@@ -13,7 +13,7 @@ v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`�
 | 阶段 | 优先级 / 状态 | 交付范围 | 可观察出口门 |
 |---|---|---|---|
 | M1 离线真实容器闭环 | P0 / **已通过** | Fake + stub pi 经 CLI、同步 Harness 和真实 SandboxSession 完成一题 | pi 与工具同处目标容器；提交由 Fake 确认；正常、取消和启动失败后资源零遗留 |
-| M2 上线前隔离与凭据门 | P0 / **离线门已通过** | 凭据传递、镜像内版本核验、网络与文件系统隔离 | canary 不进 argv/公开输出（**已实测**）；版本可核验（**已实测**）；隔离测试全绿（**25 条全通过**）；未授权端点不可达仅在本地 Docker 验证，真实靶场未复核 |
+| M2 上线前隔离与凭据门 | P0 / **未通过**（隔离待重跑复核） | 凭据传递、镜像内版本核验、网络与文件系统隔离 | canary 不进 argv/公开输出（**已实测**）；版本可核验（**已实测**，镜像内 pi 0.85.1）；**生产装配的隔离一度整片失效（已修，待授权环境重跑复核）**；`DefaultDockerConfig()` 路径下的 25 条隔离用例全通过，但那验的是另一条构造路径 |
 | M3 运行可靠性 | P0 / **已完成（离线）** | 有界事件、真实预算、平台对账、恢复策略与清理 | 故障注入得到确定的题级终态；取消后仍保存安全结果；无残留资源；**事实型停滞与换支已落地** |
 | M4 指标与发布验收 | P0/P1 / **进行中** | 冻结 profile、私密 trace、指标修正、真实 pi 与授权平台冒烟 | 指标可重算（**已落地**）；公开面无明文（**已落地**）；真实 pi 与授权平台冒烟**未通过** |
 
@@ -28,11 +28,15 @@ v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`�
 **实测状态（2026-09-22，本机 Docker 29.8 / root / runner 镜像在位）**：
 `go test -tags integration ./cmd/red-harness/... -count=1` 14.3s 全绿，覆盖了上面第 1、3 条与第 2 条里的**生命周期**部分——同容器身份（stub pi 与其子工具回报同一个 hostname，且等于 `Probe` 的容器 ID）、provider key 不进任何一次 docker argv、正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
 
-**隔离性质的取证在旧 `Executor` 端口上，且已全绿**：只读 rootfs、有界 tmpfs、非 root、
+**隔离性质的取证在旧 `Executor` 端口上，且那批用例全绿**：只读 rootfs、有界 tmpfs、非 root、
 资源上限、宿主状态不可见、未授权端点不可达等 25 条集成用例全部通过（见 M2 的实测状态）。
 **本阶段新增的**同步入口用例（`cmd/red-harness`）证明的是编排闭环本身——同容器身份、
-凭据不进 argv、三条路径零遗留——不重复取证隔离性质。所以 M1 标为「出口门已通过、
-隔离性质由 M2 侧的用例覆盖」。
+凭据不进 argv、三条路径零遗留——不重复取证隔离性质。
+
+⚠️ 但注意这批用例的**构造路径**：它们一律用 `DefaultDockerConfig()` 造执行器，而生产装配
+一度手写部分结构体、把隔离开关全落成零值（见 M2）。所以「用例全绿」不等于「装起来就隔离」——
+这正是 M2 那段实测状态的由来。M1 标为「出口门已通过、隔离性质由 M2 侧的用例覆盖，且该覆盖
+有待一次授权环境重跑确认」。
 
 ## M2：上线前隔离与凭据门
 
@@ -41,16 +45,25 @@ v0.4 的目标是一个可复现的单 Agent 研究 SDK：同步 `Harness.Run`�
 - 从 `Scenario.Prepare` 的目标生成 IP:port 白名单，测试目标可达、非目标、宿主监听端口及公网默认不可达，provider 仅经白名单代理可达。明确记录同一 Docker bridge 内流量不经过当前 iptables 规则的边界，避免将其误报为已隔离。
 - 任一凭据、版本或隔离检查失败，即停止在离线阶段，不执行授权平台冒烟。
 
-**实测状态（2026-09-22）**：三条均已落地并实测——provider key 走 0600 的
-`--env-file` 而非 `-e KEY=value`（argv canary 有集成回归，实测通过）；`Probe` 在运行所用
-镜像里跑 `pi --version` 并回报 `PiVersion`，空值拒绝启动；**隔离测试全绿**：
-`go test -tags integration ./executor/... -count=1` 25 条全通过，含只读 rootfs、
-非 root（`TestIntegrationRunsAsNonRoot`）、资源上限、宿主状态在容器内不可见
-（`TestIntegrationNoHostStateVisibleInContainer`）、非授权端点不可达
-（`TestIntegrationUnauthorizedEndpointUnreachable`）与 provider 仅经白名单代理可达。
+**实测状态（2026-09-22）**：
 
-补齐这条门时先发现旧 `Executor` 端口有 2 个**先于本轮**就存在的失败（在改动前的
-`8d40807` 上逐条复现），已定位并修复：
+- **凭据**：provider key 走 0600 的 `--env-file` 而非 `-e KEY=value`（argv canary 有集成回归，实测通过）。
+- **版本核验**：`Probe` 在运行所用镜像里跑 `pi --version` 并回报 `PiVersion`，空值拒绝启动。授权环境实测：镜像内 pi 为 `0.85.1`，落在支持区间 `0.85.0–0.86.99` 内。
+- **⚠️ 隔离：一度整片失效，已修但**待重跑复核**。**
+
+授权环境真跑时实测发现：sandbox 容器内**公网 `1.1.1.1:443` 可达、非授权内网地址可达、且没有任何 `*_PROXY` 环境变量**。根因在装配层：
+
+    executor.NewDocker(executor.DockerConfig{ProviderAllowHosts: hosts})   // 旧写法
+
+手写部分结构体 ⇒ 其余字段落零值 ⇒ 而 `DockerConfig` 零值里**所有 bool 都是 false = 关掉隔离**：`ManageIptables=false` 让 `installNetworkRules` 第一行就静默返回，`ProviderProxy=false` 让模型流量不走宿主侧域名白名单代理。`normalize()` 不补这两个开关。
+
+**为什么集成门没拦住**：那 25 条用例一律用 `DefaultDockerConfig()` 构造执行器，验的是**另一条构造路径**。于是「未授权端点不可达」「公网不可达」在测试里全绿、在生产装配上完全失效——`DefaultDockerConfig` 的注释里恰好写着这个危险（「零值里的 bool 全是 false（= 关掉隔离），直接拿零值构造执行器是不安全的」）。
+
+已修：装配从 `DefaultDockerConfig()` 起手再覆盖 `ProviderAllowHosts`，并在 `wire_test.go` 直接钉 `r.docker.Config()` 的两个开关（已验证断言非空转：改回旧写法会精确报出这两条）。
+
+**复核状态**：修复后**尚未重跑授权环境**。上一次真跑用的是修复前的二进制，所以那次现场不能作为「已隔离」的证据。在重跑并实测非授权端点不可达之前，M2 的隔离出口门记为**未通过**。
+
+补齐这条门时还发现旧 `Executor` 端口有 2 个先于本轮就存在的失败（在改动前的 `8d40807` 上逐条复现），已定位并修复：
 
 | 用例 | 现象 | 原因 |
 |---|---|---|
