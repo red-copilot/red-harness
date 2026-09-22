@@ -552,29 +552,33 @@ func TestResultFilePinsNewFieldNames(t *testing.T) {
 		State: harness.RunFinished, BundleDigest: bundleDigestSample,
 		Challenges: []harness.ChallengeResult{{
 			Challenge: harness.Challenge{Code: "c1"},
-			Outcome:   harness.OutcomeView{BranchesAbandoned: 2},
+			Outcome: harness.OutcomeView{BranchesAbandoned: 2,
+				Attempts: 5, AuditIncomplete: true, GraphState: harness.GraphSaved},
 		}}})
 	b, err := os.ReadFile(filepath.Join(root, resultsDirName, "run-keys.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{`"state":"finished"`, `"bundleDigest":"` + bundleDigestSample + `"`,
-		`"branchesAbandoned":2`} {
+		`"branchesAbandoned":2`,
+		// N0 新增的三个键。它们的**存在性**是这条测试的全部内容：值对不对由
+		// TestPublicCountsRoundTrip 与 TestGraphStatePublicIsWhitelisted 负责。
+		`"attempts":5`, `"auditIncomplete":true`, `"graphState":"saved"`} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("公开结果里缺少 %s: %s", want, b)
 		}
 	}
 }
 
-// TestPublicCountsAndGraphStatePersist：三个此前只活在内存/stdout 里的量现在
-// **落盘且能读回**，而读不回来的那两个（Attempts/AuditIncomplete）必须真的不落盘。
+// TestPublicCountsRoundTrip：这一组计数字段现在**全都有根包来源**，所以落盘之后
+// 必须能原样读回来。
 //
-// 为什么要按字段分开测而不是合并成一条「往返一致」：这一组字段的处境并不相同
-// ——Duplicates/Rejected 有根包来源（往返必须成立），GraphState 是从
-// GraphSaveFailures **折算**出来的（只能单向），Attempts/AuditIncomplete 根本
-// 还没有来源。一条笼统的往返断言会把第三种情况（没来源）也测成「一致」，而那
-// 正是它要防的谎报。
-func TestPublicCountsAndGraphStatePersist(t *testing.T) {
+// N0 之前这条测试的形态完全不同：Duplicates/Rejected 有来源，GraphState 只能从
+// GraphSaveFailures 折出来（单向），Attempts/AuditIncomplete 根本没有来源，所以
+// 它断言的是「后两个**不得**落盘」。来源补齐之后那种分法失效了，而失效的方向正是
+// **危险的那一侧**——一条「有的往返、有的只能单向」的笼统断言会把没有来源的字段也
+// 测成「一致」。所以这里改成全部往返，零值不出键单独一条（TestPublicCountsOmitZero）。
+func TestPublicCountsRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	rs, err := NewResultStore(root)
 	if err != nil {
@@ -586,8 +590,11 @@ func TestPublicCountsAndGraphStatePersist(t *testing.T) {
 			Challenge: harness.Challenge{Code: "c1"},
 			Outcome: harness.OutcomeView{
 				Code: "c1", Reason: harness.ReasonSolved,
-				// 平台幂等命中 3 次、判错 4 条；图落盘失败在 export 阶段。
-				Duplicates: 3, Rejected: 4,
+				// 确认 3 条、实际提交 9 次、其中 3 次是平台幂等命中、4 条被判错；
+				// 图在 export 阶段失败，而 GraphState 声称 saved —— 刻意矛盾。
+				Submitted: 3, Attempts: 9, Duplicates: 3, Rejected: 4,
+				AuditIncomplete:   true,
+				GraphState:        harness.GraphSaved,
 				GraphSaveFailures: []string{"export"},
 				// 负数在计数上没有含义（见 sanitizeCount）——公开面必须是 0 而不是 -5。
 				BranchesAbandoned: -5,
@@ -598,17 +605,14 @@ func TestPublicCountsAndGraphStatePersist(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 键名是持久化契约：下游报告与 stats 按名字读，改名等于静默破坏所有现存文件。
-	for _, want := range []string{`"duplicates":3`, `"rejected":4`, `"graphState":"failed"`} {
+	for _, want := range []string{`"duplicates":3`, `"rejected":4`, `"attempts":9`,
+		`"auditIncomplete":true`, `"graphState":"failed"`} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("公开结果里缺少 %s: %s", want, b)
 		}
 	}
-	// 还没有来源的两个字段**不得**出现在文件里：omitempty + 恒零值意味着「没记录」，
-	// 而写一个 0 出去会被读成「一次都没提交过 / 审计完整」——两者都是谎报。
-	for _, never := range []string{`"attempts"`, `"auditIncomplete"`} {
-		if strings.Contains(string(b), never) {
-			t.Fatalf("没有来源的字段 %s 不该落盘（omitempty 应让它整个消失）: %s", never, b)
-		}
+	if strings.Contains(string(b), `"branchesAbandoned"`) {
+		t.Fatalf("负计数应被折成 0 并由 omitempty 抹掉整个键: %s", b)
 	}
 
 	got, err := rs.Get(context.Background(), "run-counts")
@@ -619,35 +623,88 @@ func TestPublicCountsAndGraphStatePersist(t *testing.T) {
 		t.Fatalf("挑战数 = %d，期望 1", len(got.Challenges))
 	}
 	oc := got.Challenges[0].Outcome
-	if oc.Duplicates != 3 || oc.Rejected != 4 {
-		t.Fatalf("duplicates/rejected 往返不一致: %+v", oc)
+	if oc.Duplicates != 3 || oc.Rejected != 4 || oc.Attempts != 9 {
+		t.Fatalf("计数往返不一致: %+v", oc)
+	}
+	if oc.Submitted != 3 {
+		t.Fatalf("submitted 往返不一致: %d（它与 Attempts 必须是两个不同的数）", oc.Submitted)
+	}
+	if !oc.AuditIncomplete {
+		t.Fatal("auditIncomplete 往返丢了——它正是「审计有缺口」唯一的公开痕迹")
 	}
 	if oc.BranchesAbandoned != 0 {
 		t.Fatalf("负计数应被折成 0，实际 %d", oc.BranchesAbandoned)
 	}
-	// 折算字段读不回来是有意的（OutcomeView 没有接收它的字段），但**不得**被
-	// 折成别的值——「读回来是空的」与「读回来是 saved」是两回事。
+	// 写侧已经把矛盾折掉了（以失败阶段为准），所以读回来必须与文件里的一致。
+	if oc.GraphState != harness.GraphFailed {
+		t.Fatalf("graphState 往返 = %q，期望 failed（有失败阶段时以阶段为准）", oc.GraphState)
+	}
 	if len(oc.GraphSaveFailures) != 1 || oc.GraphSaveFailures[0] != "export" {
 		t.Fatalf("graphSaveFailures 往返不一致: %v", oc.GraphSaveFailures)
 	}
 }
 
-// TestGraphStateAbsentUnlessProvablyFailed：graphState 只在**能证明图没落下来**
-// 时出现。
+// TestPublicCountsOmitZero：零值**不出键**。
 //
-// 留空是「未记录」，谎报一个 saved 是「让人以为图留下来了，而那份图可能压根没写」。
-// 同一个文件里的两个字段也不许互相矛盾：白名单外的失败值既不会出现在
-// graphSaveFailures 里，就不该凭空让 graphState 变成 failed。
-func TestGraphStateAbsentUnlessProvablyFailed(t *testing.T) {
+// 这不是洁癖，是两个不同的句子：`"attempts":0` 断言「确实一次都没提交过」，而
+// 「没有 attempts 这个键」只说「这里没记录」。读一份 N0 之前写下的旧文件时，后者
+// 才是真的；omitempty 是唯一能表达它的机制。同理 `"auditIncomplete":false` 会被
+// 读成「审计完整」，而一份从没记过审计状态的旧文件不欠这个断言。
+func TestPublicCountsOmitZero(t *testing.T) {
+	root := t.TempDir()
+	rs, err := NewResultStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveRun(t, rs, harness.RunResult{RunID: "run-zero", StartedAt: baseTime,
+		Challenges: []harness.ChallengeResult{{
+			Challenge: harness.Challenge{Code: "c1"},
+			Outcome:   harness.OutcomeView{Code: "c1"},
+		}}})
+	b, err := os.ReadFile(filepath.Join(root, resultsDirName, "run-zero.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, never := range []string{`"attempts"`, `"auditIncomplete"`, `"graphState"`,
+		`"duplicates"`, `"rejected"`, `"branchesAbandoned"`} {
+		if strings.Contains(string(b), never) {
+			t.Fatalf("零值字段 %s 不该落盘（omitempty 应让它整个消失）: %s", never, b)
+		}
+	}
+}
+
+// TestGraphStatePublicIsWhitelisted：graphState 是**穷举白名单**，且与失败阶段的
+// 不变式优先。
+//
+// N0 之前这条测试只能断言「要么没有这个键、要么是 failed」——因为当时唯一的来源是
+// 失败阶段。现在四态由根包给出，于是有三件独立的事要分开钉：
+//
+//	① 四个枚举值透传，其余（含手改文件、跨版本写入的串）留空 = 未记录；
+//	② 有**合法**失败阶段 ⇒ 一律 failed，无论 GraphState 声称什么——同一个文件里的
+//	   graphState 与 graphSaveFailures 不许互相矛盾，而阶段是更具体的那一个；
+//	③ 声称 failed 却拿不出任何合法阶段 ⇒ **留空**。「说了 failed 但说不出卡在哪」
+//	   正是这条不变式要挡住的状态，替它坐实等于把矛盾写进文件。
+func TestGraphStatePublicIsWhitelisted(t *testing.T) {
 	cases := []struct {
 		name     string
+		state    harness.GraphState
 		failures []string
-		want     bool
+		want     string // 期望文件里的取值；"" = 这个键不该出现
 	}{
-		{"没有失败阶段 ⇒ 未记录", nil, false},
-		{"白名单外的值不算失败", []string{canaryFlag, "boom"}, false},
-		{"合法阶段 ⇒ failed", []string{"write"}, true},
-		{"合法与非法混在一起仍算 failed", []string{"boom", "marshal"}, true},
+		{"disabled 透传", harness.GraphDisabled, nil, "disabled"},
+		{"absent 透传", harness.GraphAbsent, nil, "absent"},
+		{"saved 透传", harness.GraphSaved, nil, "saved"},
+		{"failed 且有合法阶段", harness.GraphFailed, []string{"write"}, "failed"},
+		{"零值 = 未记录", "", nil, ""},
+		{"白名单外的状态不透传", harness.GraphState(canaryFlag), nil, ""},
+		{"白名单外的状态配合法阶段仍折成 failed", harness.GraphState(canaryFlag), []string{"marshal"}, "failed"},
+
+		{"声称 saved 但有失败阶段 ⇒ failed", harness.GraphSaved, []string{"export"}, "failed"},
+		{"白名单外的阶段不算失败", harness.GraphSaved, []string{canaryFlag, "boom"}, "saved"},
+		{"合法与非法混在一起仍算 failed", harness.GraphSaved, []string{"boom", "marshal"}, "failed"},
+
+		{"声称 failed 却说不出阶段 ⇒ 留空", harness.GraphFailed, nil, ""},
+		{"阶段全在白名单外时 failed 也留空", harness.GraphFailed, []string{"boom"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -659,7 +716,8 @@ func TestGraphStateAbsentUnlessProvablyFailed(t *testing.T) {
 			saveRun(t, rs, harness.RunResult{RunID: "run-gs", StartedAt: baseTime,
 				Challenges: []harness.ChallengeResult{{
 					Challenge: harness.Challenge{Code: "c1"},
-					Outcome:   harness.OutcomeView{Code: "c1", GraphSaveFailures: tc.failures},
+					Outcome: harness.OutcomeView{Code: "c1", GraphState: tc.state,
+						GraphSaveFailures: tc.failures},
 				}}})
 			b, err := os.ReadFile(filepath.Join(root, resultsDirName, "run-gs.json"))
 			if err != nil {
@@ -668,12 +726,46 @@ func TestGraphStateAbsentUnlessProvablyFailed(t *testing.T) {
 			if strings.Contains(string(b), canaryFlag) {
 				t.Fatalf("公开结果泄漏了明文: %s", b)
 			}
-			has := strings.Contains(string(b), `"graphState"`)
-			if has != tc.want {
-				t.Fatalf("graphState 存在性 = %v，期望 %v: %s", has, tc.want, b)
+			// 先看**整个键存在与否**，再看取值：只用 Contains 判取值的话，
+			// `"graphState":"failed"` 会被 `"graphState":"failedExtra"` 蒙过去。
+			if tc.want == "" {
+				if strings.Contains(string(b), `"graphState"`) {
+					t.Fatalf("这个状态不该落盘（留空 = 未记录）: %s", b)
+				}
+				return
 			}
-			if tc.want && !strings.Contains(string(b), `"graphState":"failed"`) {
-				t.Fatalf("graphState 只可能是 failed（四态里其余三种是装配与产物事实）: %s", b)
+			if !strings.Contains(string(b), `"graphState":"`+tc.want+`"`) {
+				t.Fatalf("graphState = %q 的期望落盘值 %q 没出现: %s", tc.state, tc.want, b)
+			}
+		})
+	}
+}
+
+// TestGraphStateFromPublicRejectsUnknown：读侧与写侧**同一道闸**。
+//
+// 公开文件是可以被手改的，也可以由别的版本写过，而 OutcomeView.GraphState 的
+// 值域是穷举的四个。读侧不过闸的话，文件里一个任意的串会被原样塞进那个类型——
+// 读回来的字段看起来像枚举、实际不是，下游任何 switch 都会静默走进 default。
+func TestGraphStateFromPublicRejectsUnknown(t *testing.T) {
+	cases := []struct {
+		name     string
+		state    string
+		failures []string
+		want     harness.GraphState
+	}{
+		{"saved", "saved", nil, harness.GraphSaved},
+		{"disabled", "disabled", nil, harness.GraphDisabled},
+		{"absent", "absent", nil, harness.GraphAbsent},
+		{"手改的任意串", "totally-made-up", nil, ""},
+		{"明文形态的串", canaryFlag, nil, ""},
+		{"失败阶段优先于文件里的取值", "saved", []string{"write"}, harness.GraphFailed},
+		{"键缺失（旧文件）", "", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := graphStateFromPublic(tc.state, tc.failures); got != tc.want {
+				t.Fatalf("graphStateFromPublic(%q, %v) = %q，期望 %q",
+					tc.state, tc.failures, got, tc.want)
 			}
 		})
 	}

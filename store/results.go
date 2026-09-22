@@ -175,24 +175,25 @@ type publicChallenge struct {
 	Duplicates int `json:"duplicates,omitempty"`
 	// Rejected 是被平台判错的候选数。理由同上——它此前也只在 stdout 里有。
 	Rejected int `json:"rejected,omitempty"`
-	// Attempts 是**实际发起 Evaluate 的次数**。
+	// Attempts 是**实际发起 Evaluate 的次数**（含结果不确定的那一次）。
 	//
-	// ⚠️ **目前没有写入方**：它的来源（根包 OutcomeView 的对应字段）由 N0 的
-	// 另一处改动添加，store 是下游。字段先于来源落地，是为了把键名这条持久化
-	// 契约与读侧的往返先固定下来；在来源落地之前它恒为 0，而 omitempty 保证
-	// 它**不出现在文件里**——「没记录」不会被谎报成「0 次」。
+	// ⚠️ 它不是 Submitted 的别名：Submitted 是**去重后的确认数**（幂等命中也算），
+	// 一次 3 次提交、1 次判错时两个数是 2 与 3。只有两个数都在，报告才答得出
+	// 「我们试了多少次」与「平台认了多少条」——前者是额度与候选集合的问题，
+	// 后者是答案质量的问题。来源是根包 OutcomeView.Attempts（N0 落地）。
 	Attempts int `json:"attempts,omitempty"`
 	// AuditIncomplete 说明私密面的候选审计（submissions.jsonl）可能不完整。
 	//
-	// ⚠️ 与 Attempts 同样**暂时没有写入方**（来源在根包）。它必须存在的原因是
-	// 一条不对称：审计写失败不算本题失败（Reason 不变），所以公开面里没有别的
-	// 痕迹能说明「这次运行的审计是缺的」——而「缺」被读成「完整」会让事后
-	// 按审计行数做的结论系统性偏低。
+	// 它必须存在的原因是**一条不对称**：审计写失败不算本题失败（Reason 不变，
+	// 已确认成绩保留），所以公开面里没有别的痕迹能说明「这次运行的审计是缺的」
+	// ——而「缺」被读成「完整」会让事后按审计行数做的结论系统性偏低。
+	// 来源是根包 OutcomeView.AuditIncomplete（N0.4 落地）。
 	AuditIncomplete bool `json:"auditIncomplete,omitempty"`
 	// GraphState 是本题图产物的结果枚举。
 	//
-	// 值域是根包的四态（harness.GraphState）。今天只可能折出 `failed`（见
-	// graphStatePublic），其余留空 = 未记录。
+	// 值域是根包的四态（harness.GraphState：disabled / absent / saved / failed）。
+	// 这里存的仍是**折算后**的值（见 graphStatePublicOf）：`failed` 以
+	// GraphSaveFailures 为准，四个枚举以外的取值一律留空 = 未记录。
 	GraphState string `json:"graphState,omitempty"`
 	// SubmissionsCapped 是因撞到提交上限而未提交的候选数。
 	SubmissionsCapped int      `json:"submissionsCapped,omitempty"`
@@ -227,7 +228,9 @@ func toPublic(r harness.RunResult) publicResult {
 			BranchesAbandoned: sanitizeCount(c.Outcome.BranchesAbandoned),
 			Duplicates:        sanitizeCount(c.Outcome.Duplicates),
 			Rejected:          sanitizeCount(c.Outcome.Rejected),
-			GraphState:        graphStatePublic(c.Outcome.GraphSaveFailures),
+			Attempts:          sanitizeCount(c.Outcome.Attempts),
+			AuditIncomplete:   c.Outcome.AuditIncomplete,
+			GraphState:        graphStatePublicOf(c.Outcome.GraphState, c.Outcome.GraphSaveFailures),
 			SubmissionsCapped: sanitizeCount(c.Outcome.SubmissionsCapped),
 			CleanupFailures:   sanitizeCleanupFailures(c.Outcome.CleanupFailures),
 			GraphSaveFailures: sanitizeGraphSaveFailures(c.Outcome.GraphSaveFailures),
@@ -335,26 +338,58 @@ func graphStageAllowed(s string) bool {
 	}
 }
 
-// graphStatePublic 把图落盘的**失败阶段**折算成公开面的 graphState。
+// graphStatePublicOf 把根包折算出的图产物状态收进公开面的白名单。
 //
-// ⚠️ 今天只折得出 `failed`。四态里的另外三种是**装配与产物事实**——端口在不在
-// 位（disabled）、这一题有没有登记过图（absent）、文件写没写出来（saved）——
-// 而这条路径（ResultStore.Save）手里只有一个 RunResult 与 OutcomeView，没有
-// 任何字段记录它们。唯一可判的是那条不变式：`GraphFailed` ⟺
-// `len(GraphSaveFailures) > 0`（见 ports.go）。
+// 早先这里只能靠**失败阶段**反推：那时 OutcomeView 没有任何字段记录四态，唯一
+// 可判的是那条不变式（`GraphFailed` ⟺ `len(GraphSaveFailures) > 0`），所以它
+// 只折得出 `failed`。根包补上 `OutcomeView.GraphState` 之后，四态由**知道答案
+// 的那一层**给出，这里退化成一道白名单闸。
 //
-// 所以这里**只在能证明是 failed 时**落这个值，其余一律留空（omitempty ⇒ 键根本
-// 不出现）。留空是「未记录」，与谎报一个 saved 是两回事——后者会让事后的人以为
-// 图留下来了，而那份图可能压根没写。
+// **为什么不直接透传**：公开面是白名单构造的（见 toPublicManifest 的理由）。
+// 根包与任何注入的 GraphSaver 都能往这个字段里放东西，放进来什么就先过一遍。
+// 四个枚举值以外一律留空——留空是「未记录」，与把未知取值原样落盘是两回事，
+// 后者会让读的人以为那个词有定义。
 //
-// 判据用**过完白名单之后**的失败数：一个白名单外的值既不会出现在
-// graphSaveFailures 里，就不该凭空让 graphState 变成 failed（同一个文件里的
-// 两个字段不能互相矛盾）。
-func graphStatePublic(failures []string) string {
-	if len(sanitizeGraphSaveFailures(failures)) == 0 {
+// **不变式优先**：`GraphFailed` 以**过完白名单之后**的失败阶段为准，而不是看
+// 字段。同一个文件里的 `graphState` 与 `graphSaveFailures` 不能互相矛盾，而
+// 失败阶段是更具体的那一个。反过来，根包若报 `failed` 却没有任何失败阶段，那
+// 是根包的 bug——此时留空而不是替它坐实，因为「说了 failed 但说不出卡在哪」
+// 正是这条不变式要挡住的状态。
+func graphStatePublicOf(state harness.GraphState, failures []string) string {
+	if len(sanitizeGraphSaveFailures(failures)) > 0 {
+		return string(harness.GraphFailed)
+	}
+	switch state {
+	case harness.GraphDisabled, harness.GraphAbsent, harness.GraphSaved:
+		return string(state)
+	default:
 		return ""
 	}
-	return string(harness.GraphFailed)
+}
+
+// graphStateFromPublic 是 graphStatePublicOf 的**读侧对偶**：只认四个枚举值。
+//
+// 读侧也要过闸，不是对称性洁癖：文件是可以被手改的，也可以被另一个版本的宿主
+// 写过，而 `OutcomeView.GraphState` 的值域是穷举的四个。把文件里的任意串直接
+// 塞进那个类型，等于让公开文件决定内存里的枚举——读回来的字段**看起来像枚举**
+// 而实际不是，下游任何 `switch` 都会静默走进 default。
+//
+// 空串是合法输入（= 未记录），回落成零值；零值不是四个常量之一，正是「没记录」
+// 应有的表示。
+//
+// **不变式同样优先**：文件里若 `graphState: "saved"` 与 `graphSaveFailures` 同时
+// 存在（手改、或跨版本写成），以失败阶段为准——与写侧同一个方向，否则同一份文件
+// 读回来与写出去会给出两个不同的答案。
+func graphStateFromPublic(state string, failures []string) harness.GraphState {
+	if len(sanitizeGraphSaveFailures(failures)) > 0 {
+		return harness.GraphFailed
+	}
+	switch s := harness.GraphState(state); s {
+	case harness.GraphDisabled, harness.GraphAbsent, harness.GraphSaved:
+		return s
+	default:
+		return ""
+	}
 }
 
 // fromPublic 把公开文件读回 RunResult。
@@ -362,10 +397,8 @@ func graphStatePublic(failures []string) string {
 // **明文一定不在里面**：Flags / Candidates 是返回值，从不落盘（见 toPublic 的
 // 白名单式构造）。调用方拿到的是「可比较的指标视图」，不是完整结果。
 //
-// ⚠️ 三个新字段**读不回来**（Attempts / AuditIncomplete / GraphState）：根包的
-// OutcomeView 还没有接收它们的字段，凭空构造一个会让「读回来的值」与「文件里
-// 的值」看起来一致、实际各说各话。Keys 仍然固定在文件里（见
-// TestResultFilePinsNewFieldNames），等根包补上来源字段后，这里加一行即可。
+// 读回来的字段是**写侧的逆**，包括闸门：`GraphState` 走 graphStateFromPublic
+// 而不是直接转型，理由见那里。往返一致性由 TestResultFilePinsNewFieldNames 钉着。
 func fromPublic(p publicResult) harness.RunResult {
 	r := harness.RunResult{RunID: harness.RunID(p.RunID), Scenario: p.Scenario,
 		ProfileDigest: p.ProfileDigest, BundleDigest: p.BundleDigest, Model: p.Model,
@@ -382,6 +415,9 @@ func fromPublic(p publicResult) harness.RunResult {
 				Rounds: c.Rounds, HintUsed: c.HintUsed,
 				Duplicates:        c.Duplicates,
 				Rejected:          c.Rejected,
+				Attempts:          c.Attempts,
+				AuditIncomplete:   c.AuditIncomplete,
+				GraphState:        graphStateFromPublic(c.GraphState, c.GraphSaveFailures),
 				BranchesAbandoned: c.BranchesAbandoned,
 				CleanupFailures:   append([]string(nil), c.CleanupFailures...),
 				GraphSaveFailures: append([]string(nil), c.GraphSaveFailures...),
