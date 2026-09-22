@@ -811,6 +811,45 @@ func TestBundleDigestTracksContent(t *testing.T) {
 	}
 }
 
+// TestRunRecordsChallengeDuration：题目耗时必须真的被记下来。
+//
+// 回归：`OutcomeView.StartedAt/EndedAt` 曾经**从未被赋值**（只设了
+// ChallengeResult 上那两个同名字段），而耗时——CLI 摘要的「耗时」、公开结果的
+// `durationSeconds`、stats 的累计耗时——三处全部走 `OutcomeView.Duration()`。
+// 于是它们恒为 0：字段在、文档写了、落盘了，但永远是零。实测现场：一次真跑里
+// 题目实际耗时约 10 分钟，公开结果写的是 `durationSeconds: 0`。
+//
+// 用可注入时钟让断言确定：真实时钟下两次 now() 之差也可能被算成 0。
+func TestRunRecordsChallengeDuration(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}},
+		answers: map[string]string{"c1": "flag{never}"}}
+	ag := &fakeAgent{}
+	factory := &scriptedAgentFactory{agent: ag}
+	ag.script = func(_ int, _ func(Event)) { emitToolEnd(factory.sink, "call", "ls", "nothing\n") }
+
+	base := time.Unix(1700000000, 0)
+	var tick int
+	h, err := NewHarness(HarnessOptions{Scenario: sc, Sandbox: &fakeSandbox{}, Agents: factory,
+		Gate:    func(Challenge) CandidateGate { return newStubGate() },
+		Results: &recordingResults{}, Locker: fakeRunLocker{},
+		Planner:  func(Challenge) Planner { return &stubPlanner{} },
+		Renderer: func(Challenge) Renderer { return stubRenderer{} },
+		Now:      func() time.Time { tick++; return base.Add(time.Duration(tick) * time.Second) }})
+	if err != nil {
+		t.Fatalf("NewHarness: %v", err)
+	}
+	spec := testRunSpec()
+	spec.Budget = Budget{MaxRounds: 1, MaxWall: time.Hour, MaxTurns: 100}
+
+	res, err := h.Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run 返回错误: %v", err)
+	}
+	if got := res.Challenges[0].Outcome.Duration(); got <= 0 {
+		t.Fatalf("题目耗时 = %v，必须为正——CLI 摘要、公开结果与 stats 都读它", got)
+	}
+}
+
 func TestRunCostBudgetUsesAgentStats(t *testing.T) {
 	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}}, answers: map[string]string{"c1": "flag{never}"}}
 	ag := &fakeAgent{stats: Stats{Turns: 2, CostUSD: 0.02}}

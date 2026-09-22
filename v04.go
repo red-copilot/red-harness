@@ -563,6 +563,12 @@ func runState(r RunResult, firstErr error) RunState {
 
 func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, ch Challenge) (cr ChallengeResult, runErr error) {
 	cr = ChallengeResult{Challenge: ch, StartedAt: h.now()}
+	// ⚠️ **必须回填进 OutcomeView**：耗时（CLI 摘要、公开结果的 durationSeconds、
+	// stats 的累计耗时）全部走 `OutcomeView.Duration()`，而它读的是 OutcomeView 自己
+	// 的 StartedAt/EndedAt。只设 ChallengeResult 上那两个字段的话，三处都恒为 0
+	// ——字段在、文档写了、落盘了，但永远是零。实测：一次真跑里题目实际耗时
+	// 约 10 分钟，公开结果写的是 `durationSeconds: 0`。
+	cr.Outcome.StartedAt = cr.StartedAt
 	target, err := h.scenario.Prepare(ctx, ch)
 	if err != nil {
 		cr.EndedAt = h.now()
@@ -589,6 +595,10 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		if cr.EndedAt.IsZero() {
 			cr.EndedAt = h.now()
 		}
+		// 与 StartedAt 同理：OutcomeView 的耗时才是三处消费点真正读的那一份。
+		// 放在这里而不是每个 return 之前，是因为本题的出口有十几条（取消、轮级
+		// 错误、重启失败、预算耗尽……），逐条补必然漏。
+		cr.Outcome.EndedAt = cr.EndedAt
 	}()
 	sb := spec.Sandbox
 	if sb.Image == "" {
