@@ -166,6 +166,34 @@ type publicChallenge struct {
 	// 把几个停滞方向判掉扔了」指向完全不同的改法（题目做不动 vs 阈值/提示策略要
 	// 调），而事后只看 Reason 分不出这两者。见 sanitizeCount（负数在这里没有含义）。
 	BranchesAbandoned int `json:"branchesAbandoned,omitempty"`
+	// Duplicates 是平台幂等命中数（Correct 的子集）。
+	//
+	// 为什么必须落盘：它此前只活在内存里、随本题结束消失，**只在 CLI 的 stdout
+	// 里出现过**。于是「147 次提交里有几次是重复确认」这个问题在事后不可答，
+	// 而它恰恰是判「答案是蒙对的还是推出来的」的关键：幂等命中说明 agent 在
+	// 反复提交同一个答案。
+	Duplicates int `json:"duplicates,omitempty"`
+	// Rejected 是被平台判错的候选数。理由同上——它此前也只在 stdout 里有。
+	Rejected int `json:"rejected,omitempty"`
+	// Attempts 是**实际发起 Evaluate 的次数**。
+	//
+	// ⚠️ **目前没有写入方**：它的来源（根包 OutcomeView 的对应字段）由 N0 的
+	// 另一处改动添加，store 是下游。字段先于来源落地，是为了把键名这条持久化
+	// 契约与读侧的往返先固定下来；在来源落地之前它恒为 0，而 omitempty 保证
+	// 它**不出现在文件里**——「没记录」不会被谎报成「0 次」。
+	Attempts int `json:"attempts,omitempty"`
+	// AuditIncomplete 说明私密面的候选审计（submissions.jsonl）可能不完整。
+	//
+	// ⚠️ 与 Attempts 同样**暂时没有写入方**（来源在根包）。它必须存在的原因是
+	// 一条不对称：审计写失败不算本题失败（Reason 不变），所以公开面里没有别的
+	// 痕迹能说明「这次运行的审计是缺的」——而「缺」被读成「完整」会让事后
+	// 按审计行数做的结论系统性偏低。
+	AuditIncomplete bool `json:"auditIncomplete,omitempty"`
+	// GraphState 是本题图产物的结果枚举。
+	//
+	// 值域是根包的四态（harness.GraphState）。今天只可能折出 `failed`（见
+	// graphStatePublic），其余留空 = 未记录。
+	GraphState string `json:"graphState,omitempty"`
 	// SubmissionsCapped 是因撞到提交上限而未提交的候选数。
 	SubmissionsCapped int      `json:"submissionsCapped,omitempty"`
 	CleanupFailures   []string `json:"cleanupFailures,omitempty"`
@@ -197,6 +225,9 @@ func toPublic(r harness.RunResult) publicResult {
 			CostUSD: c.Outcome.Stats.CostUSD,
 			Rounds:  c.Outcome.Rounds, HintUsed: c.Outcome.HintUsed,
 			BranchesAbandoned: sanitizeCount(c.Outcome.BranchesAbandoned),
+			Duplicates:        sanitizeCount(c.Outcome.Duplicates),
+			Rejected:          sanitizeCount(c.Outcome.Rejected),
+			GraphState:        graphStatePublic(c.Outcome.GraphSaveFailures),
 			SubmissionsCapped: sanitizeCount(c.Outcome.SubmissionsCapped),
 			CleanupFailures:   sanitizeCleanupFailures(c.Outcome.CleanupFailures),
 			GraphSaveFailures: sanitizeGraphSaveFailures(c.Outcome.GraphSaveFailures),
@@ -283,18 +314,58 @@ func sanitizeCleanupFailures(failures []string) []string {
 func sanitizeGraphSaveFailures(failures []string) []string {
 	var out []string
 	for _, failure := range failures {
-		switch failure {
-		case "marshal", "write", "export", "unknown":
+		if graphStageAllowed(failure) {
 			out = append(out, failure)
 		}
 	}
 	return out
 }
 
+// graphStageAllowed 是图落盘阶段值域的**唯一**判据。
+//
+// 两个消费者共用它：公开结果里的 `graphSaveFailures`（上面那个函数）与产物索引
+// 里的 `stage`（graph.go）。各写一份 switch 的话，加了第三处消费者就会漂移——
+// 而漂移的形态是「索引里放行了一个公开面会丢弃的阶段」，两处都看着正常。
+func graphStageAllowed(s string) bool {
+	switch s {
+	case "marshal", "write", "export", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+// graphStatePublic 把图落盘的**失败阶段**折算成公开面的 graphState。
+//
+// ⚠️ 今天只折得出 `failed`。四态里的另外三种是**装配与产物事实**——端口在不在
+// 位（disabled）、这一题有没有登记过图（absent）、文件写没写出来（saved）——
+// 而这条路径（ResultStore.Save）手里只有一个 RunResult 与 OutcomeView，没有
+// 任何字段记录它们。唯一可判的是那条不变式：`GraphFailed` ⟺
+// `len(GraphSaveFailures) > 0`（见 ports.go）。
+//
+// 所以这里**只在能证明是 failed 时**落这个值，其余一律留空（omitempty ⇒ 键根本
+// 不出现）。留空是「未记录」，与谎报一个 saved 是两回事——后者会让事后的人以为
+// 图留下来了，而那份图可能压根没写。
+//
+// 判据用**过完白名单之后**的失败数：一个白名单外的值既不会出现在
+// graphSaveFailures 里，就不该凭空让 graphState 变成 failed（同一个文件里的
+// 两个字段不能互相矛盾）。
+func graphStatePublic(failures []string) string {
+	if len(sanitizeGraphSaveFailures(failures)) == 0 {
+		return ""
+	}
+	return string(harness.GraphFailed)
+}
+
 // fromPublic 把公开文件读回 RunResult。
 //
 // **明文一定不在里面**：Flags / Candidates 是返回值，从不落盘（见 toPublic 的
 // 白名单式构造）。调用方拿到的是「可比较的指标视图」，不是完整结果。
+//
+// ⚠️ 三个新字段**读不回来**（Attempts / AuditIncomplete / GraphState）：根包的
+// OutcomeView 还没有接收它们的字段，凭空构造一个会让「读回来的值」与「文件里
+// 的值」看起来一致、实际各说各话。Keys 仍然固定在文件里（见
+// TestResultFilePinsNewFieldNames），等根包补上来源字段后，这里加一行即可。
 func fromPublic(p publicResult) harness.RunResult {
 	r := harness.RunResult{RunID: harness.RunID(p.RunID), Scenario: p.Scenario,
 		ProfileDigest: p.ProfileDigest, BundleDigest: p.BundleDigest, Model: p.Model,
@@ -308,7 +379,10 @@ func fromPublic(p publicResult) harness.RunResult {
 				ProgressConfirmed: c.ProgressConfirmed, ProgressTotal: c.ProgressTotal,
 				RemainingAtStart: c.RemainingAtStart, Score: c.Score,
 				Stats:  harness.Stats{CostUSD: c.CostUSD},
-				Rounds: c.Rounds, HintUsed: c.HintUsed, BranchesAbandoned: c.BranchesAbandoned,
+				Rounds: c.Rounds, HintUsed: c.HintUsed,
+				Duplicates:        c.Duplicates,
+				Rejected:          c.Rejected,
+				BranchesAbandoned: c.BranchesAbandoned,
 				CleanupFailures:   append([]string(nil), c.CleanupFailures...),
 				GraphSaveFailures: append([]string(nil), c.GraphSaveFailures...),
 				StartedAt:         c.StartedAt, EndedAt: c.EndedAt},

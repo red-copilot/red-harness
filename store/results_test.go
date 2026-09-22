@@ -566,6 +566,119 @@ func TestResultFilePinsNewFieldNames(t *testing.T) {
 	}
 }
 
+// TestPublicCountsAndGraphStatePersist：三个此前只活在内存/stdout 里的量现在
+// **落盘且能读回**，而读不回来的那两个（Attempts/AuditIncomplete）必须真的不落盘。
+//
+// 为什么要按字段分开测而不是合并成一条「往返一致」：这一组字段的处境并不相同
+// ——Duplicates/Rejected 有根包来源（往返必须成立），GraphState 是从
+// GraphSaveFailures **折算**出来的（只能单向），Attempts/AuditIncomplete 根本
+// 还没有来源。一条笼统的往返断言会把第三种情况（没来源）也测成「一致」，而那
+// 正是它要防的谎报。
+func TestPublicCountsAndGraphStatePersist(t *testing.T) {
+	root := t.TempDir()
+	rs, err := NewResultStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveRun(t, rs, harness.RunResult{RunID: "run-counts", StartedAt: baseTime,
+		State: harness.RunFinished, Completed: true,
+		Challenges: []harness.ChallengeResult{{
+			Challenge: harness.Challenge{Code: "c1"},
+			Outcome: harness.OutcomeView{
+				Code: "c1", Reason: harness.ReasonSolved,
+				// 平台幂等命中 3 次、判错 4 条；图落盘失败在 export 阶段。
+				Duplicates: 3, Rejected: 4,
+				GraphSaveFailures: []string{"export"},
+				// 负数在计数上没有含义（见 sanitizeCount）——公开面必须是 0 而不是 -5。
+				BranchesAbandoned: -5,
+			},
+		}}})
+	b, err := os.ReadFile(filepath.Join(root, resultsDirName, "run-counts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 键名是持久化契约：下游报告与 stats 按名字读，改名等于静默破坏所有现存文件。
+	for _, want := range []string{`"duplicates":3`, `"rejected":4`, `"graphState":"failed"`} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("公开结果里缺少 %s: %s", want, b)
+		}
+	}
+	// 还没有来源的两个字段**不得**出现在文件里：omitempty + 恒零值意味着「没记录」，
+	// 而写一个 0 出去会被读成「一次都没提交过 / 审计完整」——两者都是谎报。
+	for _, never := range []string{`"attempts"`, `"auditIncomplete"`} {
+		if strings.Contains(string(b), never) {
+			t.Fatalf("没有来源的字段 %s 不该落盘（omitempty 应让它整个消失）: %s", never, b)
+		}
+	}
+
+	got, err := rs.Get(context.Background(), "run-counts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Challenges) != 1 {
+		t.Fatalf("挑战数 = %d，期望 1", len(got.Challenges))
+	}
+	oc := got.Challenges[0].Outcome
+	if oc.Duplicates != 3 || oc.Rejected != 4 {
+		t.Fatalf("duplicates/rejected 往返不一致: %+v", oc)
+	}
+	if oc.BranchesAbandoned != 0 {
+		t.Fatalf("负计数应被折成 0，实际 %d", oc.BranchesAbandoned)
+	}
+	// 折算字段读不回来是有意的（OutcomeView 没有接收它的字段），但**不得**被
+	// 折成别的值——「读回来是空的」与「读回来是 saved」是两回事。
+	if len(oc.GraphSaveFailures) != 1 || oc.GraphSaveFailures[0] != "export" {
+		t.Fatalf("graphSaveFailures 往返不一致: %v", oc.GraphSaveFailures)
+	}
+}
+
+// TestGraphStateAbsentUnlessProvablyFailed：graphState 只在**能证明图没落下来**
+// 时出现。
+//
+// 留空是「未记录」，谎报一个 saved 是「让人以为图留下来了，而那份图可能压根没写」。
+// 同一个文件里的两个字段也不许互相矛盾：白名单外的失败值既不会出现在
+// graphSaveFailures 里，就不该凭空让 graphState 变成 failed。
+func TestGraphStateAbsentUnlessProvablyFailed(t *testing.T) {
+	cases := []struct {
+		name     string
+		failures []string
+		want     bool
+	}{
+		{"没有失败阶段 ⇒ 未记录", nil, false},
+		{"白名单外的值不算失败", []string{canaryFlag, "boom"}, false},
+		{"合法阶段 ⇒ failed", []string{"write"}, true},
+		{"合法与非法混在一起仍算 failed", []string{"boom", "marshal"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			rs, err := NewResultStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saveRun(t, rs, harness.RunResult{RunID: "run-gs", StartedAt: baseTime,
+				Challenges: []harness.ChallengeResult{{
+					Challenge: harness.Challenge{Code: "c1"},
+					Outcome:   harness.OutcomeView{Code: "c1", GraphSaveFailures: tc.failures},
+				}}})
+			b, err := os.ReadFile(filepath.Join(root, resultsDirName, "run-gs.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(b), canaryFlag) {
+				t.Fatalf("公开结果泄漏了明文: %s", b)
+			}
+			has := strings.Contains(string(b), `"graphState"`)
+			if has != tc.want {
+				t.Fatalf("graphState 存在性 = %v，期望 %v: %s", has, tc.want, b)
+			}
+			if tc.want && !strings.Contains(string(b), `"graphState":"failed"`) {
+				t.Fatalf("graphState 只可能是 failed（四态里其余三种是装配与产物事实）: %s", b)
+			}
+		})
+	}
+}
+
 // ── 权限 ──
 
 func TestResultFileAndDirPermissions(t *testing.T) {

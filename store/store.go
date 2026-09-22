@@ -8,8 +8,12 @@
 //
 //	<StoreDir>/runs/<runID>/
 //	├── run.json       0600  快照
-//	├── graph.json     0600  DAG（store 只透传 []byte，不理解内容）
+//	├── graph.json     0600  旧布局的 DAG（每题一图时会被后一题盖掉；ReadGraph 回退读它）
 //	├── graph.mmd      0600  DAG 的人可读导出（mermaid），与 graph.json 同权限
+//	├── artifacts.json 0600  产物索引（按题目可寻址的登记，见 graph.go）
+//	├── challenges/<challengeId>/attempts/<n>/
+//	│   ├── graph.json        0600  该题该次尝试的 DAG
+//	│   └── graph.mmd         0600  同上的人可读导出
 //	├── events.jsonl   0600  领域事件，每行一个 DomainEvent
 //	├── private/       0700
 //	│   ├── candidates.jsonl  0600  候选明文账本

@@ -339,9 +339,16 @@ func TestLoadEventsMissingIsEmpty(t *testing.T) {
 	}
 }
 
-// TestGraphRoundTrip 钉住 graph.json 是**不透明载荷**：store 只负责路径与
+// TestLegacyRunRootGraphRoundTrip 钉住**旧路径仍然可读**这条设计条款。
+//
+// 它钉的**不是**「图就该落在 run 根上」——那个落点正是 N0.3 修掉的缺陷（一题一
+// 图，后写的盖前写的）。保留它是因为：N0.3 之前的 run 目录只有那一份图，而
+// 「读得回旧 run」这件事必须在每次布局改动之后仍然成立。新布局的往返由
+// graph_test.go 的 TestTwoChallengesKeepDistinctArtifacts 钉住。
+//
+// 另外它仍然是 graph.json 「**不透明载荷**」这条契约的防线：store 只负责路径与
 // 原子性，不理解内容（store 不导入 dag）。
-func TestGraphRoundTrip(t *testing.T) {
+func TestLegacyRunRootGraphRoundTrip(t *testing.T) {
 	s := newStore(t)
 	r, err := s.ForRun("run-graph")
 	if err != nil {
@@ -408,21 +415,91 @@ func TestPrivateNeverLeaksPlaintext(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 公开文件必须**零命中**明文。
-	public := []string{"run.json", "events.jsonl", "graph.json", "report.json", "report.md"}
-	for _, name := range public {
-		b, err := os.ReadFile(filepath.Join(r.Dir(), name))
+	// N0.3 的新落点也各写一份：这份测试的意义在于「**新加的公开文件**也不许
+	// 出现明文」，所以它们必须真的存在于这次遍历里，否则新布局的泄漏面从来没
+	// 被看过一眼。
+	cid, err := harness.ChallengeIDFor("demo-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.ForAttempt("run-leak", cid, harness.FirstAttempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PutGraph([]byte(`{"schema":1,"nodes":[{"content":"无明文"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PutGraphExport([]byte("graph LR\n  n0[\"无明文\"]\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RecordChallengeArtifacts(store.ArtifactEntry{
+		ChallengeID: cid, Code: "demo-1", Attempt: harness.FirstAttempt,
+		GraphSaver:  store.ArtifactSaverWired,
+		Graph:       store.ArtifactDeclaration{State: harness.GraphSaved},
+		GraphExport: store.ArtifactDeclaration{State: harness.GraphSaved},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 公开面必须**零命中**明文，而公开面是「run 目录下除 private/ 以外的**全部**
+	// 文件」——不是一份写死的文件名清单。
+	//
+	// ⚠️ 这里过去是一个固定的白名单 {"run.json","events.jsonl","graph.json",
+	// "report.json","report.md"}。固定清单在**布局变化时会静默漏检**：新加一份
+	// 公开文件（N0.3 的 `challenges/<id>/attempts/<n>/graph.json` 与
+	// `artifacts.json` 正是新加的），它不在清单里，于是「它有没有泄漏明文」
+	// 这条断言根本不看它——而「漏检」与「没泄漏」在测试输出上同形。
+	// 遍历整个 run 目录是唯一不随布局漂移的判据。
+	privDir := filepath.Join(r.Dir(), "private")
+	visited := map[string]bool{}
+	err = filepath.WalkDir(r.Dir(), func(p string, d os.DirEntry, err error) error {
 		if err != nil {
-			t.Fatalf("读 %s: %v", name, err)
+			return err
 		}
+		if d.IsDir() {
+			// private/ 是明文**唯一**的合法落点，跳过它的子树（下面单独验它
+			// 确实有明文）。判据是**完整路径相等**而不是目录名：一个叫
+			// private 的目录出现在别处不该被顺带跳过。
+			if p == privDir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		visited[p] = true
 		if bytes.Contains(b, []byte(fakeFlag)) {
-			t.Errorf("候选明文泄漏进公开文件 %s", name)
+			t.Errorf("候选明文泄漏进公开文件 %s", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 遍历必须**真的覆盖到新落点**——一个恒真的断言比一个漏检的断言更糟
+	// （它看起来在守着，其实什么都没守）。逐个点名，而不是数个数。
+	for _, want := range []string{
+		filepath.Join(r.Dir(), "run.json"),
+		filepath.Join(r.Dir(), "events.jsonl"),
+		filepath.Join(r.Dir(), "graph.json"),
+		filepath.Join(r.Dir(), "report.json"),
+		filepath.Join(r.Dir(), "report.md"),
+		filepath.Join(r.Dir(), "artifacts.json"),
+		filepath.Join(a.Dir(), "graph.json"),
+		filepath.Join(a.Dir(), "graph.mmd"),
+	} {
+		if !visited[want] {
+			t.Fatalf("公开面遍历没有覆盖到 %s（visited=%v）", want, visited)
 		}
 	}
+	if visited[privDir+"/candidates.jsonl"] {
+		t.Fatal("private/ 的子树没有被跳过：明文会在这里被误报成泄漏")
+	}
 	// private/ 里必须**有**明文——否则「没泄漏」只是因为根本没记。
-	privDir := filepath.Join(r.Dir(), "private")
 	found := false
-	err := filepath.WalkDir(privDir, func(p string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(privDir, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
