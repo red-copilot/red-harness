@@ -20,17 +20,24 @@ gofmt -l . && go build ./... && go vet ./... && go test ./... -count=1   # 集�
 go test ./dag/... -count=1                      # 单个包（实现 agent 只跑自己的包）
 go test ./store/ -run TestLoadEventsSkipsTornLastLine -v   # 单个用例
 go test -race ./... -count=1                    # 全量 race
-UPDATE_GOLDEN=1 go test ./dag/                  # 重生成渲染契约 golden（diff 必须人工确认）
-go test -tags integration ./executor/... -count=1   # 执行器隔离用例（25 条），需 Docker + runner 镜像
-go test -tags integration ./cmd/red-harness/... -count=1   # 新同步入口的纵向闭环（M1），需 Docker
-docker build -t red-harness-runner:v0.3.0 runner/   # runner 镜像（约 1.9 GB）
-go run ./cmd/red-harness <doctor|list|run|stats>    # v0.4 只有这四个子命令
+UPDATE_GOLDEN=1 go test ./dag/                  # 一次重写两份 golden（render + mermaid）；diff 必须人工确认只动了预期那份
+go test -tags integration ./executor/... -count=1   # 隔离用例 25 条（13 条走 v0.4 SandboxSession 生产路径）
+go test -tags integration ./cmd/red-harness/... -count=1   # 新同步入口的纵向闭环（M1）
+docker build -t red-harness-runner:v0.3.0 runner/   # runner 镜像（约 1.9 GB，内含真 pi）
+go run ./cmd/red-harness doctor                     # 体检；不给 --provider 时 provider_credentials 必然 FAIL
+go run ./cmd/red-harness run --scenario fake        # 离线纵向闭环：内置演示题，不碰网络与平台（仍需 Docker + runner 镜像）
 echo '{"id":"1","cmd":"check_vpn"}' | PYTHONPATH=bridge/testdata python3 bridge/bridge.py   # bridge 手工冒烟，必须恰好回一行 JSON
 ```
 
 **CLI 退出码是 API**（`internal/cli/cli.go`）：`0` 成功 / `1` 失败 / `2` 用法错 /
 `3`＝**跑完了但有题没解出来**。3 与 1 必须分开——「模型没解出来」是研究结论，
 「跑的过程中坏了」要查日志，合成一个码会让两者在 CI 里完全同形。
+
+两条 `integration` 门的前置是 **root + Docker + `red-harness-runner:v0.3.0` 在位**，缺任何一项
+测试走 `t.Skip` 而不是 fail——**「全绿」可能是一条都没真跑**，跑完要核对 PASS/SKIP 计数。
+`executor/session_integration_test.go` 会现场用 `runner/Dockerfile.teststub` 构建
+`red-harness-runner:teststub`（静态编译的 stub pi），所以隔离门不需要 provider 凭据。
+跳过的集成测试**不算通过**（`docs/roadmap.md` 验收与证据）。
 
 `go test ./...` 里 `bridge` 约 24 s、`piai` 约 11 s——它们驱动**真实的** Python 子进程与 stub pi，
 不是 mock。全量跑请留足超时。
@@ -94,13 +101,23 @@ v0.4 的 `NewHarness`（`v04.go:309`）直接构造 `*Harness`，**不经过**�
 事件队列投递（队列长度 / 单轮条数 / 单条体积三重上限），编排 goroutine 是唯一消费者，
 轮末用 `Flush` 做屏障。队列满了阻塞 reader 是**有意**的背压（`piai/proc.go` 的 `frameQueue` 单写者）。
 
-⚠️ **落盘面在 v0.4 收窄了，别照着 v0.3 的图去读**：v0.4 明确不做崩溃续跑与事件重放，
-`HarnessOptions` 里**没有** `Store`/`GraphStore` 字段，装配层只建 `ResultFileStore`。
-所以真正被写的是 **`results/<runID>.json`（公开指标）**、**`<ResultDir>/private/<runID>/*.jsonl`
-（原始 trace，题目编号取哈希）** 与 `run.lock`；而 `events.jsonl` / `run.json` / `graph.json` /
-`private/candidates.jsonl` / `private/evidence/` / `report.*` 在 v0.4 **没有生产写入方**——
-它们只剩测试与 v0.3 兼容路径在用。**「先写事件、再原子写快照」仍然是 `store.Append` 的硬契约**
-（由注入快照写失败来测），只是当前没有调用方。完整清单见 `docs/v0.4-open-items.md`。
+⚠️ **落盘面在 v0.4 变小了，别照着 v0.3 的图去读**：v0.4 明确不做崩溃续跑与事件重放，
+`HarnessOptions` 里**没有** `Store`/`GraphStore`（事件日志与快照那两个端口），装配层只建
+`ResultFileStore`，外加一个**可选**的 `Graphs`（`GraphSaver`，nil＝不落盘；它不是 Fatal，
+但 Doctor 会报出 `graph_saver` 一行）。有生产写入方的落点只有四个：
+
+| 落点 | 写者 |
+|---|---|
+| `<ResultDir>/results/<runID>.json` 公开指标 | `store/results.go` |
+| `<ResultDir>/private/<runID>/<题目哈希>.jsonl` 原始 trace | `store/trace.go`（`AppendTrace`） |
+| `<StoreDir>/runs/<runID>/graph.json` + `graph.mmd` 每题终态 DAG | `internal/wire` 的 `dagGraphSaver`（生产装配恒提供） |
+| `<StoreDir>/run.lock` 跨进程单运行锁 | `internal/wire/lock.go` |
+
+`events.jsonl` / `run.json` / `private/candidates.jsonl` / `private/evidence/` / `report.*`
+在 v0.4 **仍然没有生产写入方**，只剩测试与 v0.3 兼容路径在用。**「先写事件、再原子写快照」
+仍然是 `store.Append` 的硬契约**（由注入快照写失败来测），只是当前没有调用方。
+完整清单见 `docs/v0.4-open-items.md`——⚠️ 该文写于 `graph.json` 落盘落地之前，
+它表里的「`graph.json` 无写入方」已过期，读的时候以本表为准。
 
 ## 不可违反的硬规矩
 
@@ -114,15 +131,17 @@ v0.4 的 `NewHarness`（`v04.go:309`）直接构造 `*Harness`，**不经过**�
   `dag.FlagFingerprint` 与 `gate.Fingerprint` **只准转发**，不得再实现一遍——已经漂移过一次。
 - **`answer.Shape` 不能加 json tag、不能改字段名**：它被无 tag 嵌进图 schema 1（`graph.json` 的
   载荷格式），改名会静默破坏所有现存图。真要改必须写显式的 `MarshalJSON`/`UnmarshalJSON`。
-  ⚠️ v0.4 不写 `graph.json`（见上），但 `dag.Graph` 的 `MarshalJSON` 与
-  `dag/testdata/render_golden.txt` 都还在，**格式契约仍然有效**。
+  ⚠️ v0.4 **已经在写** `graph.json`（见「落盘面」那张表），所以这条契约在生产路径上是活的，
+  `dag/testdata/render_golden.txt` 也一样。
 - **零第三方依赖**：`go.mod` 无 `require` 块。需要容器编排就用 `docker` CLI，不引 Docker SDK；
   不引 yaml/toml/测试框架。
 - **`dag` 不做拓扑排序式调度、不做攻击路径规划**：图只做剪枝 / 推导链 / 分支 / 续跑四件事。
   这个「不做」是明令写进注释的，不要「顺手补全」。
 - **`gate` 的「首现优先、只升不降、`locked` 不可解锁」模型**；`derived` 族**故意没有访问器**，
   不要为了完整性加一个。
-- **`dag/testdata/render_golden.txt`** 是渲染契约的唯一防线。
+- **`dag/testdata/` 下两份 golden**（`render_golden.txt` 渲染、`mermaid_golden.txt` 人可读导出）
+  是渲染契约的防线：图与 mermaid 都是拼字符串拼出来的，而本仓库没有 mermaid 解析器
+  （零第三方依赖），golden 是唯一能挡住「样式/类名改一个字、没有任何测试变红」的东西。
 - **`piai` 的传输层不要动**（`proc.go` 的 `frameQueue` 单写者、`frames.go` 的 LF-only 解析、
   watchdog 的「探活成功但状态没变不算卡死」判定）：54 个测试钉着，都是真管道上实测出来的。
 - **凭据纪律**：`.env` 里有真实的 `OPENCODE_API_KEY`；`/tmp/tsec/TsecBench-main/.agent.env` 里
@@ -149,7 +168,8 @@ v0.4 的 `NewHarness`（`v04.go:309`）直接构造 `*Harness`，**不经过**�
 |---|---|
 | `docs/architecture.md` | **当前实现的权威描述**（v0.4.0-research）+ mermaid 架构图 + 信任边界表 + 未完成项 |
 | `docs/PLAN v0.4.md` | v0.4 目标行为（研究版定位与破坏性变更） |
-| `docs/roadmap.md` | 按出口门排序的交付路线与**发布边界** |
+| `docs/roadmap.md` | 按出口门排序的交付路线与**发布边界**（M1/M2 已通过、M3 离线完成、M4 进行中——**状态以它的出口门表为准**） |
+| `docs/offensive-harness-sdk-roadmap.md` | **下一阶段目标架构与路线**（v0.4 收尾之后的产品定位、接口演进、信任边界） |
 | `docs/sdk-architecture-v0.4.md` | v0.4 目标架构规范（模块依赖、时序、公开接口、信任边界） |
 | `docs/v0.4-open-items.md` | **未接线代码面清单**：哪些 v0.3 机制在 v0.4 没有生产调用方 |
 | `PLAN.md` | v1 实施计划（需求真源，含「明确不纳入 v1」六项；**v0.4 已改掉其中若干**） |

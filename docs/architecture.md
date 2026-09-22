@@ -1,6 +1,7 @@
 # red-harness SDK 架构（v0.4.0-research）
 
 > 更新：2026-09-22。本文按当前工作区代码描述实现状态；目标行为见 [PLAN v0.4](PLAN%20v0.4.md)，收尾出口门见 [roadmap.md](roadmap.md)。
+> 下一阶段的目标架构、接口演进和发布路线见 [offensive-harness-sdk-roadmap.md](offensive-harness-sdk-roadmap.md)。
 > 旧 Engine、RunHandle 和事件快照仍在源码中供 v0.3 读取与测试使用；CLI 已切到 v0.4 同步入口。
 
 ## 1. 定位与边界
@@ -32,7 +33,7 @@ flowchart LR
 | 公开结果 | profile 摘要、题目、轮次、进度、耗时、失败类别等 | flag、候选明文、模型 key、平台 token、原始 trace |
 | 私密证据 | 仅研究所需的原始输出与候选，限制文件权限 | 自动进入公开结果或 CLI 输出 |
 
-以上是目标不变式。当前 Docker 适配器已实现基础隔离配置；新同步入口的越界阻断、凭据保密和所有清理路径仍需真实容器集成门证明。主进程环境已改为经 0600 的临时 `--env-file` 交给 `docker create`（argv canary 有集成回归），provider key 不再出现在宿主进程参数里；剩余绑定项是真实容器纵向闭环与授权平台冒烟。
+以上是目标不变式。新同步入口的真实容器生命周期与凭据 argv canary 已通过集成门；生产装配路径的目标可达、非目标不可达和 provider 代理白名单已在授权环境复核（见 §5 与 [roadmap.md](roadmap.md) M2）。主进程环境经 0600 的临时 `--env-file` 交给 `docker create`。尚未通过的发布门是平台确认的真实提交闭环。
 
 ## 2. SDK 端口与依赖方向
 
@@ -40,16 +41,16 @@ flowchart LR
 
 | 端口 / 模块 | 当前职责 | 代码状态 |
 |---|---|---|
-| Harness.Run(ctx, RunSpec) | 同步遍历题目、调用轮循环、保存结果 | 已实现初版；缺硬化与纵向验收 |
+| Harness.Run(ctx, RunSpec) | 同步遍历题目、调用轮循环、保存结果 | 已实现并通过离线故障注入与真实容器闭环；授权平台提交闭环待验收 |
 | Scenario | Discover → Prepare → Hint/Evaluate/Reconcile → Cleanup；平台副作用唯一入口 | scenario/Fake 与 TSecBench 已有；后者依赖宿主 bridge |
 | Sandbox / SandboxSession | 为每题建隔离网络，Launch 一个 attached 主进程，Close/Reclaim 回收 | executor/Docker 已有；Probe 在运行所用镜像里执行 `pi --version` 并回报 `ProbeResult.PiVersion`，取不到版本即拒绝启动 |
-| AgentFactory / Agent | 将 pi 绑定到已创建的 session，通过 RPC 执行轮次并发事件 | piai/Factory 已有；生产链路尚未做容器内验收 |
+| AgentFactory / Agent | 将 pi 绑定到已创建的 session，通过 RPC 执行轮次并发事件 | stub pi 的真实容器闭环已通过；真实 pi 已在 sandbox 内执行工具，平台确认的提交闭环待验收 |
 | Planner / Renderer | DAG 事实、意图、剪枝和 prompt 渲染 | dag 可复用；由调用者注入。`Planner` 含 `HostFacts`（宿主验证事实计数）与 `Abandon`（换支），两者都是**接口方法**而非可选断言 |
 | CandidateGate | 按来源归类、去重、判定候选可提交性 | `NewAll`（observed + derived）与 `New`（v0.3 的 observed-only 视图）**都在接口里**；`Mark` 收平台无关的 `Evaluation` |
 | ResultStore | 保存公开指标并按维度聚合 | 起跑剩余量、增量召回率与题级通过率已落地；`Kind` 错误类别可落盘，私密 trace 由 `AppendTrace` 落 `private/` |
-| CLI 装配 | doctor/list/run/stats 对接同步 Harness | 已由 cmd/red-harness → internal/cli → internal/wire 接线；真实容器纵向闭环待验收 |
+| CLI 装配 | doctor/list/run/stats 对接同步 Harness | 已由 cmd/red-harness → internal/cli → internal/wire 接线；真实容器纵向闭环已通过，平台提交闭环待验收 |
 
-v0.4 的接口集中在根包 v04.go、model.go 和 ports.go。Version = 0.3.0 仍用于旧图 schema；ResearchVersion = 0.4.0-research 是新 SDK 标识。源码目前同时保留两套 API；CLI 已切换，但通过现有单元测试仍不能证明真实容器运行可用。
+v0.4 的接口集中在根包 v04.go、model.go 和 ports.go。Version = 0.3.0 仍用于旧图 schema；ResearchVersion = 0.4.0-research 是新 SDK 标识。源码目前同时保留两套 API；CLI 已切换。真实容器运行由带 `integration` tag 的测试和授权环境记录证明，单元测试本身不承担这一证明。
 
 ## 3. 一题的运行流程
 
@@ -115,7 +116,7 @@ sequenceDiagram
 
 **同一次真跑暴露了两个缺陷，均已修复**：
 
-1. **生产装配路径的网络隔离整片失效**（`internal/wire`）。装配层手写 `DockerConfig{ProviderAllowHosts: hosts}`，其余字段落零值，而零值里所有 bool 都是 false = 关掉隔离；容器内实测公网可达、非授权内网可达、无任何 `*_PROXY` 变量。已改为从 `DefaultDockerConfig()` 起手并加装配级回归断言。**修复后尚未重跑授权环境**——那次现场不能作为「已隔离」的证据。
+1. **生产装配路径的网络隔离曾整片失效**（`internal/wire`）。装配层手写 `DockerConfig{ProviderAllowHosts: hosts}`，其余字段落零值，而零值里的 `ManageIptables` 与 `ProviderProxy` 均为 false。修复为从 `DefaultDockerConfig()` 起手并加装配级回归断言后，已在授权环境重跑：目标可达，非目标及公网直连不可达，provider 仅经白名单代理可达；详细读数见 [roadmap.md](roadmap.md) M2。
 2. **题目耗时恒为 0**：`OutcomeView.StartedAt/EndedAt` 从未被赋值，而 CLI 摘要、公开结果 `durationSeconds`、stats 累计耗时三处都读 `OutcomeView.Duration()`。已回填。
 
-**尚未证明**：修复后的隔离在授权环境里的复核；提交路径上平台 `app_error (http 501)` 的成因（我方请求形状还是平台侧）；线上通过率与召回率口径。
+**尚未证明**：提交路径上平台 `app_error (http 501)` 的成因（我方请求形状还是平台侧）；平台确认的完整提交闭环与线上通过率、召回率。

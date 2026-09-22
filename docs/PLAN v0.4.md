@@ -1,6 +1,6 @@
 # red-harness v0.4 研究型 Offensive Security Harness
 
-> 更新：2026-09-22。本文描述目标行为；当前实现与验收状态见 [architecture.md](architecture.md)，按出口门排序的交付路线见 [roadmap.md](roadmap.md)。CLI 四个子命令、装配层、默认跨进程锁和离线假件测试已落地；真实同步 Docker 闭环尚未验收。
+> 更新：2026-09-22。本文描述目标行为；当前实现与验收状态见 [architecture.md](architecture.md)，按出口门排序的交付路线见 [roadmap.md](roadmap.md)。真实同步 Docker 闭环与生产装配隔离复核已通过；平台确认的提交闭环仍是发布门。
 
 ## 总结
 
