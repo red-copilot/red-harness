@@ -247,8 +247,22 @@ func (g *Gate) observeOutputLocked(cands []string, cmd, output string, ref harne
 			continue
 		}
 		authored := cmd != "" && g.commandAuthoredLocked(cmd, cand)
+		// selfState：这条命令读的是**自己的状态文件**（会话记录 / FLAG / notes /
+		// pi 的 .pi-sessions 目录……）。它的输出全是 agent 自己（或 harness 的
+		// prompt）写进去的，**不是靶标证据**，所以不能拿它给候选坐实族别。
+		//
+		// 原先只查「候选是否出现在命令行里」（authored），于是
+		// `cat <自己的会话文件>` 这类命令漏网：候选来自**被读文件的内容**，命令行
+		// 里没有它。实测后果——pi 把 harness 的 prompt 存进
+		// /work/.pi-sessions/*.jsonl，agent 把那个文件 cat 出来做侦察，gate 在输出
+		// 里看到 prompt 自带的格式示例 `flag{...}`，判为观测族并提交。
+		//
+		// 注意 selfState 与 authored 在下面两处的处置**完全同形**（钉死、不升族），
+		// 但理由是两件事：authored 是「候选是 agent 自己敲出来的」，selfState 是
+		// 「输出是 agent 自己写下的东西被读回来」。
+		selfState := cmd != "" && readsOwnState(cmd)
 		if f, seen := g.first[cand]; seen {
-			if authored {
+			if authored || selfState {
 				f.locked = true
 				g.first[cand] = f
 			} else if !f.locked && f.prov != ProvenanceObserved {
@@ -258,9 +272,9 @@ func (g *Gate) observeOutputLocked(cands []string, cmd, output string, ref harne
 			g.touchLocked(cand, ref, output)
 			continue
 		}
-		if authored {
+		if authored || selfState {
 			r := ReasonCommandAuthored
-			if readsOwnState(cmd) {
+			if selfState {
 				r = ReasonSelfReadback
 			}
 			g.recordLocked(cand, ProvenanceFabricated, r, ref, output, 0.2, true)

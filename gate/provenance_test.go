@@ -186,6 +186,16 @@ func TestStateFileReCINarrowed(t *testing.T) {
 		// ── 边界：URL 已由调用方摘除的场景 ──
 		{"curl -s http://10.0.0.1/flag", false,
 			"裸 /flag 是靶标端点（已有的 TestTargetPathFlagIsNotOwnStateFile 覆盖）"},
+
+		// ── pi 自己的会话记录与 HOME ──
+		{"cat /work/.pi-sessions/*.jsonl 2>/dev/null | head -c 3000", true,
+			"pi 的会话记录装着完整对话（含 harness prompt 原文），读它等于读自己的输入"},
+		{"ls -la /work/.pi-sessions", true, "同上，不带 glob 的形态"},
+		{"cat /work/.pi-home/config.json", true, "pi 的 HOME 同样是自己的状态"},
+
+		// ── 边界：靶标上恰好有同名路径不能误判 ──
+		{"curl -s http://10.0.0.1/.pi-sessions/list", false,
+			"URL 上的同名路径不是本地会话文件（stripURLs 之后再判）"},
 	}
 	for _, c := range cases {
 		if got := readsOwnState(c.cmd); got != c.want {
@@ -207,6 +217,47 @@ func TestMatrixScriptOutputIsObserved(t *testing.T) {
 
 	if p := provOf(t, g, "flag{computed_locally}"); p != ProvenanceObserved {
 		t.Fatalf("脚本输出应为 observed，got %q", p)
+	}
+}
+
+// 读 **pi 自己的会话文件** 得到的候选 ⇒ 不是观测族、不可提交。
+//
+// 回归（授权环境实测事故）：pi 把整段对话（含 harness 注入的 prompt 原文）存进
+// `/work/.pi-sessions/*.jsonl`，而 prompt 里带着格式示例 `flag{...}`。agent 把那
+// 个文件 `cat` 出来做侦察，gate 在输出里看到模板，判成观测族 ⇒ harness 真的把
+// `flag{...}` 提交给了平台。
+//
+// 原实现只查「候选是否出现在**命令行**里」（`commandAuthoredLocked`），而这里的
+// 候选来自**被读文件的内容**，命令行里并没有它——所以漏网。会话文件与 FLAG /
+// MEMORY / notes 一样是「自己的状态」，读它的输出不构成靶标证据。
+func TestPiSessionCatIsNotGrounding(t *testing.T) {
+	g := gateFor(t)
+	const cmd = `cat /work/.pi-sessions/*.jsonl 2>/dev/null | head -c 3000`
+	out := `{"type":"session","version":3,"text":"答案格式以题面为准——题目要求 ` +
+		`flag{...} 就写 flag{...}，不要自己加外壳"}`
+
+	toolEnd(g, "c-pi", "bash", cmd, out)
+
+	if p := provOf(t, g, "flag{...}"); p == ProvenanceObserved {
+		t.Fatalf("自读 pi 会话文件得到的候选不得是观测族，got %q", p)
+	}
+	for _, c := range g.NewAll() {
+		if c.Flag == "flag{...}" {
+			t.Fatal("自读会话文件得到的候选必须不可提交（NewAll 不该返回它）")
+		}
+	}
+}
+
+// 对照组：同一个候选串出现在**靶标产出**里仍然要能坐实观测族。
+//
+// 没有这一条的话，上面那条断言可以被「把所有输出都判成自读」这种粗暴实现蒙过去
+// —— 而那会掐掉「先猜后验」这条真实解题路径。
+func TestTargetOutputStillGroundsSameCandidate(t *testing.T) {
+	g := gateFor(t)
+	toolEnd(g, "c-target", "bash", "curl -s http://10.0.0.1/flag.txt", "flag{from_target}\n")
+
+	if p := provOf(t, g, "flag{from_target}"); p != ProvenanceObserved {
+		t.Fatalf("靶标产出应为 observed，got %q", p)
 	}
 }
 

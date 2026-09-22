@@ -150,6 +150,10 @@ func readsOwnState(cmd string) bool {
 	if stateFileRe.MatchString(cmd) || stateFileReCI.MatchString(cmd) {
 		return true
 	}
+	// pi 自己的会话记录与 HOME：装着完整对话（含 harness prompt 原文）。
+	if piStateRe.MatchString(cmd) {
+		return true
+	}
 	// 裸重定向到状态文件：`> FLAG` / `>> MEMORY.md` / `2>flag.txt`
 	if redirTargetRe.MatchString(cmd) {
 		return true
@@ -161,6 +165,20 @@ func readsOwnState(cmd string) bool {
 var redirTargetRe = regexp.MustCompile(`(?:^|[^>])>{1,2}\s*["']?` +
 	`(?:FLAG(?:\.(?:txt|md|json|log))?|MEMORY(?:\.md)?|_?blackboard[\w.\-]*|` +
 	`todolist[\w.\-]*|tried_commands[\w.\-]*)`)
+
+// piStateRe 抓 **pi 自己的会话记录目录与 HOME**。
+//
+// 为什么单独一条：这两个目录里存的是**完整对话原文**——包含 harness 注入的
+// prompt（以及 prompt 里的格式示例 `flag{...}`）。读它们等于读自己的输入，
+// 输出里的任何「答案形状」都是自己写的，不是靶标产出的。
+//
+// 实测事故（授权 TSecBench 真跑）：agent 执行 `cat /work/.pi-sessions/*.jsonl`
+// 做侦察，输出里带着 prompt 中的字面量 `flag{...}`，gate 判成观测族并提交，
+// 平台以 501 拒绝——整轮解题动作被一条自读路径带偏。
+//
+// 尾部的分隔符类含 `*` 与 `/`：命令里常见 `cat /work/.pi-sessions/*.jsonl`
+// 与 `ls -la /work/.pi-sessions` 两种形态，glob 的 `*` 后面直接跟文件名。
+var piStateRe = regexp.MustCompile(`(?:^|[/\\"' ])\.pi-(?:sessions|home)(?:[/\\*"' ]|$)`)
 
 // heredocRe 抓 heredoc 头。脚本体（`cat > solve.py <<'EOF' … EOF`）会被摘掉
 // 后再判定，否则脚本注释里出现的候选值会污染「命令是否含答案形状」。
