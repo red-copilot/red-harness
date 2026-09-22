@@ -44,8 +44,8 @@ flowchart LR
 | Scenario | Discover → Prepare → Hint/Evaluate/Reconcile → Cleanup；平台副作用唯一入口 | scenario/Fake 与 TSecBench 已有；后者依赖宿主 bridge |
 | Sandbox / SandboxSession | 为每题建隔离网络，Launch 一个 attached 主进程，Close/Reclaim 回收 | executor/Docker 已有；Probe 在运行所用镜像里执行 `pi --version` 并回报 `ProbeResult.PiVersion`，取不到版本即拒绝启动 |
 | AgentFactory / Agent | 将 pi 绑定到已创建的 session，通过 RPC 执行轮次并发事件 | piai/Factory 已有；生产链路尚未做容器内验收 |
-| Planner / Renderer | DAG 事实、意图、剪枝和 prompt 渲染 | dag 可复用；由调用者注入 |
-| CandidateGate | 按来源归类、去重、判定候选可提交性 | gate.NewAll 提供 v0.4 的 observed/derived 视图 |
+| Planner / Renderer | DAG 事实、意图、剪枝和 prompt 渲染 | dag 可复用；由调用者注入。`Planner` 含 `HostFacts`（宿主验证事实计数）与 `Abandon`（换支），两者都是**接口方法**而非可选断言 |
+| CandidateGate | 按来源归类、去重、判定候选可提交性 | `NewAll`（observed + derived）与 `New`（v0.3 的 observed-only 视图）**都在接口里**；`Mark` 收平台无关的 `Evaluation` |
 | ResultStore | 保存公开指标并按维度聚合 | 起跑剩余量、增量召回率与题级通过率已落地；`Kind` 错误类别可落盘，私密 trace 由 `AppendTrace` 落 `private/` |
 | CLI 装配 | doctor/list/run/stats 对接同步 Harness | 已由 cmd/red-harness → internal/cli → internal/wire 接线；真实容器纵向闭环待验收 |
 
@@ -87,16 +87,23 @@ sequenceDiagram
 4. 每题最多一次提示；连续两轮无平台进度且无新增宿主验证事实时触发。提示后再次停滞，应切换未尝试的意图。
 5. 可重试的 provider/进程故障最多重建 Agent 一次，并只回灌脱敏事实摘要；取消、超时、正常结束和失败都必须清理资源。
 
-**当前实现偏差**：`eventSink` 已是有界队列（队列长度、单轮事件数、单条体积三重上限），DAG/Gate 回调改到消费者 goroutine 上执行并由 `Flush` 做轮次屏障；Docker `Probe` 在同一镜像里核验 pi 版本；成本与 turns 预算已从 Agent 统计取值；提交不确定时先 Reconcile 再以不确定终态结束本题；一次 Agent 重启、有界清理、取消后结果保存与清理失败记账均已落地。仍未完成：事实型停滞与换支，以及真实容器的纵向验收。CLI 装配已默认提供跨进程锁并在启动前扫描遗留资源，`NewHarness` 也已拒绝缺 Locker/Planner/Renderer/Gate/Results。未完成项对应 [roadmap.md](roadmap.md) 的 M4 出口门。
+**当前实现偏差**：`eventSink` 已是有界队列（队列长度、单轮事件数、单条体积三重上限），DAG/Gate 回调改到消费者 goroutine 上执行并由 `Flush` 做轮次屏障；Docker `Probe` 在同一镜像里核验 pi 版本并把空版本读成「未核验」；成本与 turns 预算已从 Agent 统计取值；提交不确定时先 Reconcile 再以不确定终态结束本题；一次 Agent 重启、有界清理、取消后结果保存与清理失败记账均已落地；**事实型停滞与换支已落地**——停滞判据现在是「连续两轮既无平台进度、也无新增宿主验证事实」，提示一次后再次连续停滞即 `Abandon` 当前意图并转去未尝试的方向（`HintOff` 下不换支，那一档的契约是「从不请求提示」）。`RunSpec` 只承载运行意图与资源上限，运行目录归装配配置。CLI 装配已默认提供跨进程锁并在启动前扫描遗留资源，`NewHarness` 也已拒绝缺 Locker/Planner/Renderer/Gate/Results。
+
+仍未完成：真实平台的授权冒烟（M2/M4 的发布门），以及默认拒绝出站与 canary 的真机复核。这两项都不由离线测试代替。
 
 ## 4. 数据与结果语义
 
 - DAG 的事实层只记录可追溯的目标、服务、凭据线索和负面事实；答案层由 Gate 单独管理。answer.Fingerprint 是唯一指纹格式源。
 - RunResult 是内存返回值，可能包含 Outcome.Flags；ResultFileStore 用专门的公开结构序列化，避免把整个返回值写盘。
 - 目标公开结果位于 &lt;ResultDir&gt;/results/&lt;runID&gt;.json，只含指标与错误类别。原始 trace、证据和候选若需要持久化，应进入权限为 0700/0600 的 private/；`ResultFileStore.AppendTrace` 已把原始事件落到 &lt;ResultDir&gt;/private/&lt;runID&gt;/（题目编号取哈希，不直接做路径）。
-- `RemainingAtStart` 已在提交前记录并进入公开结果，`stats` 以「本次新增确认 / 起跑时剩余」计算召回率；分母未知的题目不计入比率。`ResultStore` 已放行契约的 `Kind` 枚举作为公开错误类别（`config`/`provider`/`executor` 等）。仍需用真实运行核验数据完整性。
+- `RemainingAtStart` 已在提交前记录并进入公开结果，`stats` 以「本次新增确认 / 起跑时剩余」计算召回率；分母未知的题目不计入比率。`ResultStore` 已放行契约的 `Kind` 枚举作为公开错误类别（`config`/`provider`/`executor` 等）。按 profile 分组时**要同时给 `--bundle`**：`ProfileDigest` 里存的只是扩展包的路径，同一个路径换了内容它不变，只按它分组会把两次不同的实验算作同一次。
 - SolverProfile 的 system prompt 已进入 AgentStart，`RunResult.ProfileDigest` 与 sandbox 的 profile bundle 都取自 `Run` 开始时冻结的那份 `RunSpec.Profile`（空则回落到装配 profile），Planner 的 `dryRoundsBeforeHint` 与 Renderer 的 `maxFacts`/`maxNegative` 也读同一份。剩余缺口是这些键目前靠约定而非 schema 校验。
+- **运行终态与「是否解出」是两个字段**：`RunResult.State` 取 `finished`/`failed`/`cancelled`（起跑前就失败的路径也置 `failed`，不留空串），`RunResult.Completed` 仍只表示「有题目达成平台权威的目标」。一次正常跑完却一题未解是 `ReasonNoProgress` + `State=finished` —— 把两者混成一个字段，正是前身「280 run / 0 flag」在报告里一片绿的成因。
+- **`RunResult.BundleDigest` 冻结扩展包内容摘要**，与 `ProfileDigest` 并列不合并：后者描述「解法配置是什么」（`ExtensionBundle` 在其中是**路径字符串**），前者描述「那份配置指向的内容是什么」。空串表示**未核验**（本题没配 bundle），路径存在但读不了则 `Run` 在任何副作用之前以 `KindConfig` 失败。缺了它，「同一路径换了 bundle 内容」会被算作同一次实验。
+- 题级公开指标含 `branchesAbandoned`（换支次数）：一次 `no_intent` 到底是方向都做完了，还是编排层把几个方向判成停滞扔掉了，两者的改法完全不同。
 
 ## 5. 当前状态与验收口径
 
-截至本文更新，`go test ./... -count=1` 通过。它证明现有包测试可编译并运行，CLI 装配也有单元测试；**尚未证明**同步 Harness 的真实 Docker 纵向闭环、默认拒绝出站、取消清理或线上通过率。现有 Docker 集成测试主要走旧 `Executor` 入口。下一步按 [roadmap.md](roadmap.md) 先完成 Fake + stub pi 的真实容器全生命周期，再封闭凭据与隔离门。
+截至本文更新，`go test ./... -count=1` 与 `go test -race ./... -count=1` 均通过；**M1 的真实容器纵向闭环已实测通过**（`go test -tags integration ./cmd/red-harness/... -count=1`，本机 Docker 29.8 / root / runner 镜像在位，14.3s）：stub pi 与其子工具回报同一个容器 hostname 并等于 `Probe` 返回的容器 ID，provider key 不出现在任何一次 docker argv 里，正常 / 取消 / 启动失败三条路径按 run label 查容器与网络均为空。
+
+**尚未证明**：默认拒绝出站的真机复核、授权 TSecBench 平台上的线上通过率与召回率口径。这两项不由离线测试或 Fake 场景代替，授权环境不可用时发布门保持未通过。
