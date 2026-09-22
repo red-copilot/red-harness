@@ -67,6 +67,7 @@ deadline 时**不开始平台调用**，直接回 `deadline_exceeded`（可重�
 | `resource_unavailable` | `ResourceUnavailable`（503） | 是 |
 | `internal_error` | `InternalError`（500） | 是 |
 | `validation_error` | `ValidationError`（422） | 否 |
+| `app_error` | **基类 `TSecError` 的默认值**：任何不在 SDK 的 `ERROR_CODE_MAP` 里的状态码都落到这里（含 **501**） | 否 |
 | `connection_error` | `TSecConnectionError`（**`code is None`**） | 是 |
 | `invalid_response` | 桥自造：SDK 的两个源码级缺陷 | 否 |
 | `sdk_missing` / `missing_credential` / `protocol_error` / `unknown_command` / `invalid_request` | 桥自造（配置类） | 否 |
@@ -93,6 +94,7 @@ deadline 时**不开始平台调用**，直接回 `deadline_exceeded`（可重�
 | 4 | `close()` **吞掉全部异常** | `sync.py:105-106` | 桥自己保证幂等，并把异常记进 stderr |
 | 5 | **绝不要调 `tsec_benchmark._cli.main`**——它往 stdout 打印，会污染 JSONL 协议 | `_cli.py:57-67` | 桥把 `sys.stdout` 换成 `sys.stderr`，协议通道物理上不可污染 |
 | 6 | 默认 timeout 30s、VPN 探测 10s、**无重试逻辑** | `client.py:38,46` | Go 侧 deadline + 崩溃重启一次；平台级重试交给引擎按 `Reconcile` 决定 |
+| 7 | **原始响应体不进异常。** 非 2xx 时 `_handle_response` 只从 payload 里挑字段构造异常；payload 不是 dict（`response.json()` 抛 `ValueError` 后被置 `None`）时 `code`/`message`/`detail` **全空** ⇒ 异常只剩兜底文案 `unexpected error (http 501)` 与类属性 `app_error`，**body 在 SDK 内部就被丢掉了** | `client.py:154-162`、`errors.py:154-182` | 桥的异常收口把能拿到的都记进 `private/` 的 stderr（`bridge.py` 的 `except` 分支）。⚠️ **但这一条意味着：payload 非标准形状时，桥侧记不下任何 body**——要拿原始字节只能**绕开 SDK** 直连同端点。2026-09-22 的 501 排查正是撞在这上面（见 `docs/architecture.md` §5） |
 
 ## 已核实的 SDK 契约（v0.1.2，对源码）
 

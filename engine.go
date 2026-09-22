@@ -55,7 +55,7 @@ type Options struct {
 	//
 	// ⚠️ 同样是工厂。**默认实现不写在 engine/ 里**——engine 若导入 dag/gate，
 	// 就与「每个子包独立并行开发」的编排直接冲突（engine 的开发者会被
-	// dag/gate 的编译状态卡住）。默认实现放在装配层 `internal/cli/wire.go`。
+	// dag/gate 的编译状态卡住）。默认实现放在装配层 `internal/wire/wire.go`。
 	// engine/ 自己只依赖根包契约 + store/，测试用注入的 fake。
 	Planner  func(ch Challenge) Planner
 	Renderer func(ch Challenge) Renderer

@@ -23,7 +23,7 @@ import (
 //
 // 它是编译期断言的运行期版本：`harness.Platform` 的方法集与 v0.2 逐字相同
 // （ports.go:83-84），而 bridge 是 v0.3 里**第一个**实现它的包。这里一旦
-// 不满足，装配层（internal/cli/wire.go）会以编译错误的形式发现——但那时
+// 不满足，装配层（internal/wire/wire.go）会以编译错误的形式发现——但那时
 // 已经跨了包，所以在本包内先钉一道。
 func TestClientSatisfiesPorts(t *testing.T) {
 	var _ harness.Platform = (*Client)(nil)
