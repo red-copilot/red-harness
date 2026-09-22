@@ -1,8 +1,10 @@
-# red-harness SDK 架构（v0.4.0-research）
+# red-harness SDK 架构（v0.4.0-research + v0.5 契约整理）
 
 > 更新：2026-09-22。本文按当前工作区代码描述实现状态；目标行为见 [PLAN v0.4](PLAN%20v0.4.md)，收尾出口门见 [roadmap.md](roadmap.md)。
 > 下一阶段的目标架构、接口演进和发布路线见 [offensive-harness-sdk-roadmap.md](offensive-harness-sdk-roadmap.md)。
-> 旧 Engine、RunHandle 和事件快照仍在源码中供 v0.3 读取与测试使用；CLI 已切到 v0.4 同步入口。
+> **旧 Engine、RunHandle、事件快照与 v0.3 的三个存储端口已移出根包到 `legacy/`**（R1 落地）；
+> CLI 已切到 v0.4 同步入口。⚠️ **R0（v0.4 发布门）仍未通过**——`legacy/` 的移出是
+> 契约整理，不是发布信号。
 
 ## 1. 定位与边界
 
@@ -49,6 +51,7 @@ flowchart LR
 | CandidateGate | 按来源归类、去重、判定候选可提交性 | `NewAll`（observed + derived）与 `New`（v0.3 的 observed-only 视图）**都在接口里**；`Mark` 收平台无关的 `Evaluation` |
 | ResultStore | 保存公开指标并按维度聚合 | 起跑剩余量、增量召回率与题级通过率已落地；`Kind` 错误类别可落盘，私密 trace 由 `AppendTrace` 落 `private/` |
 | CLI 装配 | doctor/list/run/stats 对接同步 Harness | 已由 cmd/red-harness → internal/cli → internal/wire 接线；真实容器纵向闭环已通过，平台提交闭环待验收 |
+| `legacy`（v0.5 新增） | v0.3 的公开面：`Engine`/`Options`/`New`/`RegisterEngine`、`Snapshot`/`PublicSummary`/`RunHandle`/`SchemaVersion`、`DomainEvent` 及 14 个 `Ev*`、`Store`/`GraphStore`/`EvidenceStore`/旧 `Executor`、`RunPolicy`/`PolicyInput`/`RunSummary` | **叶子包**：只 import 标准库与根包。移出的判据是「是否被 v0.4 活路径使用」——`ExecSpec`/`ExecResult`/`ExecHandle`/`ExecOptions` 与 `ExecutorSpec` **留在根包**（前者在 `executor/session.go` 的 `NewSession` 上）。零生产调用方的清单见 [v0.4-open-items.md](v0.4-open-items.md) |
 
 v0.4 的接口集中在根包 v04.go、model.go 和 ports.go。Version = 0.3.0 仍用于旧图 schema；ResearchVersion = 0.4.0-research 是新 SDK 标识。源码目前同时保留两套 API；CLI 已切换。真实容器运行由带 `integration` tag 的测试和授权环境记录证明，单元测试本身不承担这一证明。
 
@@ -97,11 +100,31 @@ sequenceDiagram
 - DAG 的事实层只记录可追溯的目标、服务、凭据线索和负面事实；答案层由 Gate 单独管理。answer.Fingerprint 是唯一指纹格式源。
 - RunResult 是内存返回值，可能包含 Outcome.Flags；ResultFileStore 用专门的公开结构序列化，避免把整个返回值写盘。
 - 目标公开结果位于 &lt;ResultDir&gt;/results/&lt;runID&gt;.json，只含指标与错误类别。原始 trace、证据和候选若需要持久化，应进入权限为 0700/0600 的 private/；`ResultFileStore.AppendTrace` 已把原始事件落到 &lt;ResultDir&gt;/private/&lt;runID&gt;/（题目编号取哈希，不直接做路径）。
+- **私密候选审计（v0.5 新增）**：`ResultFileStore.AppendAudit` 把每次提交写到 `&lt;ResultDir&gt;/private/&lt;runID&gt;/submissions.jsonl`（0700/0600，一行一次提交，含指纹、来源与推导链锚点、提交时间、平台判定与候选明文）。它回答的是此前**不可回答**的问题——「提交了什么、平台怎么判的」；在此之前判定只活在内存里、随本题结束消失，公开结果只剩聚合计数。文件名**刻意不叫** `candidates.jsonl`：那个名字属于 v0.3 的候选账本（`&lt;StoreDir&gt;/runs/&lt;id&gt;/private/`，至今没有生产写入方）。
 - `RemainingAtStart` 已在提交前记录并进入公开结果，`stats` 以「本次新增确认 / 起跑时剩余」计算召回率；分母未知的题目不计入比率。`ResultStore` 已放行契约的 `Kind` 枚举作为公开错误类别（`config`/`provider`/`executor` 等）。按 profile 分组时**要同时给 `--bundle`**：`ProfileDigest` 里存的只是扩展包的路径，同一个路径换了内容它不变，只按它分组会把两次不同的实验算作同一次。
 - SolverProfile 的 system prompt 已进入 AgentStart，`RunResult.ProfileDigest` 与 sandbox 的 profile bundle 都取自 `Run` 开始时冻结的那份 `RunSpec.Profile`（空则回落到装配 profile），Planner 的 `dryRoundsBeforeHint` 与 Renderer 的 `maxFacts`/`maxNegative` 也读同一份。剩余缺口是这些键目前靠约定而非 schema 校验。
 - **运行终态与「是否解出」是两个字段**：`RunResult.State` 取 `finished`/`failed`/`cancelled`（起跑前就失败的路径也置 `failed`，不留空串），`RunResult.Completed` 仍只表示「有题目达成平台权威的目标」。一次正常跑完却一题未解是 `ReasonNoProgress` + `State=finished` —— 把两者混成一个字段，正是前身「280 run / 0 flag」在报告里一片绿的成因。
+- **`RunResult.Manifest` 冻结「实际生效的配置与产物身份」**（v0.5 新增）：停滞阈值、提交上限、提示策略、请求的镜像 tag、Probe 解析出的镜像 digest、镜像内 pi 版本、镜像不一致标记。为什么需要它：`ProfileDigest` 只有 16 个十六进制字符且**不可逆**——它能证明「两次运行不一样」，却回答不了「差在哪」，而「这次跑的是 2 轮还是 5 轮」「用的哪个镜像」正是复现一次实验所必需的。镜像 tag 与 digest **并列**是有意的：「tag 没变但内容变了」只有并列才看得出来。
 - **`RunResult.BundleDigest` 冻结扩展包内容摘要**，与 `ProfileDigest` 并列不合并：后者描述「解法配置是什么」（`ExtensionBundle` 在其中是**路径字符串**），前者描述「那份配置指向的内容是什么」。空串表示**未核验**（本题没配 bundle），路径存在但读不了则 `Run` 在任何副作用之前以 `KindConfig` 失败。缺了它，「同一路径换了 bundle 内容」会被算作同一次实验。
 - 题级公开指标含 `branchesAbandoned`（换支次数）：一次 `no_intent` 到底是方向都做完了，还是编排层把几个方向判成停滞扔掉了，两者的改法完全不同。
+
+### GraphSaver：图是可选研究产物，不是运行成败的一部分
+
+`GraphSaver` 是**可选端口**（`HarnessOptions.Graphs`，nil = 不落盘），生产装配恒提供它
+（`internal/wire` 的 `dagGraphSaver`，落点 `&lt;StoreDir&gt;/runs/&lt;runID&gt;/graph.json` +
+`graph.mmd`，0600）。三条必须一起读的性质：
+
+1. **保存失败不算本题失败**：`Reason` 不变、`Completed` 不变——图是研究辅助面，把它算成
+   失败会把「模型解出来了」在公开指标里降级成「跑坏了」。失败折成可比较的**阶段枚举**
+   记进公开结果（`graphSaveFailures`）：`marshal` / `write` / `export` / `unknown`
+   （未知错误归 `unknown`，不再假装是 `marshal`）。
+2. **「没写出去」绝不能读成「写了」**：所以失败必须落在公开指标里，且 CLI 的 `run` 摘要
+   会打印「图未落盘 &lt;阶段&gt;」。doctor 的 `graph_saver` 一行只说**装配在位**，不证明任何
+   一次运行真的写出了图（题目没登记过图时 `dagGraphSaver` 会静默返回 nil——那不是失败，
+   是「这一轮没有图」）。
+3. **公开图必须经过 DAG 的统一擦洗路径**：`dag` 的 `document()` 由 `Graph.Save` 与
+   `Graph.MarshalJSON` 共用，`Rejected[].Content` 里装的正是命中答案形状的原文——另拼一份
+   序列化会把明文写出去，这条路曾经真的漏过。
 
 ## 5. 当前状态与验收口径
 

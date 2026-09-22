@@ -26,6 +26,8 @@ go test -tags integration ./cmd/red-harness/... -count=1   # 新同步入口的�
 docker build -t red-harness-runner:v0.3.0 runner/   # runner 镜像（约 1.9 GB，内含真 pi）
 go run ./cmd/red-harness doctor                     # 体检；不给 --provider 时 provider_credentials 必然 FAIL
 go run ./cmd/red-harness run --scenario fake        # 离线纵向闭环：内置演示题，不碰网络与平台（仍需 Docker + runner 镜像）
+go run ./cmd/red-harness run --scenario fake --profile p.json --bundle ./ext   # profile schema 与扩展包（v0.5）
+go run ./example -store /tmp/rh -provider <name>    # **直接调 SDK** 的最小示例；与 CLI 同口径
 echo '{"id":"1","cmd":"check_vpn"}' | PYTHONPATH=bridge/testdata python3 bridge/bridge.py   # bridge 手工冒烟，必须恰好回一行 JSON
 ```
 
@@ -46,14 +48,22 @@ echo '{"id":"1","cmd":"check_vpn"}' | PYTHONPATH=bridge/testdata python3 bridge/
 
 **根包 `harness` 零内部依赖**，但**不再是「零实现」**：`v04.go` 里有 v0.4 的 `Harness` 门面
 （`Run`/`Doctor`/`runChallenge`/`reclaimStale`），只依赖标准库。契约在
-`model.go`/`ports.go`/`events.go`/`handle.go`/`engine.go`/`errors.go`/`solver.go`/`harness.go`。
+`model.go`/`ports.go`/`errors.go`/`solver.go`/`harness.go`。
 **根包依然不许 import 任何子包**——那是并行开发的前提。
 
-编译期依赖方向（子包只依赖根包，`answer` 是叶子）：
+⚠️ **v0.5（R1）把 v0.3 的公开面全部移出根包到 `legacy/`**：`events.go`/`handle.go`/`engine.go`
+整文件搬走，`ports.go` 的 `Store`/`GraphStore`/`EvidenceStore`/旧 `Executor`/`RunPolicy`
+与 `model.go` 的 `PolicyInput`/`RunSummary` 一并移出。判据是「**是否被 v0.4 活路径使用**」，
+不是「名字像不像 v0.3」——所以 `ExecSpec`/`ExecResult`/`ExecHandle`/`ExecOptions`/`ExecutorSpec`
+**留在根包**（`executor/session.go` 的 `NewSession` 在用它们）。
+
+编译期依赖方向（子包只依赖根包，`answer` 与 `legacy` 是叶子）：
 
 ```
 harness（契约 + v0.4 Harness 门面，零内部依赖）
  ├── answer   叶子：Shape 推断 + Fingerprint（唯一真源）
+ ├── legacy   叶子：v0.3 公开面（Engine/Snapshot/DomainEvent/旧 Store 端口）
+ │              ⚠️ 只准 import 标准库与根包
  ├── dag      事实—意图图（导入 harness + answer）
  ├── gate     候选证据闸与指纹账本（导入 harness + answer）
  ├── store    FileStore（事件/快照/账本）+ ResultFileStore（公开指标）
@@ -79,20 +89,30 @@ harness（契约 + v0.4 Harness 门面，零内部依赖）
 | `scenario → bridge` | `Platform` 窄接口，由 wire 注入 `*bridge.Client` |
 | `piai → executor` | `AgentFactory.New` 收 `harness.SandboxSession`，piai 不 import executor |
 
-`engine.go` 里的 `Engine`/`harness.New`/`RegisterEngine`/`newEngine` 是 **v0.3 遗留**：
-v0.4 的 `NewHarness`（`v04.go:309`）直接构造 `*Harness`，**不经过**注册表，所以
-`RegisterEngine` 全仓只有 `contract_test.go` 在调。旧 API 留着是为了 v0.3 读图与测试，
-**不要**再往那条路上加东西（完整清单见 `docs/v0.4-open-items.md`）。
+**`legacy` 是一个叶子包**：只准 import 标准库与根包。任何实现包出现在它的 import 里，
+都会让它变成传递依赖（`store → legacy → executor` 就意味着改 executor 会让 store 编译
+不过），那正是「实现包两两互不 import」要防的事故。这条规矩**不再只写在文档里**——
+`legacy/layering_test.go` 用 `go/parser` 扫全仓 import 图，四条断言：根包零内部依赖、
+legacy 只 import 标准库与根包、实现包两两零边、同时 import ≥2 个实现包的只有
+`internal/wire`。
+
+`legacy` 里的 `Engine`/`New`/`RegisterEngine` **不要**再往那条路上加东西：v0.3 的引擎
+注册表**从来没有被填充过**（`engine/` 目录不存在，`RegisterEngine` 零调用方含测试），
+保留它只是因为删掉是公开 API 的破坏性变更。完整清单见 `docs/v0.4-open-items.md`。
 
 **事实层 / 答案层严格分离**（最容易破坏的不变式）：
 
 - `dag` 的事实里**刻意没有 flag/answer 这类 FactKind**；答案只活在 `gate` 的账本里。
 - 候选明文只允许出现在**私密面（`private/`，0700/0600）**与返回值 `OutcomeView.Flags`。
-  ⚠️ v0.4 私密面的实际落点是 `<ResultDir>/private/<runID>/<题目哈希>.jsonl`（`AppendTrace`），
+  ⚠️ v0.4/v0.5 私密面的实际落点是 `<ResultDir>/private/<runID>/` 下的两份文件：
+  `<题目哈希>.jsonl`（原始 trace，`AppendTrace`）与 `submissions.jsonl`（候选审计，
+  `AppendAudit`，每次提交一行、含平台判定）。**不是** v0.3 的候选账本
+  `<StoreDir>/runs/<id>/private/candidates.jsonl`——
   **不是** v0.3 的候选账本 `<StoreDir>/runs/<id>/private/candidates.jsonl`——后者当前没有
   生产写入方（见 `docs/v0.4-open-items.md`）。纪律不变，机制变了。
 - 公开面（`results/<runID>.json` / 看板 HTML / `DomainEvent` / `Snapshot` / `run.json` /
-  `graph.json`）**一律只有计数与指纹**。`Snapshot` 故意没有 `Flags` 字段；`ResultFileStore`
+  `graph.json`）**一律只有计数与指纹**。v0.5 新增的运行清单（`manifest` 字段）同样只在
+  这一侧：镜像 tag/digest 与 pi 版本各过一份字符集闸，提示策略按穷举的三个常量比对。`Snapshot` 故意没有 `Flags` 字段；`ResultFileStore`
   用专门的公开结构序列化，从不 marshal `OutcomeView`/`Candidate`/`Flags`。
 - 走 v0.3 图路径时，落盘前 `dag/store.go` 的 `scrub` 擦掉明文，`Raw` 字段是最容易漏的那个（有专门测试）。
 
@@ -110,6 +130,7 @@ v0.4 的 `NewHarness`（`v04.go:309`）直接构造 `*Harness`，**不经过**�
 |---|---|
 | `<ResultDir>/results/<runID>.json` 公开指标 | `store/results.go` |
 | `<ResultDir>/private/<runID>/<题目哈希>.jsonl` 原始 trace | `store/trace.go`（`AppendTrace`） |
+| `<ResultDir>/private/<runID>/submissions.jsonl` 候选审计（每次提交一行，含平台判定与明文） | `store/audit.go`（`AppendAudit`，v0.5 新增） |
 | `<StoreDir>/runs/<runID>/graph.json` + `graph.mmd` 每题终态 DAG | `internal/wire` 的 `dagGraphSaver`（生产装配恒提供） |
 | `<StoreDir>/run.lock` 跨进程单运行锁 | `internal/wire/lock.go` |
 
@@ -171,10 +192,12 @@ v0.4 的 `NewHarness`（`v04.go:309`）直接构造 `*Harness`，**不经过**�
 | `docs/roadmap.md` | 按出口门排序的交付路线与**发布边界**（M1/M2 已通过、M3 离线完成、M4 进行中——**状态以它的出口门表为准**） |
 | `docs/offensive-harness-sdk-roadmap.md` | **下一阶段目标架构与路线**（v0.4 收尾之后的产品定位、接口演进、信任边界） |
 | `docs/sdk-architecture-v0.4.md` | v0.4 目标架构规范（模块依赖、时序、公开接口、信任边界） |
-| `docs/v0.4-open-items.md` | **未接线代码面清单**：哪些 v0.3 机制在 v0.4 没有生产调用方 |
+| `docs/v0.4-open-items.md` | **未接线代码面清单**：哪些 v0.3 机制在 v0.4 没有生产调用方（R1 后已重写，订正过三处实质错误） |
+| `docs/r0-runbook.md` | **R0 执行手册**：发布配置核验、submit 定位、真跑一题——**需要授权环境**，不是记录 |
 | `PLAN.md` | v1 实施计划（需求真源，含「明确不纳入 v1」六项；**v0.4 已改掉其中若干**） |
 | `docs/superpowers/specs/2026-09-20-*.md` | 已冻结的设计依据，含 v0.2 缺陷清单（每条带 `file:line`） |
 | `docs/superpowers/plans/2026-09-20-*.md` | v0.3 的任务计划 T0–T21 + 波次编排 + 验收命令（历史） |
+| `docs/migration-v0.4-to-v0.5.md` | **v0.5 破坏性变更的迁移表**（profile schema、legacy 移出、形态收紧、提交上限） |
 | `docs/migration-v0.2-to-v0.3.md` | 逐字段迁移表与**行为变更**清单 |
 | `SDK_API.md` | TSecBench 官方 Python SDK 接入文档 |
 | `bridge/README.md` | wire 协议、错误码表、**6 个 SDK 源码级缺陷**与对策 |

@@ -114,12 +114,15 @@ DISPATCH_EDGES = [
     ("piai", "executor", "dispatch",
      "AgentFactory.New 收 harness.SandboxSession；piai 不 import executor",
      "piai/factory.go", r"session harness\.SandboxSession"),
+    # ⚠️ R1（v0.5）把这两个端口移出根包到 legacy/：它们在 v0.4 的生产路径上零
+    # 调用方，而根包公开面的每一项都应当是「活的」。证据因此改指 legacy/ports.go
+    # ——它们仍然是「gate/dag 不 import store」这条不可见边的凭据，只是住在别处。
     ("gate", "store", "dispatch",
-     "gate 经 harness.EvidenceStore 写账本；gate 不 import store",
-     "ports.go", r"type EvidenceStore interface"),
+     "gate 经 legacy.EvidenceStore 写账本；gate 不 import store",
+     "legacy/ports.go", r"type EvidenceStore interface"),
     ("dag", "store", "dispatch",
-     "dag 经 harness.GraphStore 落图；dag 不 import store",
-     "ports.go", r"type GraphStore interface"),
+     "dag 经 legacy.GraphStore 落图；dag 不 import store",
+     "legacy/ports.go", r"type GraphStore interface"),
     ("internal/wire", "scenario", "dispatch",
      "场景按名字表选：fake / tsecbench",
      "internal/wire/wire.go", r"ScenarioFake\s*=\s*\"fake\""),
@@ -190,20 +193,23 @@ ENTRY_POINTS = [
 NAIVE_GRAPH_FALSE_POSITIVES = [
     ("ds:report", "`store.FileStore.PutReport` 是公开方法，未来的 `report/` 包或任何 SDK 调用方"
                   "都能直接调。生产调用方为零 ≠ 不可达。"),
-    ("harness.New / RegisterEngine", "`engine.go` 里的引擎注册表，全仓只有 `contract_test.go` 在调。"
-                                     "它是**公开 API**（任何 engine 实现都靠它注册），"
-                                     "而且 v0.4 的 `NewHarness` 绕过了它——判成死代码同样不对，"
-                                     "正确的判词是「v0.3 遗留，已无生产调用方」。"),
+    ("legacy.New / legacy.RegisterEngine", "v0.3 的引擎注册表，R1（v0.5）已从根包移出到 `legacy/`。"
+                                          "复核订正：它现在是**零调用方**（含测试）——旧判词说"
+                                          "「全仓只有 contract_test.go 在调」是错的，那两行调的是 "
+                                          "`harness.New`。而且 `engine/` 目录从来不存在，"
+                                          "所以 `legacy.New` 的默认实现（「引擎实现未注册」）"
+                                          "是**唯一可达**的结果：这个注册表从来没有被填充过。"
+                                          "保留它是因为删掉是公开 API 的破坏性变更，不是因为它在工作。"),
 ]
 
 OBSERVATIONS = [
     "**文档与代码的漂移是双向的，这次漂的是本图自己。** 16:16 那版提取给 `ds:graph.json` 的判词是「端口有、装配方无」，而装配层随后补上了 `dagGraphSaver`（`internal/wire/wire.go:300` 恒提供 `Graphs`）——图从此有了生产写入方。同一份 `CLAUDE.md` 当时还在描述 v0.3（`engine/` 是中心缺口、CLI 8 个子命令、`scenario/` 尚未创建），17:44 已按实况改写，反而比图更准。**两边都没有 CI 校验，所以两边的漂移都只能靠下一次复核抓到**：本脚本的 dispatch 证据回查挡得住「源码挪了」，挡不住「语义变了、证据模式还在」这种漂移——`graph.json` 这条正是后者（端口名没变，装配方从无到有）。",
     "**`internal/wire` 是唯一同时看得见全部 7 个实现包的模块，而真正把系统拼起来的边在 import 图里完全不可见。** 实现包之间两两互不 import（executor 不认识 scenario，scenario 不认识 dag），这是「一个子包 = 一个 agent」并行编排能成立的前提；代价是 wire 成为编译耦合的单点，也是「谁把 X 交给 Y」这个问题的唯一答案所在。三条最关键的边因此只能按 dispatch 建模：`internal/cli → internal/wire`（`cli.SetWire` 装包级 `WireFunc` 变量）、`scenario → bridge`（`Platform` 窄接口由 wire 注入）、`piai → executor`（`AgentFactory.New` 收 `harness.SandboxSession`）。任何 grep-import 的依赖图都会漏掉它们，并据此把 cli/scenario/piai 误判成孤立——本图的 11 条 dispatch 边每条都带源码证据回查，就是为了让这种误判当场露馅。",
-    "**明文的纪律比它的落点更稳定——落点换过一次，纪律没换。** 允许出现候选明文的地方只有私密面：v0.4 **实际生效**的是 `<ResultDir>/private/<runID>/*.jsonl`（目录 0700、文件 0600），而 `store/private.go` 那条账本（`PutCandidate`/`PutEvidence`）当前零生产调用方。gate 不 import store，它经 `harness.EvidenceStore` 写账本——这是装配层之外又一条不可见的边。出私密面的最后一道闸是图落盘前的**统一**擦洗（`dag` 的 `document()`，由装配层的 dagGraphSaver 驱动，`Save` 与 `json.Marshal` 共用同一份），而 `Raw` 字段（工具输出原文摘录）是最容易漏的那个——它曾经真的漏过。",
+    "**明文的纪律比它的落点更稳定——落点换过两次，纪律没换。** 允许出现候选明文的地方只有私密面：v0.4/v0.5 **实际生效**的是 `<ResultDir>/private/<runID>/*.jsonl`（目录 0700、文件 0600，v0.5 起多了 `submissions.jsonl` 这一份候选审计），而 `store/private.go` 那条 v0.3 账本（`PutCandidate`/`PutEvidence`）**仍然零生产调用方**（R1 把它的端口 `legacy.EvidenceStore` 移出了根包，但没给它接调用方——它是 v0.3 的公开 API，不是待办的缺口）。gate 不 import store，它经 `legacy.EvidenceStore` 写账本——这是装配层之外又一条不可见的边。出私密面的最后一道闸是图落盘前的**统一**擦洗（`dag` 的 `document()`，由装配层的 dagGraphSaver 驱动，`Save` 与 `json.Marshal` 共用同一份），而 `Raw` 字段（工具输出原文摘录）是最容易漏的那个——它曾经真的漏过。",
     "**桥的两侧契约都由可执行替身钉死，而其中一条边本机永远走不通。** `bridge/testdata/mock_sdk.py` 与真 SDK 逐字段对齐，**连两个源码级缺陷一起照抄**（畸形载荷抛裸 KeyError、2xx 非 JSON 抛 JSONDecodeError）——「修好」它们等于删掉桥必须包住的失效模式；`piai/testdata/stubpi` 是 pi RPC 帧格式唯一的可执行规范。而 `bridge.py` 的 SDK 解析是个**二选一**：`TSEC_MOCK=1` + `PYTHONPATH=bridge/testdata` 走 mock_sdk，否则 `import tsec_benchmark` 走真 SDK。本图只解析了前一条。后一条在宿主上**必然失败**（py3.12 缺 httpx），真跑的唯一路径是 `docker exec <容器> python3 -m bridge`——所以这条未解析边同时是「本机限制」与「SDK 装在容器层」的体现。",
-    "**落盘面在 v0.4 裂成两半：图那一半已接线，事件溯源那一半仍悬空。** `store.FileStore` **确实在装配路径上被构造了**（`wire.go:219` 的 `store.New(storeDir)`，拿的是图存储的根句柄），`PutGraph`/`PutGraphExport`/`ForRun` 因此有生产写入方，落点是 `<StoreDir>/runs/<runID>/graph.json` + `graph.mmd`（0600）。但同一个 `FileStore` 的另一半——`Append`（events.jsonl）、`PutSnapshot`（run.json）、`PutCandidate`、`PutEvidence`（private/）、`PutReport`（report.*）——**生产调用方仍然是零**，`Private()` 也无人调用。**本图照样画着 `store → ds:events.jsonl` 这类 write 边**：那是 store 的**能力**（代码里确实能写），不是当前**接线**。区分「端口存在」与「装配存在」是这张图最容易骗人的地方，而它现在在同一张图上**同时出现两种答案**。详见 `docs/v0.4-open-items.md` A 节（注意该文写于图落盘落地之前，它的 `graph.json` 行已过期）。**明文纪律没有破**：v0.4 的明文落点是 `<ResultDir>/private/<runID>/*.jsonl`，目录 0700、文件 0600，图的载荷另经 dag 的统一擦洗。",
-    "**发布门的缺口在这张图上就是一条边：`bridge/bridge.py ⇒ ds:tsecbench-api` 的 submit 从未成功过。** 真实 pi 已在 sandbox 内跑通工具调用并从靶场拿到 200，但平台 `submit` 返回 `app_error (http 501)`，尚无平台确认的提交闭环（`docs/roadmap.md` M4 记「未通过」）。harness 的处理是对的——按「提交结果不确定」结束本题、先对账、并正确关掉了题目容器（平台侧确认 `stopped`、无遗留）——但这意味着**这条边在图上只应读作「已实现、未验证」**。同一张图上还有一条类似的边：`executor → ds:host-netfilter`，它的边界已在 `roadmap.md` 与 `docs/offensive-harness-sdk-roadmap.md` 写明——**同一 Docker bridge 内的流量不经过当前 iptables 规则**，所以「非授权端点不可达」成立，「对任意同桥容器也隔离」不成立。两条最该被质疑的边都不是画错，是**证据边界**。",
-    "**v0.5 已规划一次明确的破坏性整理，本图的双代结构是它的主要目标。** `docs/offensive-harness-sdk-roadmap.md`（新增）第 3 节列出：把 `SolverProfile` 的任意 `map[string]any` 换成带 schema 的配置、补私密候选审计记录、给 v0.3 的 `Engine`/`RunHandle`/`New`/`RegisterEngine`/`Store`/`EvidenceStore`/旧 `Executor` 标注 legacy 并在无生产调用方时移出根包，同时保留 `Reason*` 字符串、图 schema 读取能力与 `answer.Fingerprint` 唯一实现。**这就是本图里那些「零生产调用方」落点最终的去向**——它们不是待修的缺口，是已排期的废弃面。",
+    "**落盘面在 v0.4 裂成两半：图那一半已接线，事件溯源那一半仍悬空。** `store.FileStore` **确实在装配路径上被构造了**（`wire.go:219` 的 `store.New(storeDir)`，拿的是图存储的根句柄），`PutGraph`/`PutGraphExport`/`ForRun` 因此有生产写入方，落点是 `<StoreDir>/runs/<runID>/graph.json` + `graph.mmd`（0600）。但同一个 `FileStore` 的另一半——`Append`（events.jsonl）、`PutSnapshot`（run.json）、`PutCandidate`、`PutEvidence`（private/）、`PutReport`（report.*）——**生产调用方仍然是零**，`Private()` 也无人调用。**本图照样画着 `store → ds:events.jsonl` 这类 write 边**：那是 store 的**能力**（代码里确实能写），不是当前**接线**。区分「端口存在」与「装配存在」是这张图最容易骗人的地方，而它现在在同一张图上**同时出现两种答案**。详见 `docs/v0.4-open-items.md` A 节（该文已于 R1 之后重写，订正了三处实质错误：`store.New` 其实有生产调用方、`graph.json` 其实有写入方、`RegisterEngine` 其实零调用方）。**明文纪律没有破**：v0.4 的明文落点是 `<ResultDir>/private/<runID>/*.jsonl`，目录 0700、文件 0600，图的载荷另经 dag 的统一擦洗。",
+    "**发布门的缺口在这张图上就是一条边：`bridge/bridge.py ⇒ ds:tsecbench-api` 的 submit 从未被平台确认过。** 真实 pi 已在 sandbox 内跑通工具调用并从靶场拿到 200。提交路径的现状比「501」更细：**2026-09-22 的复跑里 147 次 `POST /submit` 全部返回 200、501 未复现，但那一次全程经 HTTP/1.1 中继，直连路径仍未证**——所以既不成立「501 已经好了」，也不成立「submit 通了」。发布门保持未通过（`docs/roadmap.md` M4）。harness 的处理是对的——按「提交结果不确定」结束本题、先对账、并正确关掉了题目容器（平台侧确认 `stopped`、无遗留）——但这意味着**这条边在图上只应读作「已实现、未验证」**。同一张图上还有一条类似的边：`executor → ds:host-netfilter`，它的边界已在 `roadmap.md` 与 `docs/offensive-harness-sdk-roadmap.md` 写明——**同一 Docker bridge 内的流量不经过当前 iptables 规则**，所以「非授权端点不可达」成立，「对任意同桥容器也隔离」不成立。两条最该被质疑的边都不是画错，是**证据边界**。",
+    "**v0.5 的破坏性整理已落地（R1），本图的双代结构不再是它的目标而是它的结果。** `docs/offensive-harness-sdk-roadmap.md` 第 3 节列的几件事都已执行：`SolverProfile` 的 `map[string]any` 换成了带 schema 的 `PlannerConfig`/`PromptConfig`；私密候选审计落地为 `<ResultDir>/private/<runID>/submissions.jsonl`（**生产路径已接线**，回答「提交了什么、平台怎么判的」）；v0.3 的 `Engine`/`RunHandle`/`New`/`RegisterEngine`/`Store`/`EvidenceStore`/旧 `Executor` 已移出根包到 `legacy/`；`Reason*` 字符串、图 schema 读取能力与 `answer.Fingerprint` 唯一实现都保留。**代价与收益都要说清楚**：根包公开面变小了（「哪些端口是活的」不必再靠读注释判断），而多了一个 `legacy` 叶子包——它只准 import 标准库与根包，这条规矩由 `legacy/layering_test.go` 用 go/parser 扫全仓 import 图来钉，不再只写在文档里。",
 ]
 
 
