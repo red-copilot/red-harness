@@ -35,6 +35,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 OUT_DIR = HERE
 
+# 交互式 viewer 的模板由 code-modernization 插件提供，**不手写 viewer**。
+# 路径里的版本号是插件缓存目录，插件升级后会变；可用 RH_VIEWER_TEMPLATE 覆盖。
+VIEWER_TEMPLATE = os.environ.get(
+    "RH_VIEWER_TEMPLATE",
+    "/root/.claude/plugins/cache/claude-plugins-official/code-modernization/"
+    "c447c3207a42/assets/topology-viewer.html",
+)
+VIEWER_MARKER = "/*__TOPOLOGY_DATA__*/ null"
+
 # 显式跳过的路径段。`.gocache` 里躺着整份 stdlib + 依赖源码（1200+ .go 文件），
 # `.claude/worktrees` 是并行 agent 的工作副本，两者都会把图彻底带偏。
 SKIP_DIR_PARTS = {".git", ".gocache", ".claude", ".remember", "vendor", "__pycache__", "node_modules"}
@@ -148,7 +157,7 @@ RUNTIME_EDGES = [
     # 存储写入面：store 是这些落点的唯一写者（单写者模型）
     ("store", "ds:events.jsonl", "write", "**能力边**：FileStore 在 v0.4 无装配方。Append 先事件后快照的顺序仍是硬契约"),
     ("store", "ds:run.json", "write", "**能力边**：FileStore 在 v0.4 无装配方"),
-    ("store", "ds:graph.json", "write", "v0.4 **实际生效**：`PutGraph` 由装配层的 dagGraphSaver 驱动（`wire.go:300` 恒提供 `Graphs`）"),
+    ("store", "ds:graph.json", "write", "v0.4 **实际生效**：`PutGraph` 由装配层的 `dagGraphSaver` 驱动（`internal/wire/wire.go` 的 `Graphs:` 恒非 nil）"),
     ("store", "ds:graph.mmd", "write", "v0.4 **实际生效**：`PutGraphExport`，与 graph.json 并列、同权限 0600"),
     ("internal/wire", "ds:graph.json", "write", "装配层 `dagGraphSaver.SaveGraph`：`ForRun(runID).PutGraph(json.Marshal(graph))`，载荷走 dag 的统一擦洗"),
     ("internal/wire", "ds:graph.mmd", "write", "同一处 `PutGraphExport(dag.Mermaid(graph))`，从**刚落盘的真源**派生，不另拼一份"),
@@ -203,11 +212,11 @@ NAIVE_GRAPH_FALSE_POSITIVES = [
 ]
 
 OBSERVATIONS = [
-    "**文档与代码的漂移是双向的，这次漂的是本图自己。** 16:16 那版提取给 `ds:graph.json` 的判词是「端口有、装配方无」，而装配层随后补上了 `dagGraphSaver`（`internal/wire/wire.go:300` 恒提供 `Graphs`）——图从此有了生产写入方。同一份 `CLAUDE.md` 当时还在描述 v0.3（`engine/` 是中心缺口、CLI 8 个子命令、`scenario/` 尚未创建），17:44 已按实况改写，反而比图更准。**两边都没有 CI 校验，所以两边的漂移都只能靠下一次复核抓到**：本脚本的 dispatch 证据回查挡得住「源码挪了」，挡不住「语义变了、证据模式还在」这种漂移——`graph.json` 这条正是后者（端口名没变，装配方从无到有）。",
+    "**文档与代码的漂移是双向的，这次漂的是本图自己。** 16:16 那版提取给 `ds:graph.json` 的判词是「端口有、装配方无」，而装配层随后补上了 `dagGraphSaver`（`internal/wire/wire.go` 的 `Graphs:` 恒非 nil）——图从此有了生产写入方。同一份 `CLAUDE.md` 当时还在描述 v0.3（`engine/` 是中心缺口、CLI 8 个子命令、`scenario/` 尚未创建），17:44 已按实况改写，反而比图更准。**两边都没有 CI 校验，所以两边的漂移都只能靠下一次复核抓到**：本脚本的 dispatch 证据回查挡得住「源码挪了」，挡不住「语义变了、证据模式还在」这种漂移——`graph.json` 这条正是后者（端口名没变，装配方从无到有）。",
     "**`internal/wire` 是唯一同时看得见全部 7 个实现包的模块，而真正把系统拼起来的边在 import 图里完全不可见。** 实现包之间两两互不 import（executor 不认识 scenario，scenario 不认识 dag），这是「一个子包 = 一个 agent」并行编排能成立的前提；代价是 wire 成为编译耦合的单点，也是「谁把 X 交给 Y」这个问题的唯一答案所在。三条最关键的边因此只能按 dispatch 建模：`internal/cli → internal/wire`（`cli.SetWire` 装包级 `WireFunc` 变量）、`scenario → bridge`（`Platform` 窄接口由 wire 注入）、`piai → executor`（`AgentFactory.New` 收 `harness.SandboxSession`）。任何 grep-import 的依赖图都会漏掉它们，并据此把 cli/scenario/piai 误判成孤立——本图的 11 条 dispatch 边每条都带源码证据回查，就是为了让这种误判当场露馅。",
     "**明文的纪律比它的落点更稳定——落点换过两次，纪律没换。** 允许出现候选明文的地方只有私密面：v0.4/v0.5 **实际生效**的是 `<ResultDir>/private/<runID>/*.jsonl`（目录 0700、文件 0600，v0.5 起多了 `submissions.jsonl` 这一份候选审计），而 `store/private.go` 那条 v0.3 账本（`PutCandidate`/`PutEvidence`）**仍然零生产调用方**（R1 把它的端口 `legacy.EvidenceStore` 移出了根包，但没给它接调用方——它是 v0.3 的公开 API，不是待办的缺口）。gate 不 import store，它经 `legacy.EvidenceStore` 写账本——这是装配层之外又一条不可见的边。出私密面的最后一道闸是图落盘前的**统一**擦洗（`dag` 的 `document()`，由装配层的 dagGraphSaver 驱动，`Save` 与 `json.Marshal` 共用同一份），而 `Raw` 字段（工具输出原文摘录）是最容易漏的那个——它曾经真的漏过。",
     "**桥的两侧契约都由可执行替身钉死，而其中一条边本机永远走不通。** `bridge/testdata/mock_sdk.py` 与真 SDK 逐字段对齐，**连两个源码级缺陷一起照抄**（畸形载荷抛裸 KeyError、2xx 非 JSON 抛 JSONDecodeError）——「修好」它们等于删掉桥必须包住的失效模式；`piai/testdata/stubpi` 是 pi RPC 帧格式唯一的可执行规范。而 `bridge.py` 的 SDK 解析是个**二选一**：`TSEC_MOCK=1` + `PYTHONPATH=bridge/testdata` 走 mock_sdk，否则 `import tsec_benchmark` 走真 SDK。本图只解析了前一条。后一条在宿主上**必然失败**（py3.12 缺 httpx），真跑的唯一路径是 `docker exec <容器> python3 -m bridge`——所以这条未解析边同时是「本机限制」与「SDK 装在容器层」的体现。",
-    "**落盘面在 v0.4 裂成两半：图那一半已接线，事件溯源那一半仍悬空。** `store.FileStore` **确实在装配路径上被构造了**（`wire.go:219` 的 `store.New(storeDir)`，拿的是图存储的根句柄），`PutGraph`/`PutGraphExport`/`ForRun` 因此有生产写入方，落点是 `<StoreDir>/runs/<runID>/graph.json` + `graph.mmd`（0600）。但同一个 `FileStore` 的另一半——`Append`（events.jsonl）、`PutSnapshot`（run.json）、`PutCandidate`、`PutEvidence`（private/）、`PutReport`（report.*）——**生产调用方仍然是零**，`Private()` 也无人调用。**本图照样画着 `store → ds:events.jsonl` 这类 write 边**：那是 store 的**能力**（代码里确实能写），不是当前**接线**。区分「端口存在」与「装配存在」是这张图最容易骗人的地方，而它现在在同一张图上**同时出现两种答案**。详见 `docs/v0.4-open-items.md` A 节（该文已于 R1 之后重写，订正了三处实质错误：`store.New` 其实有生产调用方、`graph.json` 其实有写入方、`RegisterEngine` 其实零调用方）。**明文纪律没有破**：v0.4 的明文落点是 `<ResultDir>/private/<runID>/*.jsonl`，目录 0700、文件 0600，图的载荷另经 dag 的统一擦洗。",
+    "**落盘面在 v0.4 裂成两半：图那一半已接线，事件溯源那一半仍悬空。** `store.FileStore` **确实在装配路径上被构造了**（`internal/wire/wire.go` 的 `store.New(storeDir)`，拿的是图存储的根句柄），`PutGraph`/`PutGraphExport`/`ForRun` 因此有生产写入方，落点是 `<StoreDir>/runs/<runID>/graph.json` + `graph.mmd`（0600）。但同一个 `FileStore` 的另一半——`Append`（events.jsonl）、`PutSnapshot`（run.json）、`PutCandidate`、`PutEvidence`（private/）、`PutReport`（report.*）——**生产调用方仍然是零**，`Private()` 也无人调用。**本图照样画着 `store → ds:events.jsonl` 这类 write 边**：那是 store 的**能力**（代码里确实能写），不是当前**接线**。区分「端口存在」与「装配存在」是这张图最容易骗人的地方，而它现在在同一张图上**同时出现两种答案**。详见 `docs/v0.4-open-items.md` A 节（该文已于 R1 之后重写，订正了三处实质错误：`store.New` 其实有生产调用方、`graph.json` 其实有写入方、`RegisterEngine` 其实零调用方）。**明文纪律没有破**：v0.4 的明文落点是 `<ResultDir>/private/<runID>/*.jsonl`，目录 0700、文件 0600，图的载荷另经 dag 的统一擦洗。",
     "**发布门的缺口在这张图上就是一条边：`bridge/bridge.py ⇒ ds:tsecbench-api` 的 submit 从未被平台确认过。** 真实 pi 已在 sandbox 内跑通工具调用并从靶场拿到 200。提交路径的现状比「501」更细：**2026-09-22 的复跑里 147 次 `POST /submit` 全部返回 200、501 未复现，但那一次全程经 HTTP/1.1 中继，直连路径仍未证**——所以既不成立「501 已经好了」，也不成立「submit 通了」。发布门保持未通过（`docs/roadmap.md` M4）。harness 的处理是对的——按「提交结果不确定」结束本题、先对账、并正确关掉了题目容器（平台侧确认 `stopped`、无遗留）——但这意味着**这条边在图上只应读作「已实现、未验证」**。同一张图上还有一条类似的边：`executor → ds:host-netfilter`，它的边界已在 `roadmap.md` 与 `docs/offensive-harness-sdk-roadmap.md` 写明——**同一 Docker bridge 内的流量不经过当前 iptables 规则**，所以「非授权端点不可达」成立，「对任意同桥容器也隔离」不成立。两条最该被质疑的边都不是画错，是**证据边界**。",
     "**v0.5 的破坏性整理已落地（R1），本图的双代结构不再是它的目标而是它的结果。** `docs/offensive-harness-sdk-roadmap.md` 第 3 节列的几件事都已执行：`SolverProfile` 的 `map[string]any` 换成了带 schema 的 `PlannerConfig`/`PromptConfig`；私密候选审计落地为 `<ResultDir>/private/<runID>/submissions.jsonl`（**生产路径已接线**，回答「提交了什么、平台怎么判的」）；v0.3 的 `Engine`/`RunHandle`/`New`/`RegisterEngine`/`Store`/`EvidenceStore`/旧 `Executor` 已移出根包到 `legacy/`；`Reason*` 字符串、图 schema 读取能力与 `answer.Fingerprint` 唯一实现都保留。**代价与收益都要说清楚**：根包公开面变小了（「哪些端口是活的」不必再靠读注释判断），而多了一个 `legacy` 叶子包——它只准 import 标准库与根包，这条规矩由 `legacy/layering_test.go` 用 go/parser 扫全仓 import 图来钉，不再只写在文档里。",
 ]
@@ -545,6 +554,37 @@ def mermaid_critical_path(flow):
     return "\n".join(lines) + "\n"
 
 
+def write_viewer(topo):
+    """把本图注入插件自带的 viewer 模板，产出 TOPOLOGY.html。
+
+    只重写 `topology.json` 是**不够**的：HTML 里嵌的是一份**数据副本**，不重生成就会
+    停在上一版。本仓库真的踩过这个坑——脚本重跑后 JSON 已更新到 R1（59 条边、
+    `legacy.EvidenceStore`），而 viewer 还停在 R1 之前（58 条边、`harness.EvidenceStore`），
+    两者在同一份产物里各说各话。所以「重跑脚本」必须同时刷新 viewer，否则图会静默说谎。
+    """
+    if not os.path.exists(VIEWER_TEMPLATE):
+        print(f"!! 未找到 viewer 模板：{VIEWER_TEMPLATE}", file=sys.stderr)
+        print("   模板路径可能因插件升级而变（或用 RH_VIEWER_TEMPLATE 指定）。"
+              "按约定不手写 viewer，TOPOLOGY.html **未**更新。", file=sys.stderr)
+        return False
+    with open(VIEWER_TEMPLATE, encoding="utf-8") as f:
+        tpl = f.read()
+    if VIEWER_MARKER not in tpl:
+        print(f"!! 模板里没有注入标记 {VIEWER_MARKER!r}；TOPOLOGY.html **未**更新。", file=sys.stderr)
+        return False
+
+    data = json.dumps(topo, ensure_ascii=False)
+    # 图的数据源自**不可信输入**（节点名取自文件名，observations/flows 取自被分析的代码）。
+    # 注入点是 <script> 块，而 HTML 解析器在字面量 "</script>" 处就关闭标签，与 JS 字符串
+    # 上下文无关——所以一个叫 `x</script><script>…` 的节点会真的执行。json.dumps 不转义 "<"，
+    # 这里补上（转义是 JSON 安全的，"<" 解析回来仍是 "<"，viewer 读到的内容不变）。
+    data = data.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+    with open(os.path.join(OUT_DIR, "TOPOLOGY.html"), "w", encoding="utf-8") as f:
+        f.write(tpl.replace(VIEWER_MARKER, "/*__TOPOLOGY_DATA__*/ " + data))
+    return True
+
+
 def main():
     edges, evidence_report, static_edges = extract()
     locs = loc_table()
@@ -598,7 +638,10 @@ def main():
     with open(os.path.join(OUT_DIR, "critical-path.mmd"), "w", encoding="utf-8") as f:
         f.write(mermaid_critical_path(flows[0]))
 
-    print_summary(topo, edges, evidence_report, computed_dead, dead_ends, locs, static_edges)
+    viewer_ok = write_viewer(topo)
+
+    print_summary(topo, edges, evidence_report, computed_dead, dead_ends, locs, static_edges,
+                  viewer_ok)
     return 0
 
 
@@ -631,7 +674,7 @@ def load_flows():
                 {"label": "工具输出被实时判读成候选证据", "nodes": ["gate", "answer"]},
                 {"label": "事实与意图进图，供下一轮提示剪枝", "nodes": ["dag"]},
                 {"label": "候选明文只写私密 trace（0700/0600）", "nodes": ["store", "ds:private-trace"]},
-                {"label": "把候选提交回平台换分——这条边**尚未被平台确认过**（submit 501）", "nodes": ["bridge/bridge.py", "ds:tsecbench-api"]},
+                {"label": "把候选提交回平台换分——这条边只应读作「已实现、未验证」（501 未复现，直连未证）", "nodes": ["bridge/bridge.py", "ds:tsecbench-api"]},
             ],
         },
         {
@@ -662,7 +705,8 @@ def load_flows():
     ]
 
 
-def print_summary(topo, edges, evidence_report, computed_dead, dead_ends, locs, static_edges):
+def print_summary(topo, edges, evidence_report, computed_dead, dead_ends, locs, static_edges,
+                  viewer_ok=True):
     W = 78
     print("=" * W)
     print("red-harness 依赖与拓扑提取")
@@ -738,6 +782,8 @@ def print_summary(topo, edges, evidence_report, computed_dead, dead_ends, locs, 
 
     print(f"\n{'=' * W}")
     print(f"写出：topology.json / call-graph.mmd / data-lineage.mmd / critical-path.mmd")
+    print("     " + ("TOPOLOGY.html（交互式 viewer，已随本次数据重建）" if viewer_ok
+                     else "TOPOLOGY.html **未更新**（模板缺失，见上）"))
     print("=" * W)
 
 

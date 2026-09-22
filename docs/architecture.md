@@ -2,6 +2,7 @@
 
 > 更新：2026-09-22。本文按当前工作区代码描述实现状态；目标行为见 [PLAN v0.4](PLAN%20v0.4.md)，收尾出口门见 [roadmap.md](roadmap.md)。
 > 下一阶段的目标架构、接口演进和发布路线见 [offensive-harness-sdk-roadmap.md](offensive-harness-sdk-roadmap.md)。
+> 新架构提案见 [offensive-harness-sdk-architecture-next.md](offensive-harness-sdk-architecture-next.md)：公开装配、运行内核、提交审计与实验复现的具体设计；其中计划能力尚未实现。
 > **旧 Engine、RunHandle、事件快照与 v0.3 的三个存储端口已移出根包到 `legacy/`**（R1 落地）；
 > CLI 已切到 v0.4 同步入口。⚠️ **R0（v0.4 发布门）仍未通过**——`legacy/` 的移出是
 > 契约整理，不是发布信号。
