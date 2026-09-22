@@ -22,13 +22,13 @@ import (
 // 「凭据绝不入库」那条规则要防的扩散路径。
 //
 // 本波次只交付 flag 解析与注入点：真正的检查项（Docker / runner 镜像 /
-// provider 凭据 / VPN）由装配层（`internal/wire`）接上——**CLI 自己不做检查**，
+// provider 凭据 / VPN）由装配层（`local`）接上——**CLI 自己不做检查**，
 // 它连 docker 可不可用都不该知道。
 //
 // ⚠️ **v0.4 的 `Harness.Doctor` 不返回 error**（见 v04.go），所以这里没有
 // 「体检本身出错」这条分支：体检的结论**全部**通过 `DoctorReport.Checks`
 // 表达，任何检查项失败都必须落成一项 FAIL，而不是一个 error。装配层因此必须
-// 把「探测失败」也记成 FAIL 项（`wire.Doctor` 就是这么做的）——否则一次
+// 把「探测失败」也记成 FAIL 项（`Runner.Doctor` 就是这么做的）——否则一次
 // 「docker 命令都跑不起来」会表现为体检全绿。
 func (a *app) doctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)

@@ -105,7 +105,7 @@ func wirePorts(p Ports) WireFunc {
 // 子命令名。用户发现子命令的唯一途径就是这个输出，漏一个等于该子命令不存在。
 func TestMainHelpListsAllSubcommands(t *testing.T) {
 	var out, errb bytes.Buffer
-	if code := Main([]string{"--help"}, &out, &errb); code != 0 {
+	if code := Main([]string{"--help"}, &out, &errb, nil); code != 0 {
 		t.Fatalf("Main(--help) = %d，期望 0", code)
 	}
 	if len(subcommands) != 4 {
@@ -138,7 +138,7 @@ func TestMainHelpListsAllSubcommands(t *testing.T) {
 // 同时钉住退出码 2：脚本要能区分「命令写错了」与「跑起来之后失败了」。
 func TestMainUnknownSubcommandNamesIt(t *testing.T) {
 	var out, errb bytes.Buffer
-	if code := Main([]string{"bogus"}, &out, &errb); code != exitUsage {
+	if code := Main([]string{"bogus"}, &out, &errb, nil); code != exitUsage {
 		t.Fatalf("未知子命令 = %d，期望 %d；stdout=%q", code, exitUsage, out.String())
 	}
 	if !strings.Contains(errb.String(), "bogus") {
@@ -149,7 +149,7 @@ func TestMainUnknownSubcommandNamesIt(t *testing.T) {
 	for _, gone := range []string{"pause", "resume", "cancel", "serve", "report"} {
 		out.Reset()
 		errb.Reset()
-		if code := Main([]string{gone, "--store", "/tmp/rh"}, &out, &errb); code != exitUsage {
+		if code := Main([]string{gone, "--store", "/tmp/rh"}, &out, &errb, nil); code != exitUsage {
 			t.Errorf("已删除的 %s = %d，期望 %d", gone, code, exitUsage)
 		}
 		if !strings.Contains(errb.String(), gone) {
@@ -162,7 +162,7 @@ func TestMainUnknownSubcommandNamesIt(t *testing.T) {
 // **flag 名**，否则用户只知道「有个值不对」。
 func TestMainBadFlagNamesTheFlag(t *testing.T) {
 	var out, errb bytes.Buffer
-	if code := Main([]string{"run", "--budget-rounds=abc"}, &out, &errb); code != exitUsage {
+	if code := Main([]string{"run", "--budget-rounds=abc"}, &out, &errb, nil); code != exitUsage {
 		t.Fatalf("非法 flag 值 = %d，期望 %d", code, exitUsage)
 	}
 	if !strings.Contains(errb.String(), "budget-rounds") {
@@ -217,7 +217,7 @@ func TestMainSubcommandsExitNonZeroWithoutWire(t *testing.T) {
 	for _, args := range invocations {
 		t.Run(args[0], func(t *testing.T) {
 			var out, errb bytes.Buffer
-			if code := Main(args, &out, &errb); code != exitFailure {
+			if code := Main(args, &out, &errb, nil); code != exitFailure {
 				t.Fatalf("Main(%v) = %d，期望 %d", args, code, exitFailure)
 			}
 			if !strings.Contains(errb.String(), "尚未装配") {
@@ -228,10 +228,10 @@ func TestMainSubcommandsExitNonZeroWithoutWire(t *testing.T) {
 }
 
 // TestMainWritesToInjectedWriters 断言「成功写 stdout、失败写 stderr」这条分工。
-// 它是 `Main(args, stdout, stderr)` 这个签名的直接理由。
+// 它是 `Main(args, stdout, stderr, wire)` 这个签名的直接理由。
 func TestMainWritesToInjectedWriters(t *testing.T) {
 	var out, errb bytes.Buffer
-	if code := Main([]string{"bogus"}, &out, &errb); code == 0 {
+	if code := Main([]string{"bogus"}, &out, &errb, nil); code == 0 {
 		t.Fatal("未知子命令应当返回非 0")
 	}
 	if out.Len() != 0 {
@@ -243,7 +243,7 @@ func TestMainWritesToInjectedWriters(t *testing.T) {
 
 	out.Reset()
 	errb.Reset()
-	if code := Main([]string{"--help"}, &out, &errb); code != 0 {
+	if code := Main([]string{"--help"}, &out, &errb, nil); code != 0 {
 		t.Fatalf("--help = %d，期望 0", code)
 	}
 	if out.Len() == 0 {
@@ -287,7 +287,7 @@ func TestMainNeverWritesToProcessStdio(t *testing.T) {
 		{[]string{"--help"}, exitOK},
 		{[]string{"list"}, exitFailure},
 	} {
-		if got := Main(c.args, &out, &errb); got != c.want {
+		if got := Main(c.args, &out, &errb, nil); got != c.want {
 			t.Errorf("Main(%v) = %d，期望 %d", c.args, got, c.want)
 		}
 	}
@@ -315,7 +315,7 @@ func TestMainNeverWritesToProcessStdio(t *testing.T) {
 // TestMainNoArgsPrintsUsageToStderr 钉住「什么都不打」这条输入。
 func TestMainNoArgsPrintsUsageToStderr(t *testing.T) {
 	var out, errb bytes.Buffer
-	if code := Main(nil, &out, &errb); code != exitUsage {
+	if code := Main(nil, &out, &errb, nil); code != exitUsage {
 		t.Errorf("无参数 = %d，期望 %d（用户没说要做什么）", code, exitUsage)
 	}
 	if !strings.Contains(errb.String(), "run") || !strings.Contains(errb.String(), "doctor") {
@@ -329,7 +329,7 @@ func TestSubcommandHelpExitsZero(t *testing.T) {
 	for _, name := range subcommands {
 		t.Run(name, func(t *testing.T) {
 			var out, errb bytes.Buffer
-			if code := Main([]string{name, "--help"}, &out, &errb); code != 0 {
+			if code := Main([]string{name, "--help"}, &out, &errb, nil); code != 0 {
 				t.Fatalf("%s --help = %d，期望 0（stderr=%q）", name, code, errb.String())
 			}
 			// 子命令的 --help 必须打自己的用法行（"用法：red-harness <name>"），
@@ -370,20 +370,18 @@ func TestSubcommandRejectsExtraPositionalArgs(t *testing.T) {
 
 // ── 接线后的行为：窄接口真的被用上了 ──
 
-// TestInjectWireFeedsMain 断言装配层的注入点真的接进了 Main。
-// `cmd/red-harness` 就是靠这个点把 `wire.New` 装进来的。
-func TestInjectWireFeedsMain(t *testing.T) {
-	// 用 injectWire 的返回值做恢复：它是这个 helper 的**唯一**用法
-	// （`t.Cleanup(injectWire(fn))`），手写 prev/cleanup 会让返回值那条
-	// 恢复路径永远没有覆盖。
-	t.Cleanup(injectWire(func(string, harness.RunSpec, DeployOptions) (Ports, error) {
+// TestWireParameterFeedsMain 断言装配函数经 `Main` 的第四个参数真的接了进去。
+// `cmd/red-harness` 就是靠这个参数把 `local.New` 交进来的。
+//
+// 它不需要任何 cleanup：装配面只活在这一次调用里。
+func TestWireParameterFeedsMain(t *testing.T) {
+	wire := func(string, harness.RunSpec, DeployOptions) (Ports, error) {
 		return Ports{Results: &fakeResults{runs: []harness.RunResult{{
 			RunID: "r-1", Scenario: "fake", Completed: true,
 		}}}}, nil
-	}))
-
+	}
 	var out, errb bytes.Buffer
-	if code := Main([]string{"list", "--store", "/tmp/rh"}, &out, &errb); code != 0 {
+	if code := Main([]string{"list", "--store", "/tmp/rh"}, &out, &errb, wire); code != 0 {
 		t.Fatalf("接线后 list 应当成功，实际 %d（stderr=%q）", code, errb.String())
 	}
 	if !strings.Contains(out.String(), "r-1") {
@@ -391,18 +389,35 @@ func TestInjectWireFeedsMain(t *testing.T) {
 	}
 }
 
-// TestSetWireIsTheProductionInjectionPoint 钉住 `SetWire` 与包级 `wired`
-// 是同一件事：`cmd/red-harness` 的 init 走的是导出入口，而测试走的是包内的
-// `injectWire`——两条路径必须落到同一个变量，否则「生产装上了、测试看到的却是
-// 空的」会长期存在而没人发现。
-func TestSetWireIsTheProductionInjectionPoint(t *testing.T) {
-	defer injectWire(nil)()
-	SetWire(func(string, harness.RunSpec, DeployOptions) (Ports, error) {
-		return Ports{Doctor: &fakeDoctor{rep: harness.DoctorReport{OK: true}}}, nil
-	})
+// TestWireParameterIsPerCall 钉住「装配函数是每次调用的参数，不是包级状态」。
+//
+// 它替代了原来的 `TestSetWireIsTheProductionInjectionPoint`。那条测试存在的
+// 理由是「生产装上了、测试看到的却是空的」——那是**包级变量**特有的漂移，变量
+// 一删在类型上就不可能发生。但还剩一个风险：一次调用的装配面**串到**下一次
+// （比如被谁缓存进包级变量），于是「这次跑的是谁的配置」取决于进程里上一次调用。
+// 所以这里连着调两次 Main、给两个不同的 wire，两次的结论必须互不影响。
+//
+// 顺带钉住「装配期的配置错＝用法错（退出码 2）」：它是 `ports` 里那条折叠的
+// 唯一断言点——`local.New` 失败（store 根建不出来、profile 目录不存在……）在
+// 用户眼里与「命令行写错了」是同一类，都该改输入而不是去查日志。
+func TestWireParameterIsPerCall(t *testing.T) {
+	bad := func(string, harness.RunSpec, DeployOptions) (Ports, error) {
+		return Ports{}, harness.Ef(harness.KindConfig, "test.wire", "第一次调用的装配面", nil)
+	}
 	var out, errb bytes.Buffer
-	if code := Main([]string{"doctor"}, &out, &errb); code != 0 {
-		t.Fatalf("SetWire 之后 doctor = %d，期望 0（stderr=%q）", code, errb.String())
+	if code := Main([]string{"doctor"}, &out, &errb, bad); code != exitUsage {
+		t.Fatalf("装配期的配置错 = %d，期望 %d（用法错）", code, exitUsage)
+	}
+	if !strings.Contains(errb.String(), "第一次调用的装配面") {
+		t.Errorf("装配故障的真原因没打出来：%q", errb.String())
+	}
+	errb.Reset()
+	good := func(string, harness.RunSpec, DeployOptions) (Ports, error) {
+		return Ports{Doctor: &fakeDoctor{rep: harness.DoctorReport{OK: true}}}, nil
+	}
+	if code := Main([]string{"doctor"}, &out, &errb, good); code != 0 {
+		t.Fatalf("第二次 doctor = %d，期望 0——上一次调用的装配面串到了这一次（stderr=%q）",
+			code, errb.String())
 	}
 }
 
@@ -582,20 +597,31 @@ func TestRunNeverPrintsCandidatePlaintext(t *testing.T) {
 	}
 }
 
-// TestRunChallengeLinePrintsGraphSaveFailures 钉住「图没落盘」在命令行上是**可见**的。
+// TestRunChallengeLinePrintsGraphState 钉住图产物在命令行上是**可见且可区分**的。
 //
 // 图是研究辅助面：写失败不算本题失败（Reason 不变），所以公开指标里没有别的痕迹
 // 能说明「这次运行的图没留下来」。此前它只进结果文件，命令行用户完全看不到——
 // 而「没写出去」被读成「写了」的代价是：事后拿不到图，却以为图本来就没有。
-func TestRunChallengeLinePrintsGraphSaveFailures(t *testing.T) {
+//
+// ⚠️ **四种状态逐个断言**，不是只断言「失败时多一列」：`disabled`（这次部署没开
+// 图）/ `absent`（开了但本题没登记过图）/ `saved`（写了）/ `failed`（没写出去）
+// 的处置完全不同，任何一个被压成另一个都会让操作员去猜该动哪一层。空串单独一档
+// ——它是「未记录」，不是「不认识的值」。
+func TestRunChallengeLinePrintsGraphState(t *testing.T) {
 	for _, c := range []struct {
 		name     string
+		state    harness.GraphState
 		failures []string
-		wantCol  bool
+		want     string
 	}{
-		{"图正常落盘", nil, false},
-		{"图没写出去", []string{"write"}, true},
-		{"未知阶段也要打出来", []string{"unknown"}, true},
+		{"图没启用", harness.GraphDisabled, nil, "图 未启用"},
+		{"本题没有产物", harness.GraphAbsent, nil, "图 无产物"},
+		{"图写成功了", harness.GraphSaved, nil, "图 已保存"},
+		{"图没写出去（附阶段）", harness.GraphFailed, []string{"write"}, "图 失败（阶段 write）"},
+		{"未记录", "", nil, "图 未记录"},
+		// 未识别的枚举值原样打印：与 stateText 同一条约定（GraphState 是公开
+		// API，新值会出现而 CLI 不该把它显示成「未知」而丢掉信息）。
+		{"未知值原样打印", harness.GraphState("partial"), nil, "图 partial"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a := newTestApp()
@@ -605,8 +631,9 @@ func TestRunChallengeLinePrintsGraphSaveFailures(t *testing.T) {
 				Challenges: []harness.ChallengeResult{{
 					Challenge: harness.Challenge{Code: "demo-1"},
 					Outcome: harness.OutcomeView{
-						Reason: harness.ReasonSolved, GraphSaveFailures: c.failures,
-						ProgressConfirmed: 1, ProgressTotal: 1, Submitted: 1, Rounds: 2,
+						Reason: harness.ReasonSolved, GraphState: c.state,
+						GraphSaveFailures: c.failures,
+						ProgressConfirmed: 1, ProgressTotal: 1, Submitted: 1, Attempts: 2, Rounds: 2,
 					},
 				}},
 			}}})
@@ -615,18 +642,91 @@ func TestRunChallengeLinePrintsGraphSaveFailures(t *testing.T) {
 
 			dispatch([]string{"run", "--store", "/tmp/rh"}, *a)
 			got := out.String()
-			if c.wantCol {
-				if !strings.Contains(got, "图未落盘 "+c.failures[0]) {
-					t.Fatalf("图落盘失败必须在摘要里可见：%q", got)
-				}
-				return
+			if !strings.Contains(got, c.want) {
+				t.Fatalf("图产物状态里没有 %q：%q", c.want, got)
 			}
-			// 常规摘要行的形状不能变。
-			const want = "  demo-1\t已解出\t进度 1/1\t确认 1\t重复 0\t判错 0\t轮次 2\t耗时 0s\n"
+			// 这一栏**无条件**出现：只在失败时打印的话，`无产物` 与 `已保存`
+			// 在输出上会长得一模一样。
+			// 常规摘要行的形状（含新增的两栏）逐字钉住。
+			const want = "  demo-1\t已解出\t进度 1/1\t确认 1\t尝试 2\t重复 0\t判错 0\t轮次 2\t耗时 0s\t"
 			if !strings.Contains(got, want) {
 				t.Errorf("常规摘要行变了：\n得到 %q\n期望含 %q", got, want)
 			}
 		})
+	}
+}
+
+// TestRunChallengeLinePrintsAttemptsAndAuditIncomplete 钉住 N0.3/N0.4 新增的两个
+// 公开字段在**命令行上**也能看见。
+//
+//   - `attempts`：实际调用 Evaluate 的次数。它与 `确认`（去重后的确认数）必须都在，
+//     否则「试了 3 次才对」与「一次就中」在终端上完全同形——而前者要收紧候选集合
+//     或额度，后者是答案质量好。
+//   - `auditIncomplete`：候选审计没落全。它是**运行级**故障（根包会因此停下整个
+//     Run），而且审计正是「提交了什么、平台怎么判的」这件事的唯一记录。所以它
+//     必须**显眼**：单独一行、单独一个前缀，绝不与别的计数挤在一起被读过去——
+//     用户此前只能去翻结果文件里的那个布尔位。
+func TestRunChallengeLinePrintsAttemptsAndAuditIncomplete(t *testing.T) {
+	a := newTestApp()
+	a.Wire = wirePorts(Ports{Harness: &fakeRunner{res: harness.RunResult{
+		RunID: "r-1", Scenario: "fake",
+		Reason: harness.ReasonError, State: harness.RunFailed,
+		Challenges: []harness.ChallengeResult{{
+			Challenge: harness.Challenge{Code: "demo-1"},
+			Outcome: harness.OutcomeView{
+				Reason: harness.ReasonError, Submitted: 2, Attempts: 3, Rejected: 1,
+				AuditIncomplete: true, GraphState: harness.GraphSaved,
+			},
+		}},
+	}}})
+	var out, errb bytes.Buffer
+	a.stdout, a.stderr = &out, &errb
+
+	dispatch([]string{"run", "--store", "/tmp/rh"}, *a)
+	got := out.String()
+	if !strings.Contains(got, "尝试 3") || !strings.Contains(got, "确认 2") {
+		t.Fatalf("尝试与确认必须各占一栏（它们回答不同的问题）：%q", got)
+	}
+	const wantLine = "  ！！demo-1 的候选审计不完整"
+	if !strings.Contains(got, wantLine) {
+		t.Fatalf("审计不完整必须以独立一行显眼地打出来，实际：%q", got)
+	}
+	// 显眼 = 在**自己那一行**上：与计数行混在一行里就会被后面的列淹没。
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "  ！！") && strings.Contains(line, "确认") {
+			t.Fatalf("审计不完整被混进了计数行：%q", line)
+		}
+	}
+	// 审计不完整不影响已经确认的成绩：那两者是完全不同的事实。
+	if !strings.Contains(got, "确认 2") || !strings.Contains(got, "图 已保存") {
+		t.Fatalf("审计失败不得抹掉已确认的成绩与图产物：%q", got)
+	}
+}
+
+// TestRunSummaryNeverPrintsAuditPlaintext 钉住审计告警里**没有明文**。
+//
+// 告警只点名题号与状态：审计行里带着候选原文（那是它存在的意义），所以这条
+// 提示绝不允许把审计内容带进 stdout——CLI 的 stdout 是公开面。
+func TestRunSummaryNeverPrintsAuditPlaintext(t *testing.T) {
+	const fakeFlag = "flag{audit-plaintext-canary}"
+	a := newTestApp()
+	a.Wire = wirePorts(Ports{Harness: &fakeRunner{res: harness.RunResult{
+		RunID: "r-1", Scenario: "fake",
+		Reason: harness.ReasonError, State: harness.RunFailed,
+		Challenges: []harness.ChallengeResult{{
+			Challenge: harness.Challenge{Code: "demo-1"},
+			Outcome: harness.OutcomeView{
+				Reason: harness.ReasonError, AuditIncomplete: true, Attempts: 1,
+				Flags: []string{fakeFlag},
+			},
+		}},
+	}}})
+	var out, errb bytes.Buffer
+	a.stdout, a.stderr = &out, &errb
+
+	dispatch([]string{"run", "--store", "/tmp/rh"}, *a)
+	if strings.Contains(out.String(), fakeFlag) || strings.Contains(errb.String(), fakeFlag) {
+		t.Fatalf("候选明文被打印了：stdout=%q stderr=%q", out.String(), errb.String())
 	}
 }
 
@@ -725,7 +825,7 @@ func TestRunChallengeLinePrintsBranchesAbandonedOnlyWhenNonZero(t *testing.T) {
 				t.Fatalf("换支为 0 时不得出现这一列（常规摘要的形状不能变）：%q", got)
 			}
 			// 逐字钉住常规摘要行：这条断言就是「输出形状不变」这句话本身。
-			const want = "  demo-1\t意图耗尽\t进度 1/4\t确认 1\t重复 0\t判错 0\t轮次 3\t耗时 0s\n"
+			const want = "  demo-1\t意图耗尽\t进度 1/4\t确认 1\t尝试 0\t重复 0\t判错 0\t轮次 3\t耗时 0s\t图 未记录\n"
 			if !strings.Contains(got, want) {
 				t.Errorf("常规摘要行变了：\n得到 %q\n期望含 %q", got, want)
 			}
@@ -1042,7 +1142,7 @@ func TestExitCodesAreDistinct(t *testing.T) {
 // 报错并退出 2。退出 0 等于告诉脚本「这个子命令存在」。
 func TestHelpForUnknownSubcommandFails(t *testing.T) {
 	var out, errb bytes.Buffer
-	if code := Main([]string{"help", "bogus"}, &out, &errb); code != exitUsage {
+	if code := Main([]string{"help", "bogus"}, &out, &errb, nil); code != exitUsage {
 		t.Fatalf("help bogus = %d，期望 %d", code, exitUsage)
 	}
 	if !strings.Contains(errb.String(), "bogus") {
@@ -1062,7 +1162,7 @@ func TestHelpFlagAfterHelpIsNotASubcommand(t *testing.T) {
 	for _, args := range [][]string{{"help", "--help"}, {"help", "-h"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var out, errb bytes.Buffer
-			if code := Main(args, &out, &errb); code != exitOK {
+			if code := Main(args, &out, &errb, nil); code != exitOK {
 				t.Fatalf("%v = %d，期望 %d；stderr=%q", args, code, exitOK, errb.String())
 			}
 			if !strings.Contains(out.String(), "子命令：") {
@@ -1079,7 +1179,7 @@ func TestHelpFlagAfterHelpIsNotASubcommand(t *testing.T) {
 // flag 包自己已经调过 Usage()，parseFlags 再调一次会把整份 flag 清单打两遍。
 func TestFlagErrorPrintsUsageOnce(t *testing.T) {
 	var out, errb bytes.Buffer
-	Main([]string{"run", "--budget-rounds=abc"}, &out, &errb)
+	Main([]string{"run", "--budget-rounds=abc"}, &out, &errb, nil)
 	if n := strings.Count(errb.String(), "用法：red-harness run"); n != 1 {
 		t.Errorf("用法打了 %d 遍，期望 1：\n%s", n, errb.String())
 	}

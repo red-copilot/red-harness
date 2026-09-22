@@ -154,9 +154,11 @@ func TestIntegrationCLIFakeDocker(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
+	// 装配函数是显式参数：这里传的就是生产入口用的那个 `newPorts`，所以这条
+	// 用例验的是**生产装配路径**，不是一条测试专用的旁路。
 	code := cli.Main([]string{"run", "--scenario", "fake", "--store", resultDir,
 		"--image", image, "--submit", "--budget-rounds", "2",
-		"--bundle", bundleDir}, &stdout, &stderr)
+		"--bundle", bundleDir}, &stdout, &stderr, newPorts)
 	if code != 0 {
 		t.Fatalf("CLI exit %d: stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}

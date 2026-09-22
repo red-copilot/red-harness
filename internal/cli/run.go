@@ -17,7 +17,7 @@ import (
 
 // runFlags 是 `run` 的运行参数。
 //
-// 它是**用户意图 → RunSpec** 的唯一翻译层：装配层（`internal/wire`）只补部署级
+// 它是**用户意图 → RunSpec** 的唯一翻译层：装配层（`local`）只补部署级
 // 字段（镜像、profile、结果目录），不再碰这些值。错一个字段就会让预算护栏或
 // 摘要校验失真。
 type runFlags struct {
@@ -47,6 +47,7 @@ type runFlags struct {
 
 	profileFile string
 	bundleDir   string
+	lockPath    string
 }
 
 // register 把 flag 挂到一个 FlagSet 上。名字即 CLI 的公开面，改名字是破坏性变更。
@@ -81,6 +82,16 @@ func (f *runFlags) register(fs *flag.FlagSet) {
 
 	fs.StringVar(&f.profileFile, "profile", "", "solver profile 的 JSON 文件（未知键/非法值在起跑前拒绝）")
 	fs.StringVar(&f.bundleDir, "bundle", "", "只读挂进容器的 extension bundle 目录（同时决定 BundleDigest）")
+
+	// ⚠️ **默认空**：锁文件的默认位置（`<StoreDir>/run.lock`）只能由装配层给出。
+	// CLI 自己补一个默认路径就等于把「哪两个进程算同一个部署」复制一份到这一层，
+	// 于是同一个 store 经 CLI 与经 SDK 会拿到两把不同的锁——互斥看起来在、实际不在。
+	//
+	// 它的正当用途只有两种：多 store 分治时让几个 store 共用一把锁；以及集成测试
+	// 里**显式**让两个不同 `--store` 的进程争同一把锁（那条测试验的正是锁机制本身）。
+	// 指向不同路径的两个进程**互不互斥**，这一点写在帮助文本里，因为它是这个 flag
+	// 唯一的危险面。
+	fs.StringVar(&f.lockPath, "lock", "", "单运行锁文件路径（空则用装配层缺省 <store>/run.lock；⚠️ 不同路径之间不互斥）")
 }
 
 // budget 把 flag 折成 harness.Budget。
@@ -178,7 +189,7 @@ func (f *runFlags) profile() (harness.SolverProfile, error) {
 		}
 	}
 	// `--bundle` **不在这里生效**：它是部署级选项（见 cli.DeployOptions.BundleDir），
-	// 由装配层经 `wire.Options.Sandbox.ProfileDir` 接管。
+	// 由装配层经 `local.Options.Sandbox.ProfileDir` 接管。
 	//
 	// 为什么不让它写进 spec.Profile.ExtensionBundle（改前的做法）：那会让 CLI 造出
 	// 一份**非空**的 profile，从而顶掉装配层的默认 profile（`{Name:"default"}`），
@@ -187,7 +198,7 @@ func (f *runFlags) profile() (harness.SolverProfile, error) {
 	// 相同，而 profileDigest 一个是 d96751574f823ad8 一个是 445d6dc940f6960e。
 	//
 	// 若同时给了 `--profile` 文件且文件里带了 extensionBundle，**flag 仍然胜出**：
-	// 把文件里那个清掉，让部署级的值去填（wire.resolve 只在运行级为空时补）。
+	// 把文件里那个清掉，让部署级的值去填（Runner.resolve 只在运行级为空时补）。
 	if f.bundleDir != "" {
 		p.ExtensionBundle = ""
 	}
@@ -213,12 +224,22 @@ func (f *runFlags) storeDir() string { return absStoreDir(f.store) }
 // 更准确的错误）。
 //
 // 它同时被 run 与 list/stats 使用：这几条路径必须对同一个 `--store` 得到同一个
-// 字符串，否则「run 在哪儿写结果」与「list 去哪儿读结果」会分叉。
-func absStoreDir(store string) string {
-	if abs, err := filepath.Abs(store); err == nil {
+// 字符串，否则「run 在哪儿写结果」与「list 去哪儿读结果」会分叉。`--lock` 与
+// `--bundle` 走同一个 absPath，理由同族（见各自的调用点）。
+func absStoreDir(store string) string { return absPath(store) }
+
+// absPath 把用户给的路径折成绝对路径（空串原样返回，解析失败退回原值）。
+//
+// 「解析失败退回原值」是刻意的：本函数的职责是**统一表示**，不是校验。真正
+// 打不开那个路径时，报错的应该是打开它的那一层（它能说出为什么），而不是这里。
+func absPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
 		return abs
 	}
-	return store
+	return p
 }
 
 // run 执行 `run` 子命令：新建一次运行并等它终局。
@@ -253,6 +274,11 @@ func (a *app) run(args []string) error {
 		// 只读挂载校验，而那里**要求绝对路径**——相对路径会在起容器时才被拒，
 		// 报错点离用户输入太远。
 		a.Deploy.BundleDir = absStoreDir(f.bundleDir)
+	}
+	if f.lockPath != "" {
+		// 绝对化：锁路径决定「哪两个进程算同一个部署」，而相对路径会随 cwd
+		// 变化——同一台机器上两个 cwd 不同的进程会静默拿到两把不同的锁。
+		a.Deploy.LockPath = absPath(f.lockPath)
 	}
 	ports, err := a.ports(f.storeDir(), spec)
 	if err != nil {
@@ -330,14 +356,19 @@ func printRunResult(w io.Writer, res harness.RunResult) {
 	fmt.Fprintf(w, "run %s：%s（场景 %s，终态 %s）\n",
 		res.RunID, reasonText(res), res.Scenario, stateText(res.State))
 	for _, c := range res.Challenges {
-		// ⚠️ 这里的字段全部是**计数**：`Submitted` 是去重后的确认数，
-		// `ProgressConfirmed/Total` 是平台权威进度。**绝不**打印
+		// ⚠️ 这里的字段全部是**计数或枚举**：`Submitted` 是去重后的确认数，
+		// `Attempts` 是实际调用 Evaluate 的次数，`ProgressConfirmed/Total` 是平台
+		// 权威进度，`GraphState` 是四个公开枚举之一。**绝不**打印
 		// `Outcome.Flags` / `Outcome.Candidates`——它们是候选明文，会进
 		// 终端 scrollback、工单与 CI 日志。
-		fmt.Fprintf(w, "  %s\t%s\t进度 %d/%d\t确认 %d\t重复 %d\t判错 %d\t轮次 %d\t耗时 %s",
+		//
+		// `尝试` 与 `确认` **必须都在**：前者是「我们试了多少次」，后者是「平台认了
+		// 多少条」。只有确认数时，「跑了 3 次才对」与「一次就中」在终端上完全同形，
+		// 而这两件事的下一步动作不同（前者要收紧候选集合/额度，后者是答案质量好）。
+		fmt.Fprintf(w, "  %s\t%s\t进度 %d/%d\t确认 %d\t尝试 %d\t重复 %d\t判错 %d\t轮次 %d\t耗时 %s",
 			c.Challenge.Code, outcomeReasonText(c.Outcome.Reason),
 			c.Outcome.ProgressConfirmed, c.Outcome.ProgressTotal,
-			c.Outcome.Submitted, c.Outcome.Duplicates, c.Outcome.Rejected,
+			c.Outcome.Submitted, c.Outcome.Attempts, c.Outcome.Duplicates, c.Outcome.Rejected,
 			c.Outcome.Rounds, c.Outcome.Duration().Round(time.Second))
 		if c.Outcome.BranchesAbandoned > 0 {
 			// **只在非 0 时加这一列**：常规运行里它恒为 0，无条件打出来只会让
@@ -346,15 +377,30 @@ func printRunResult(w io.Writer, res harness.RunResult) {
 			// 完全不同（见 model.go 的 BranchesAbandoned 注释）。
 			fmt.Fprintf(w, "\t换支 %d", c.Outcome.BranchesAbandoned)
 		}
-		// 图落盘失败同样只在非 0 时打印。**但它必须被打印出来**：图是研究辅助面，
-		// 失败不算本题失败（Reason 不变），所以公开指标里没有别的痕迹能说明
-		// 「这次运行的图没留下来」——命令行用户此前完全看不到这一笔，只能去翻
-		// 结果文件。而「没写出去」被读成「写了」的代价是：事后拿不到图，却以为
-		// 图本来就没有。
+		// 图产物这一栏**无条件打印**，与 `换支` 的「非 0 才打」刻意不同：
+		// 四态要能互相区分，而「没图」有三种、处置完全不同——disabled 是这次部署
+		// 压根没开图（改装配层），absent 是开了但这一题没登记过图（题没走到那一步），
+		// failed 是登记了却没写出去（查落盘面）。把它们压成一个「没图」等于让操作员
+		// 去猜该动哪一层；而只在失败时打印，`absent` 与 `saved` 又会长得一模一样。
+		//
+		// 卡在哪一步（阶段枚举）只在失败时附上：那是可执行的下一步，而成功时
+		// 它只是一个恒为空的东西。
+		fmt.Fprintf(w, "\t图 %s", graphStateText(c.Outcome.GraphState))
 		if len(c.Outcome.GraphSaveFailures) > 0 {
-			fmt.Fprintf(w, "\t图未落盘 %s", strings.Join(c.Outcome.GraphSaveFailures, ","))
+			fmt.Fprintf(w, "（阶段 %s）", strings.Join(c.Outcome.GraphSaveFailures, ","))
 		}
 		fmt.Fprintln(w)
+		if c.Outcome.AuditIncomplete {
+			// ⚠️ **单独一行、单独一个前缀**，绝不挤进上面那条计数行。
+			//
+			// 候选审计是「提交了什么、平台怎么判的」这件事的**唯一**记录，没落全
+			// 就没有任何别的东西能回答它（图写不出去只是少一份研究材料，审计写不
+			// 出去是结论本身不可核对）。所以它必须被读见：此前它只进结果文件的
+			// 一个布尔位，命令行用户完全看不到，而这正是「失败要报失败」在输出面上
+			// 的落实。它与根包的 ErrAuditIncomplete 配对，Run 会因此停下来。
+			fmt.Fprintf(w, "  ！！%s 的候选审计不完整：本次提交记录没有全部落盘，"+
+				"「提交了什么、平台怎么判的」已不可回答（先修落盘面再重跑）\n", c.Challenge.Code)
+		}
 	}
 	if res.Err != "" {
 		// res.Err 是根包折叠过的分类串（`%T`），不含响应体/路径/凭据。
@@ -429,6 +475,32 @@ func stateText(s harness.RunState) string {
 	case harness.RunPaused:
 		return "已暂停"
 	case "":
+		return "未记录"
+	}
+	return string(s)
+}
+
+// graphStateText 把「本题图产物的实际结果」翻成中文。
+//
+// 四个枚举值**逐个映射**，一个都不省：「没图」在公开面里有三种不同的成因，
+// 把它们合起来就等于把这个字段存在的理由（见 ports.go 的 GraphState 注释）
+// 从输出面上抹掉。
+//
+// 空串与未识别的值分开处理，与 stateText 同一条约定：空串是**未记录**（结果由
+// 装配层直接构造、或从旧数据读回），未识别的值是「根包加了新枚举而 CLI 还不认识」
+// ——前者该去查谁没填，后者回显原始串才看得出发生了什么。
+func graphStateText(s harness.GraphState) string {
+	switch s {
+	case harness.GraphDisabled:
+		return "未启用"
+	case harness.GraphAbsent:
+		return "无产物"
+	case harness.GraphSaved:
+		return "已保存"
+	case harness.GraphFailed:
+		return "失败"
+	}
+	if s == "" {
 		return "未记录"
 	}
 	return string(s)

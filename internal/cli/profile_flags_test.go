@@ -59,7 +59,7 @@ func TestRunProfileFlagReachesRunSpec(t *testing.T) {
 	}
 }
 
-// TestRunProfileFlagRejectsBadConfigBeforeWiring 是这组里最重要的一条。
+// TestRunProfileFlagRejectsBadProfileBeforeAssembly 是这组里最重要的一条。
 //
 // 「在副作用之前失败」在 CLI 这一层的含义是：**装配函数根本没被调用**。装配会建
 // 目录、起 bridge 子进程、取跨进程锁——一份写错的 profile 不该走到那里。
@@ -74,17 +74,17 @@ func TestRunProfileFlagRejectsBadConfigBeforeWiring(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			wired := false
+			assembled := false
 			a := newTestApp()
 			a.Wire = func(string, harness.RunSpec, DeployOptions) (Ports, error) {
-				wired = true
+				assembled = true
 				return Ports{Harness: &fakeRunner{}}, nil
 			}
 			code := dispatch([]string{"run", "--store", "/tmp/rh", "--profile", writeProfile(t, c.body)}, *a)
 			if code != exitFailure {
 				t.Fatalf("退出码 = %d，期望 %d（用法/配置错）", code, exitFailure)
 			}
-			if wired {
+			if assembled {
 				t.Fatal("装配函数被调用了——配置错误必须在装配（副作用）之前拒绝")
 			}
 		})

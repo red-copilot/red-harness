@@ -1,17 +1,19 @@
 // Package cli 是 red-harness 的命令行入口。
 //
-// 三个设计要点（都是为什么长这样，而不是随手写成这样）：
+// 四个设计要点（都是为什么长这样，而不是随手写成这样）：
 //
-//   - **`Main(args, stdout, stderr) int`** 而不是直接读 `os.Args`、写 `os.Stdout`：
+//   - **`Main(args, stdout, stderr, wire) int`** 而不是直接读 `os.Args`、写 `os.Stdout`：
 //     CLI 的输出必须能被测试捕获。把输出散在 `fmt.Println` 里的话，「--help 是否
 //     列全了 4 个子命令」「stats 在分母未知时有没有明确标注」这类断言根本写不出来。
 //   - **每个子命令一个 `flag.FlagSet`**：`flag` 包的全局 `CommandLine` 会让子命令
 //     之间的 flag 互相污染，而且 `go test` 里 testing 包自己也用它。
 //   - **端口通过本包内定义的窄接口注入**（见 `Ports` 与 `WireFunc`），而不是
-//     `import` `internal/wire` 或根包的 `*harness.Harness`。原因有两条：CLI 真正
+//     `import` `local` 或根包的 `*harness.Harness`。原因有两条：CLI 真正
 //     用到的只是「跑一次」与「体检一次」两个动作，写成一个窄接口后测试可以注入
 //     记账型 fake；而且它把「CLI 到底用了引擎的哪几个方法」变成可读的事实。
-//     装配层（`internal/wire`）在 `cmd/red-harness` 里通过 `WireFunc` 接进来。
+//   - **装配函数是 `Main` 的显式参数**，本包**不持有任何包级接线状态**。
+//     `cmd/red-harness` 自己构造装配层（`local.New`）再传进来，于是「谁接的线」
+//     在 import 图与调用点上都看得见，见 `Main` 的注释。
 //
 // v0.4 的子命令面是 **doctor / list / run / stats** 四个。v0.3 骨架里的
 // `resume`/`pause`/`cancel`/`serve`/`report` 全部删除：v0.4 明确不做暂停恢复、
@@ -89,7 +91,7 @@ type Ports struct {
 // ⚠️ **这里不许出现凭据值**：将来若要加 `.env` 路径，也只能是**路径**，不是内容。
 type DeployOptions struct {
 	// FakeChallenges 是离线场景（`--scenario fake`）的题目夹具 JSON 路径。
-	// 为空时装配层用内置演示题（见 internal/wire 的 loadFakeFixture）。
+	// 为空时装配层用内置演示题（见 local 的 loadFakeFixture）。
 	FakeChallenges string
 	// BundleDir 是要只读挂进容器的 extension bundle 目录（宿主绝对路径）。
 	//
@@ -100,6 +102,18 @@ type DeployOptions struct {
 	// ⚠️ 它**不是**用来表达「用哪份解法配置」的——那是 `--profile`。这里只指向
 	// 那份配置在磁盘上的位置。
 	BundleDir string
+
+	// LockPath 是跨进程单运行锁文件的**显式覆盖**（空＝用装配层的默认值）。
+	//
+	// 为什么它是部署级而不是运行意图：锁文件回答的是「这台机器上哪几个进程算
+	// 同一个部署」，与本次跑哪几道题无关。
+	//
+	// ⚠️ **空值是常态，且必须保持是常态**：默认值只能由装配层（`local`）给出，
+	// CLI 凭空补一个默认路径会让「同一个 store 经 CLI 与经 SDK 得到两个不同的锁」
+	// ——那正是这条 flag 需要被解释清楚的地方。覆盖成另一条路径**等于放弃互斥**
+	// （两个进程会同时开跑），所以它只服务于两种正当场景：多 store 分治下共用
+	// 一把锁，以及验证锁机制的集成测试。
+	LockPath string
 }
 
 // WireFunc 由装配层提供：给定 storeDir、本次运行的 RunSpec 与部署选项，接出这一
@@ -113,28 +127,6 @@ type DeployOptions struct {
 // ⚠️ **spec 会整份写进 run.json（公开文件）**，所以它里面绝不能有凭据。
 type WireFunc func(storeDir string, spec harness.RunSpec, deploy DeployOptions) (Ports, error)
 
-// wired 是当前生效的装配函数。为 nil ⇒ 需要端口的子命令报「未实现」。
-//
-// 为什么是包级变量而不是 `Main` 的参数：`Main(args, stdout, stderr) int` 是
-// 冻结的对外契约（`main.go` 只做 `os.Exit(cli.Main(...))`），装配点只能藏在
-// 包内。`cmd/red-harness` 用 `SetWire` 安装它，测试用 `injectWire` 换掉它，
-// 或用 `app.Wire` 只覆盖单次调用。
-var wired WireFunc
-
-// SetWire 安装装配函数。**这是 `cmd/red-harness` 唯一的接线点**。
-//
-// 为什么必须导出：装配点必须在**进程入口**（`cmd/red-harness`）而不是本包内，
-// 否则 `internal/cli` 就得 import `internal/wire`，那会把「CLI 依赖实现包」
-// 这条被明令禁止的边加进依赖图，也让 CLI 的测试再也无法注入记账型 fake。
-func SetWire(fn WireFunc) { wired = fn }
-
-// injectWire 安装装配函数并返回恢复函数（`t.Cleanup(injectWire(fn))` 即用即还）。
-func injectWire(fn WireFunc) func() {
-	prev := wired
-	wired = fn
-	return func() { wired = prev }
-}
-
 // ── 调用状态 ──
 
 // app 是一次调用的全部状态。**不要把它做成包级单例**——注入的 writer 是每次
@@ -144,7 +136,9 @@ type app struct {
 	// 输出的时候崩，也**绝不**偷偷写到进程自己的 stdout。
 	stdout io.Writer
 	stderr io.Writer
-	// Wire 为零值时用包级 wired；显式设置它可以在测试里只影响一次调用。
+	// Wire 是本次调用的装配函数（由 `Main` 的第四个参数填入）。为 nil ⇒
+	// 需要端口的子命令报「未实现」，而不是 panic：`--help` 这类不需要端口的
+	// 路径必须在一个还没装配的进程里也能跑。
 	Wire WireFunc
 	// Deploy 是本次调用的部署级选项（只有 run 会用到）。
 	Deploy DeployOptions
@@ -164,33 +158,51 @@ func (a *app) errw() io.Writer {
 	return io.Discard
 }
 
-// ports 取本次调用需要的端口。wire 为 nil ⇒ 返回零值 Ports（各子命令据此报
-// 「未实现」）；wire 返回的错误原样上抛，**不**改写成「未实现」——装配故障
+// ports 取本次调用需要的端口。Wire 为 nil ⇒ 返回零值 Ports（各子命令据此报
+// 「未实现」）；Wire 返回的错误原样上抛，**不**改写成「未实现」——装配故障
 // （例如 store 目录建不出来）必须让用户看见真原因。
+//
+// 装配期的**配置错**在这一处折成用法错（退出码 2）：装配层是唯一读部署配置的
+// 地方，它报 KindConfig 意味着**输入**（flag、环境变量、路径）不对——用户要改的
+// 是命令/环境，不是「重跑一次看看」。这正是 exitUsage 与 exitFailure 的分界
+// （前者该改命令，后者该看日志），所以复用既有的 `*usageError` 表达，不新增
+// 退出码，也不按消息文本判断。
+//
+// 非配置类装配错（如 store 目录建不出来 = KindPersistence）保持 exitFailure：
+// 那不是「命令写错了」，而且 Kind 必须原样穿出去（TestWireErrorIsNotMasked-
+// AsNotImplemented 钉着这条）。
 func (a *app) ports(storeDir string, spec harness.RunSpec) (Ports, error) {
-	w := a.Wire
-	if w == nil {
-		w = wired
-	}
-	if w == nil {
+	if a.Wire == nil {
 		return Ports{}, nil
 	}
-	return w(storeDir, spec, a.Deploy)
+	ports, err := a.Wire(storeDir, spec, a.Deploy)
+	if err != nil && harness.IsKind(err, harness.KindConfig) {
+		return Ports{}, &usageError{err: err}
+	}
+	return ports, err
 }
 
 // ── 入口 ──
 
 // Main 是 CLI 的唯一入口。`cmd/red-harness/main.go` 只做
-// `os.Exit(cli.Main(os.Args[1:], os.Stdout, os.Stderr))`。
+// `os.Exit(cli.Main(os.Args[1:], os.Stdout, os.Stderr, newPorts))`。
 //
 // 返回退出码而不是自己 `os.Exit`：测试要在同一个进程里跑几十次 Main。
 //
-// 部署级选项（`--fake-challenges`）由 `main.go` 从环境变量读进来：
-// `Main` 的签名是冻结的三参数契约，加第四个参数会让**每一个**测试调用点都要改，
-// 而那个 flag 只有 `run` 用得上。环境变量本身不含凭据（它是夹具路径），
-// 而凭据路径（`.env`）走的是 piai 的向上查找，不需要 CLI 传。
-func Main(args []string, stdout, stderr io.Writer) int {
-	return dispatch(args, app{stdout: stdout, stderr: stderr, Deploy: deployFromEnv()})
+// **wire 是显式参数，不是包级状态**。改前它藏在包级变量里、由 `cmd/red-harness`
+// 的 `init()` 安装：接线发生在一个没人调用的函数里，于是「CLI 到底连的是谁」
+// 既不在 import 图上、也不在任何调用点，只有读 `init()` 才知道；而测试要换掉它
+// 就得改包级状态，多个用例并行时互相污染。放进签名之后，装配点就是
+// `main.go` 里那一行——读 `main` 函数就能回答「默认值从哪来」。
+//
+// wire 为 nil 是合法的（`--help` / 用法错这类路径不需要端口），但那时任何需要
+// 端口的子命令都会报「未实现」——所以**生产入口不允许传 nil**。
+//
+// 部署级选项（`--fake-challenges`）由 `main.go` 从环境变量读进来：它是部署属性
+// 而不是每次运行的意图，且只有 `run` 用得上。环境变量本身不含凭据（它是夹具
+// 路径），而凭据路径（`.env`）走的是 piai 的向上查找，不需要 CLI 传。
+func Main(args []string, stdout, stderr io.Writer, wire WireFunc) int {
+	return dispatch(args, app{stdout: stdout, stderr: stderr, Wire: wire, Deploy: deployFromEnv()})
 }
 
 // envFakeChallenges 是离线夹具路径的进程级来源。
