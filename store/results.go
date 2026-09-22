@@ -87,10 +87,11 @@ type publicChallenge struct {
 	// Score 是平台给出的累计得分。
 	Score int `json:"score,omitempty"`
 	// CostUSD 是这道题消耗的模型成本。
-	CostUSD         float64 `json:"costUSD,omitempty"`
-	Rounds          int     `json:"rounds"`
-	HintUsed        int     `json:"hintUsed"`
-	DurationSeconds float64 `json:"durationSeconds"`
+	CostUSD         float64  `json:"costUSD,omitempty"`
+	Rounds          int      `json:"rounds"`
+	HintUsed        int      `json:"hintUsed"`
+	CleanupFailures []string `json:"cleanupFailures,omitempty"`
+	DurationSeconds float64  `json:"durationSeconds"`
 }
 
 func toPublic(r harness.RunResult) publicResult {
@@ -105,9 +106,21 @@ func toPublic(r harness.RunResult) publicResult {
 			RemainingAtStart: c.Outcome.RemainingAtStart, Score: c.Outcome.Score,
 			CostUSD: c.Outcome.Stats.CostUSD,
 			Rounds:  c.Outcome.Rounds, HintUsed: c.Outcome.HintUsed,
+			CleanupFailures: sanitizeCleanupFailures(c.Outcome.CleanupFailures),
 			DurationSeconds: c.Outcome.Duration().Seconds()})
 	}
 	return p
+}
+
+func sanitizeCleanupFailures(failures []string) []string {
+	var out []string
+	for _, failure := range failures {
+		switch failure {
+		case "agent", "sandbox", "scenario":
+			out = append(out, failure)
+		}
+	}
+	return out
 }
 
 // fromPublic 把公开文件读回 RunResult。
@@ -125,7 +138,7 @@ func fromPublic(p publicResult) harness.RunResult {
 				ProgressConfirmed: c.ProgressConfirmed, ProgressTotal: c.ProgressTotal,
 				RemainingAtStart: c.RemainingAtStart, Score: c.Score,
 				Stats:  harness.Stats{CostUSD: c.CostUSD},
-				Rounds: c.Rounds, HintUsed: c.HintUsed, StartedAt: c.StartedAt, EndedAt: c.EndedAt},
+				Rounds: c.Rounds, HintUsed: c.HintUsed, CleanupFailures: append([]string(nil), c.CleanupFailures...), StartedAt: c.StartedAt, EndedAt: c.EndedAt},
 			StartedAt: c.StartedAt, EndedAt: c.EndedAt})
 	}
 	return r
@@ -153,6 +166,14 @@ func sanitizeErrorClass(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
+	}
+	// Harness.Run emits the Kind enum, which is already a safe public class.
+	// Keep this list explicit so arbitrary plaintext cannot masquerade as one.
+	switch harness.Kind(s) {
+	case harness.KindConfig, harness.KindScope, harness.KindPlatform,
+		harness.KindProvider, harness.KindExecutor, harness.KindBudget,
+		harness.KindPersistence, harness.KindCancelled:
+		return s
 	}
 	if len(s) > maxErrorClassLen || !strings.ContainsAny(s, "*.") {
 		return errClassUnclassified
@@ -321,9 +342,9 @@ func (s *ResultFileStore) List(ctx context.Context) ([]harness.RunResult, error)
 //
 // 各字段的口径：
 //
-//   - Runs / Completed / CompletionRate：**run 级**。CompletionRate = Completed/Runs。
-//     （注意 RunResult.Completed 在 v0.4 里目前是「运行无错误且有题」，
-//     「运行成功」与「解题成功」的区分属于引擎契约，不在本文件。）
+//   - Runs / Completed / CompletionRate：兼容用的 run 级计数。
+//   - Challenges / SolvedChallenges / ChallengeCompletionRate：主研究指标，
+//     按命中题聚合，以平台确认的 ReasonSolved 为完成。
 //   - 一旦带了 Challenge/Category 过滤，只有**至少命中一道题**的 run 才计入
 //     Runs——否则 Runs 与其余按题聚合的数字口径不一致，CompletionRate 会被
 //     不含该题的 run 稀释。
@@ -354,6 +375,10 @@ func (s *ResultFileStore) Stats(ctx context.Context, q harness.StatsQuery) (harn
 				continue
 			}
 			matched++
+			out.Challenges++
+			if c.Outcome.Reason == harness.ReasonSolved {
+				out.SolvedChallenges++
+			}
 			if c.Outcome.HintUsed > 0 {
 				hinted = true
 			}
@@ -384,6 +409,9 @@ func (s *ResultFileStore) Stats(ctx context.Context, q harness.StatsQuery) (harn
 	}
 	if out.Runs > 0 {
 		out.CompletionRate = float64(out.Completed) / float64(out.Runs)
+	}
+	if out.Challenges > 0 {
+		out.ChallengeCompletionRate = float64(out.SolvedChallenges) / float64(out.Challenges)
 	}
 	// 召回率的除法只在这里发生，且只在分母已确认 > 0 之后——0/0 在 Go 里是 NaN，
 	// NaN 顺着 JSON 会变成 null，再进聚合就是静默污染。分母为 0 时保持 0。

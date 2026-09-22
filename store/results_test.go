@@ -62,8 +62,9 @@ func TestResultFileStoreNeverPersistsCandidatePlaintext(t *testing.T) {
 	run := harness.RunResult{RunID: "run-1", Err: canaryFlag, Challenges: []harness.ChallengeResult{{
 		Challenge: harness.Challenge{Code: "fake"},
 		Outcome: harness.OutcomeView{
-			Flags:      []string{canaryFlag},
-			Candidates: []harness.Candidate{{Flag: canaryFlag}},
+			Flags:           []string{canaryFlag},
+			Candidates:      []harness.Candidate{{Flag: canaryFlag}},
+			CleanupFailures: []string{canaryFlag, "agent"},
 			// Reason 也会落盘（它是有界的枚举串），同样不得带明文。
 			Reason: canaryFlag,
 		},
@@ -158,6 +159,7 @@ func TestErrorClassSanitized(t *testing.T) {
 		{"空串保持空", "", ""},
 		{"类型名放行", "*harness.Error", "*harness.Error"},
 		{"包裹类型放行", "*fmt.wrapError", "*fmt.wrapError"},
+		{"契约错误类别放行", string(harness.KindProvider), string(harness.KindProvider)},
 		{"明文折叠", canaryFlag, errClassUnclassified},
 		{"含空白的明文折叠", "提交失败: " + canaryFlag, errClassUnclassified},
 		{"无包限定的裸串折叠", "run_error", errClassUnclassified},
@@ -440,6 +442,23 @@ func TestStatsCompletionRate(t *testing.T) {
 	empty := mustStats(t, newResultStore(t), harness.StatsQuery{})
 	if empty.Runs != 0 || empty.CompletionRate != 0 {
 		t.Fatalf("空集合: %+v", empty)
+	}
+}
+
+func TestStatsChallengeCompletionRate(t *testing.T) {
+	rs := newResultStore(t)
+	saveRun(t, rs, harness.RunResult{RunID: "run-1", StartedAt: baseTime, Completed: true,
+		Challenges: []harness.ChallengeResult{
+			{Challenge: harness.Challenge{Code: "a"}, Outcome: harness.OutcomeView{Reason: harness.ReasonSolved}},
+			{Challenge: harness.Challenge{Code: "b"}, Outcome: harness.OutcomeView{Reason: harness.ReasonNoProgress}},
+		}})
+	rep := mustStats(t, rs, harness.StatsQuery{})
+	if rep.Challenges != 2 || rep.SolvedChallenges != 1 || rep.ChallengeCompletionRate != 0.5 {
+		t.Fatalf("challenge completion rate: %+v", rep)
+	}
+	filtered := mustStats(t, rs, harness.StatsQuery{Challenge: "b"})
+	if filtered.Challenges != 1 || filtered.SolvedChallenges != 0 || filtered.ChallengeCompletionRate != 0 {
+		t.Fatalf("filtered challenge completion rate: %+v", filtered)
 	}
 }
 
