@@ -4,11 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 这是什么
 
-面向安全 Agent 开发者的 Go SDK + CLI + 本地看板：用通用 `Run/Target/Objective/Candidate/Evaluation`
-模型驱动授权安全场景（v1 只接 TSecBench CTF 平台），通过官方 Python SDK 的常驻子进程 bridge
-完成题目生命周期。
+面向安全 Agent 开发者的 Go SDK + CLI：用通用 `Run/Target/Objective/Candidate/Evaluation`
+模型驱动**明确授权**的 CTF / 靶场场景（当前只接 TSecBench），通过官方 Python SDK 的常驻
+子进程 bridge 完成题目生命周期。（v0.3 设想过的本地看板 / Web 已明确不做。）
 
-当前处于 **v0.2.0 → v0.3.0 重写的中途**（W0 + W1 已合并，W2/W3 未开始）。
+当前处于 **v0.4.0-research**（研究版：单 Agent、同步 `Harness.Run`、每题一个 Docker sandbox）。
+源码里**并存两代 API**：v0.3 的 `Engine`/`RunHandle`/事件快照仍在，供 v0.3 读图与测试；
+CLI 与生产路径已全部切到 v0.4。权威现状见 `docs/architecture.md`。
 仓库的注释、文档、提交消息**全部是中文**——新增代码请保持一致。
 
 ## 常用命令
@@ -19,53 +21,86 @@ go test ./dag/... -count=1                      # 单个包（实现 agent 只�
 go test ./store/ -run TestLoadEventsSkipsTornLastLine -v   # 单个用例
 go test -race ./... -count=1                    # 全量 race
 UPDATE_GOLDEN=1 go test ./dag/                  # 重生成渲染契约 golden（diff 必须人工确认）
-go test -tags integration ./executor/... -count=1   # 需 Docker + runner 镜像已构建
+go test -tags integration ./executor/... -count=1   # 执行器隔离用例（25 条），需 Docker + runner 镜像
+go test -tags integration ./cmd/red-harness/... -count=1   # 新同步入口的纵向闭环（M1），需 Docker
 docker build -t red-harness-runner:v0.3.0 runner/   # runner 镜像（约 1.9 GB）
-go run ./cmd/red-harness <doctor|list|run|resume|pause|cancel|serve|report>
+go run ./cmd/red-harness <doctor|list|run|stats>    # v0.4 只有这四个子命令
 echo '{"id":"1","cmd":"check_vpn"}' | PYTHONPATH=bridge/testdata python3 bridge/bridge.py   # bridge 手工冒烟，必须恰好回一行 JSON
 ```
+
+**CLI 退出码是 API**（`internal/cli/cli.go`）：`0` 成功 / `1` 失败 / `2` 用法错 /
+`3`＝**跑完了但有题没解出来**。3 与 1 必须分开——「模型没解出来」是研究结论，
+「跑的过程中坏了」要查日志，合成一个码会让两者在 CI 里完全同形。
 
 `go test ./...` 里 `bridge` 约 24 s、`piai` 约 11 s——它们驱动**真实的** Python 子进程与 stub pi，
 不是 mock。全量跑请留足超时。
 
 ## 架构
 
-**根包 `harness` 是纯契约**：只有类型与接口，零实现、零内部依赖（`model.go`/`ports.go`/`events.go`/
-`handle.go`/`engine.go`/`errors.go`/`solver.go`/`harness.go`）。这是并行开发的前提，**不要往根包加实现**。
-`harness.New` 通过包级变量 `newEngine` 调用 `RegisterEngine` 注册进来的构造函数——引擎实现不在根包里。
+**根包 `harness` 零内部依赖**，但**不再是「零实现」**：`v04.go` 里有 v0.4 的 `Harness` 门面
+（`Run`/`Doctor`/`runChallenge`/`reclaimStale`），只依赖标准库。契约在
+`model.go`/`ports.go`/`events.go`/`handle.go`/`engine.go`/`errors.go`/`solver.go`/`harness.go`。
+**根包依然不许 import 任何子包**——那是并行开发的前提。
 
 编译期依赖方向（子包只依赖根包，`answer` 是叶子）：
 
 ```
-harness（契约）
+harness（契约 + v0.4 Harness 门面，零内部依赖）
  ├── answer   叶子：Shape 推断 + Fingerprint（唯一真源）
  ├── dag      事实—意图图（导入 harness + answer）
  ├── gate     候选证据闸与指纹账本（导入 harness + answer）
- ├── store    FileStore：事件日志 + 原子快照 + private/ 账本
+ ├── store    FileStore（事件/快照/账本）+ ResultFileStore（公开指标）
  ├── executor Docker 隔离执行器（argv 级隔离，不引 Docker SDK）
  ├── bridge   TSecBench Python 常驻子进程桥（JSONL/stdio）
  ├── piai     pi agent 适配（RPC 帧解析、看门狗）
- ├── internal/cli + cmd/red-harness
- └── engine/ scenario/ report/ web/   ← 尚未创建（example/ 是空目录）
+ ├── scenario 场景适配：Fake（离线）/ TSecBench（真实平台）
+ ├── internal/cli + internal/wire + cmd/red-harness
+ └── report/ web/   ← 未创建，且 v0.4 明确不做（example/ 是空目录）
 ```
 
-**`engine/` 是整个仓库的中心缺口**：它不存在，所以 `harness.New` 永远返回「引擎实现未注册」，
-`internal/cli/wire.go` 不存在所以 CLI 的每个子命令都走「未实现」分支（退出码 3）。
-`piai` 的 `Round(ctx, prompt, emit)` 仍是 v0.2 签名，与 `harness.Agent` 不兼容且没有
-`var _ harness.Agent = ...` 断言——**编译绿但契约未对齐**。
+**`internal/wire` 是唯一的装配层**，也是唯一同时 import 全部 7 个实现包的模块。
+实现包之间**两两互不 import**（`executor` 不认识 `scenario`，`scenario` 不认识 `dag`），
+所以「谁把 X 交给 Y」只在这里发生。CLI **不** import 实现包：它只依赖包内定义的窄接口
+（`internal/cli.Ports`），由 `cmd/red-harness` 在 `init()` 里用 `cli.SetWire` 接进来。
+
+⚠️ **三条把系统拼起来的边在 import 图里看不见**，任何 grep-import 的依赖图都会把
+`internal/cli` / `scenario` / `piai` 误判成孤立：
+
+| 边 | 机制 |
+|---|---|
+| `internal/cli → internal/wire` | 包级 `WireFunc` 变量 + `cli.SetWire`（`cmd/red-harness/main.go`） |
+| `scenario → bridge` | `Platform` 窄接口，由 wire 注入 `*bridge.Client` |
+| `piai → executor` | `AgentFactory.New` 收 `harness.SandboxSession`，piai 不 import executor |
+
+`engine.go` 里的 `Engine`/`harness.New`/`RegisterEngine`/`newEngine` 是 **v0.3 遗留**：
+v0.4 的 `NewHarness`（`v04.go:309`）直接构造 `*Harness`，**不经过**注册表，所以
+`RegisterEngine` 全仓只有 `contract_test.go` 在调。旧 API 留着是为了 v0.3 读图与测试，
+**不要**再往那条路上加东西（完整清单见 `docs/v0.4-open-items.md`）。
 
 **事实层 / 答案层严格分离**（最容易破坏的不变式）：
 
 - `dag` 的事实里**刻意没有 flag/answer 这类 FactKind**；答案只活在 `gate` 的账本里。
-- 候选明文只允许出现在 `<StoreDir>/runs/<id>/private/`（0700/0600）与返回值 `OutcomeView.Flags`。
-- 公开面（`run.json` / `events.jsonl` / `graph.json` / `report.*` / 看板 HTML / `DomainEvent` /
-  `Snapshot`）**一律只有指纹**。`Snapshot` 故意没有 `Flags` 字段。
-- 落盘前 `dag/store.go` 的 `scrub` 擦掉明文，`Raw` 字段是最容易漏的那个（有专门测试）。
+- 候选明文只允许出现在**私密面（`private/`，0700/0600）**与返回值 `OutcomeView.Flags`。
+  ⚠️ v0.4 私密面的实际落点是 `<ResultDir>/private/<runID>/<题目哈希>.jsonl`（`AppendTrace`），
+  **不是** v0.3 的候选账本 `<StoreDir>/runs/<id>/private/candidates.jsonl`——后者当前没有
+  生产写入方（见 `docs/v0.4-open-items.md`）。纪律不变，机制变了。
+- 公开面（`results/<runID>.json` / 看板 HTML / `DomainEvent` / `Snapshot` / `run.json` /
+  `graph.json`）**一律只有计数与指纹**。`Snapshot` 故意没有 `Flags` 字段；`ResultFileStore`
+  用专门的公开结构序列化，从不 marshal `OutcomeView`/`Candidate`/`Flags`。
+- 走 v0.3 图路径时，落盘前 `dag/store.go` 的 `scrub` 擦掉明文，`Raw` 字段是最容易漏的那个（有专门测试）。
 
-**运行期单写者模型**（`engine/` 的设计契约，待实现）：一个 `runLoop` goroutine 是唯一改状态的
-地方，全部输入走 channel 进 loop；agent 只通过 `EventSink` 推事件，满了阻塞 = 有意的背压。
-状态变化**先追加带单调序号的领域事件（`events.jsonl`），再原子写快照（`run.json`）——顺序不可颠倒**。
-恢复以快照的 `lastAppliedSeq` 为基线重放。
+**v0.4 的运行模型是「同步编排 + 单一消费者」**，不是 v0.3 设想的 `runLoop` goroutine：
+一次 `Harness.Run` 串行处理题目，每题一个 sandbox、一个 pi 会话。agent 的 reader 只向**有界**
+事件队列投递（队列长度 / 单轮条数 / 单条体积三重上限），编排 goroutine 是唯一消费者，
+轮末用 `Flush` 做屏障。队列满了阻塞 reader 是**有意**的背压（`piai/proc.go` 的 `frameQueue` 单写者）。
+
+⚠️ **落盘面在 v0.4 收窄了，别照着 v0.3 的图去读**：v0.4 明确不做崩溃续跑与事件重放，
+`HarnessOptions` 里**没有** `Store`/`GraphStore` 字段，装配层只建 `ResultFileStore`。
+所以真正被写的是 **`results/<runID>.json`（公开指标）**、**`<ResultDir>/private/<runID>/*.jsonl`
+（原始 trace，题目编号取哈希）** 与 `run.lock`；而 `events.jsonl` / `run.json` / `graph.json` /
+`private/candidates.jsonl` / `private/evidence/` / `report.*` 在 v0.4 **没有生产写入方**——
+它们只剩测试与 v0.3 兼容路径在用。**「先写事件、再原子写快照」仍然是 `store.Append` 的硬契约**
+（由注入快照写失败来测），只是当前没有调用方。完整清单见 `docs/v0.4-open-items.md`。
 
 ## 不可违反的硬规矩
 
@@ -73,12 +108,14 @@ harness（契约）
 
 - **`Reason*` 字符串是 API**：可以新增，**不得改变已有值**（`solver.go`）。三个回归测试钉死它们，
   原文归档在 `docs/superpowers/plans/fixtures/v0.2-*.go.txt`（含 `.txt` 后缀以免被编译）。
-- **轮循环的分支顺序是契约**：`ctx.Err()` 判定必须先于 provider 护栏，否则一次零回合的墙钟超时
-  会被记成「模型服务挂了」。
+- **轮循环的分支顺序是契约**：`ctx.Err()` 判定必须先于预算与 provider 护栏，否则一次零回合的
+  墙钟超时会被记成「模型服务挂了」。v0.4 实现在 `v04.go:702`。
 - **`answer.Fingerprint` 是指纹唯一真源**（格式 `fp:<hex8>/len=<rune数>/<首>…<尾>`）。
   `dag.FlagFingerprint` 与 `gate.Fingerprint` **只准转发**，不得再实现一遍——已经漂移过一次。
-- **`answer.Shape` 不能加 json tag、不能改字段名**：它被无 tag 嵌进 `graph.json` 的 schema 1，
-  改名会静默破坏所有现存图。真要改必须写显式的 `MarshalJSON`/`UnmarshalJSON`。
+- **`answer.Shape` 不能加 json tag、不能改字段名**：它被无 tag 嵌进图 schema 1（`graph.json` 的
+  载荷格式），改名会静默破坏所有现存图。真要改必须写显式的 `MarshalJSON`/`UnmarshalJSON`。
+  ⚠️ v0.4 不写 `graph.json`（见上），但 `dag.Graph` 的 `MarshalJSON` 与
+  `dag/testdata/render_golden.txt` 都还在，**格式契约仍然有效**。
 - **零第三方依赖**：`go.mod` 无 `require` 块。需要容器编排就用 `docker` CLI，不引 Docker SDK；
   不引 yaml/toml/测试框架。
 - **`dag` 不做拓扑排序式调度、不做攻击路径规划**：图只做剪枝 / 推导链 / 分支 / 续跑四件事。
@@ -94,13 +131,15 @@ harness（契约）
 
 ## 并行实施的工作方式
 
-任务分解与精确接口签名在 `docs/superpowers/plans/2026-09-20-red-harness-v0.3.0.md`（T0–T21，5 个波次）。
-既定编排是**协调者 + worktree 隔离的实现 agent**：
+既定编排是**协调者 + worktree 隔离的实现 agent**（v0.3 的 T0–T21 波次计划见
+`docs/superpowers/plans/2026-09-20-red-harness-v0.3.0.md`，属**历史**；v0.4 的当前收尾项在
+`docs/roadmap.md` 与 `docs/v0.4-open-items.md`）：
 
 - **一个子包 = 一个 agent**。Go 不允许同包并行编辑，分派前核对包级所有权；波次内文件集合必须不相交。
 - 每个 agent **只跑自己的包测试**（`go test ./<pkg>/... -count=1`），全量在集成门由协调者跑。
 - 冲突说明所有权核对漏了，**停下来查**，不要手工解冲突蒙过去。
-- 提交粒度 = 任务，消息形如 `feat(engine): 单写者轮循环 [T11]`。
+- 提交粒度 = 任务，消息形如 `fix(gate): 读自己的状态文件不得给候选坐实族别 [M4]`
+  （`[Mx]` 是里程碑门编号，见 `docs/roadmap.md`）。
   **绝不 `git add -A`**——逐任务显式列出路径（`.env` 不能进任何提交）。
 - worktree 在 `.claude/worktrees/`（已 gitignore），是手工 `git worktree add` 建的。
 
@@ -108,22 +147,30 @@ harness（契约）
 
 | 文件 | 内容 |
 |---|---|
-| `PLAN.md` | v1 实施计划（需求真源，含「明确不纳入 v1」六项） |
-| `docs/superpowers/specs/2026-09-20-*.md` | **已冻结的设计依据**，含 v0.2 缺陷清单（每条带 `file:line`） |
-| `docs/superpowers/plans/2026-09-20-*.md` | 任务计划 T0–T21 + 波次编排 + 验收命令 |
-| `docs/architecture.md` | 当前真实状态 + mermaid 架构图 + 断链处清单 |
+| `docs/architecture.md` | **当前实现的权威描述**（v0.4.0-research）+ mermaid 架构图 + 信任边界表 + 未完成项 |
+| `docs/PLAN v0.4.md` | v0.4 目标行为（研究版定位与破坏性变更） |
+| `docs/roadmap.md` | 按出口门排序的交付路线与**发布边界** |
+| `docs/sdk-architecture-v0.4.md` | v0.4 目标架构规范（模块依赖、时序、公开接口、信任边界） |
+| `docs/v0.4-open-items.md` | **未接线代码面清单**：哪些 v0.3 机制在 v0.4 没有生产调用方 |
+| `PLAN.md` | v1 实施计划（需求真源，含「明确不纳入 v1」六项；**v0.4 已改掉其中若干**） |
+| `docs/superpowers/specs/2026-09-20-*.md` | 已冻结的设计依据，含 v0.2 缺陷清单（每条带 `file:line`） |
+| `docs/superpowers/plans/2026-09-20-*.md` | v0.3 的任务计划 T0–T21 + 波次编排 + 验收命令（历史） |
 | `docs/migration-v0.2-to-v0.3.md` | 逐字段迁移表与**行为变更**清单 |
 | `SDK_API.md` | TSecBench 官方 Python SDK 接入文档 |
 | `bridge/README.md` | wire 协议、错误码表、**6 个 SDK 源码级缺陷**与对策 |
 | `runner/README.md` | runner 镜像构建与基础镜像 digest 记录 |
+| `analysis/red-harness/` | 依赖与拓扑图（`TOPOLOGY.html` + `extract_topology.py`，可重跑） |
 
 ## 本机环境限制
 
-无 VPN、宿主 py3.12 缺 `httpx`（**宿主导入 `tsec_benchmark` 必然失败，这是正常配置**——
-SDK 装在容器层、面向 py3.14）；Docker 可用；2 核 3 GB。pi 真身在
-`/root/.local/share/pi-node/node-v22.23.2-linux-x64/bin/pi`（不在 PATH，且必须把 bundled node
-目录前置进 `PATH`——系统 node 是 v18，pi 的 shebang 是 `#!/usr/bin/env node`）。
+宿主 py3.12 缺 `httpx`（**宿主导入 `tsec_benchmark` 必然失败，这是正常配置**——
+SDK 装在容器层、面向 py3.14），所以平台调用的**宿主路径永远走不通**，真跑只能走
+`docker exec <容器> python3 -m bridge`。Docker 可用（实测 29.8）；2 核 3 GB；VPN 接口
+`tun0` 当前是 UP。pi 真身在 `/root/.local/share/pi-node/node-v22.23.2-linux-x64/bin/pi`
+（不在 PATH，且必须把 bundled node 目录前置进 `PATH`——系统 node 是 v18，pi 的 shebang
+是 `#!/usr/bin/env node`）。
 
-因此：真实 TSecBench 冒烟**本机不可能**（用 mock SDK 离线验证），真实 pi 冒烟可行但会花 token
-且凭据可能已失效——**失败要报失败，不得记为跳过**。真实 pi 冒烟里「0 回合 + 有错误」是
-provider 静默烧钱模式，不是「跑完了」。
+因此：**平台侧真跑是可能的**（2026-09-22 首次打通，63 题、58 次真实工具调用，见
+`docs/architecture.md` §5），但受两个前提约束——`tun0` 在、且 `BENCHMARK_TOKEN` 有效。
+凭据可能已失效：**失败要报失败，不得记为跳过**。真实 pi 冒烟会花 token，且
+「0 回合 + 有错误」是 provider 静默烧钱模式，不是「跑完了」。
