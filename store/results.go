@@ -14,7 +14,8 @@ import (
 
 const resultsDirName = "results"
 
-// 公开结果里的失败分类与原因串。见 sanitizeErrorClass / sanitizeReason。
+// 公开结果里的失败分类、原因串、运行终态与扩展包摘要。
+// 见 sanitizeErrorClass / sanitizeReason / sanitizeState / sanitizeBundleDigest。
 const (
 	// errClassUnclassified 是分类无法表达时的兜底值。
 	//
@@ -28,6 +29,20 @@ const (
 	reasonUnrecognized = "unrecognized"
 	// maxReasonLen 是 Reason 的长度上限。Reason* 常量都在 12 字符以内。
 	maxReasonLen = 32
+	// stateUnrecognized 是 State 不是已知运行终态时的兜底值。
+	//
+	// 为什么兜底而不是丢空：空串在这个字段上的语义是「未记录」（v0.3 写出的旧
+	// 结果文件没有这个字段），把一次坏值折成空就等于对外宣称「这次运行没有终态
+	// 记录」；而真实情况是「有个值，但它不是任何已知终态」。两者必须能分开。
+	stateUnrecognized = "unrecognized"
+	// minBundleDigestLen / maxBundleDigestLen 是扩展包摘要串的长度区间。
+	//
+	// 今天的摘要恰好 16 个十六进制字符（sha256 的 hex[:8]，见 v04.go 的
+	// bundleDigest）；下界取 8、上界取完整 sha256 的 64，是**区间而不是定长**：
+	// 将来根包把截断口径改长改短时，store 只是转发的下游，定长校验会让所有摘要
+	// 静默变成空串（看起来像「本题没配扩展包」），比不校验更难查。
+	minBundleDigestLen = 8
+	maxBundleDigestLen = 64
 )
 
 // ResultFileStore persists only public aggregate metrics. It never marshals
@@ -58,10 +73,12 @@ type publicResult struct {
 	RunID         string            `json:"runId"`
 	Scenario      string            `json:"scenario"`
 	ProfileDigest string            `json:"profileDigest,omitempty"`
+	BundleDigest  string            `json:"bundleDigest,omitempty"`
 	Model         string            `json:"model,omitempty"`
 	StartedAt     time.Time         `json:"startedAt"`
 	EndedAt       time.Time         `json:"endedAt"`
 	Completed     bool              `json:"completed"`
+	State         string            `json:"state,omitempty"`
 	Reason        string            `json:"reason,omitempty"`
 	Err           string            `json:"errorClass,omitempty"`
 	Challenges    []publicChallenge `json:"challenges,omitempty"`
@@ -87,16 +104,24 @@ type publicChallenge struct {
 	// Score 是平台给出的累计得分。
 	Score int `json:"score,omitempty"`
 	// CostUSD 是这道题消耗的模型成本。
-	CostUSD         float64  `json:"costUSD,omitempty"`
-	Rounds          int      `json:"rounds"`
-	HintUsed        int      `json:"hintUsed"`
-	CleanupFailures []string `json:"cleanupFailures,omitempty"`
-	DurationSeconds float64  `json:"durationSeconds"`
+	CostUSD  float64 `json:"costUSD,omitempty"`
+	Rounds   int     `json:"rounds"`
+	HintUsed int     `json:"hintUsed"`
+	// BranchesAbandoned 是被放弃的分支数（换支次数）。
+	//
+	// 为什么要落盘：一次运行以 no_intent 收场时，「所有方向都做完了」与「编排层
+	// 把几个停滞方向判掉扔了」指向完全不同的改法（题目做不动 vs 阈值/提示策略要
+	// 调），而事后只看 Reason 分不出这两者。见 sanitizeCount（负数在这里没有含义）。
+	BranchesAbandoned int      `json:"branchesAbandoned,omitempty"`
+	CleanupFailures   []string `json:"cleanupFailures,omitempty"`
+	DurationSeconds   float64  `json:"durationSeconds"`
 }
 
 func toPublic(r harness.RunResult) publicResult {
 	p := publicResult{RunID: string(r.RunID), Scenario: r.Scenario, ProfileDigest: r.ProfileDigest,
-		Model: r.Model, StartedAt: r.StartedAt, EndedAt: r.EndedAt, Completed: r.Completed,
+		BundleDigest: sanitizeBundleDigest(r.BundleDigest), Model: r.Model,
+		StartedAt: r.StartedAt, EndedAt: r.EndedAt, Completed: r.Completed,
+		State:  sanitizeState(r.State),
 		Reason: sanitizeReason(r.Reason), Err: sanitizeErrorClass(r.Err)}
 	for _, c := range r.Challenges {
 		p.Challenges = append(p.Challenges, publicChallenge{Code: c.Challenge.Code,
@@ -106,8 +131,9 @@ func toPublic(r harness.RunResult) publicResult {
 			RemainingAtStart: c.Outcome.RemainingAtStart, Score: c.Outcome.Score,
 			CostUSD: c.Outcome.Stats.CostUSD,
 			Rounds:  c.Outcome.Rounds, HintUsed: c.Outcome.HintUsed,
-			CleanupFailures: sanitizeCleanupFailures(c.Outcome.CleanupFailures),
-			DurationSeconds: c.Outcome.Duration().Seconds()})
+			BranchesAbandoned: sanitizeCount(c.Outcome.BranchesAbandoned),
+			CleanupFailures:   sanitizeCleanupFailures(c.Outcome.CleanupFailures),
+			DurationSeconds:   c.Outcome.Duration().Seconds()})
 	}
 	return p
 }
@@ -129,8 +155,9 @@ func sanitizeCleanupFailures(failures []string) []string {
 // 白名单式构造）。调用方拿到的是「可比较的指标视图」，不是完整结果。
 func fromPublic(p publicResult) harness.RunResult {
 	r := harness.RunResult{RunID: harness.RunID(p.RunID), Scenario: p.Scenario,
-		ProfileDigest: p.ProfileDigest, Model: p.Model, StartedAt: p.StartedAt,
-		EndedAt: p.EndedAt, Completed: p.Completed, Reason: p.Reason, Err: p.Err}
+		ProfileDigest: p.ProfileDigest, BundleDigest: p.BundleDigest, Model: p.Model,
+		StartedAt: p.StartedAt, EndedAt: p.EndedAt, State: harness.RunState(p.State),
+		Completed: p.Completed, Reason: p.Reason, Err: p.Err}
 	for _, c := range p.Challenges {
 		r.Challenges = append(r.Challenges, harness.ChallengeResult{
 			Challenge: harness.Challenge{Code: c.Code, Category: c.Category},
@@ -138,7 +165,8 @@ func fromPublic(p publicResult) harness.RunResult {
 				ProgressConfirmed: c.ProgressConfirmed, ProgressTotal: c.ProgressTotal,
 				RemainingAtStart: c.RemainingAtStart, Score: c.Score,
 				Stats:  harness.Stats{CostUSD: c.CostUSD},
-				Rounds: c.Rounds, HintUsed: c.HintUsed, CleanupFailures: append([]string(nil), c.CleanupFailures...), StartedAt: c.StartedAt, EndedAt: c.EndedAt},
+				Rounds: c.Rounds, HintUsed: c.HintUsed, BranchesAbandoned: c.BranchesAbandoned,
+				CleanupFailures: append([]string(nil), c.CleanupFailures...), StartedAt: c.StartedAt, EndedAt: c.EndedAt},
 			StartedAt: c.StartedAt, EndedAt: c.EndedAt})
 	}
 	return r
@@ -223,6 +251,74 @@ func sanitizeReason(s string) string {
 		}
 	}
 	return s
+}
+
+// sanitizeState 把 RunResult.State 折成一个**可进公开结果**的运行终态。
+//
+// 为什么要脱敏一个「类型上已经是 RunState」的字段：RunState 的底层类型是
+// string，类型系统拦不住调用方（或一份手改过的结果文件）往里塞任意串，而这个
+// 字段会**原样落盘**。公开结果会被拷进工单、贴进聊天、进看板聚合，一个能装
+// 任意文本的字段就是一条明文/凭据泄漏通道——与 sanitizeReason 是同一条理由，
+// results_test 的 canary 回归也钉着 State。
+//
+// 白名单**不抄常量表**：放行判据直接用契约自己的 `RunState.Terminal()`，它正是
+// 「这些值表示运行已经结束」这条判断的唯一真源——将来根包新增一个终态会自动
+// 跟着放行，而在 store 里手抄一份终态常量表一定会漂移（新增终态却忘了同步这里，
+// 新终态会静默变成 unrecognized）。
+//
+// 只放行终态也**是有意的**：这个字段在公开 schema 里回答的是「运行怎么结束的」，
+// 一个非终态值（created / preparing / running / paused）出现在结果文件里本身就
+// 是坏数据，把它读成「还在跑」远比读成 unrecognized 危险。
+func sanitizeState(s harness.RunState) string {
+	if s == "" {
+		// 空串保持空串：它表示「未记录」（v0.3 写出的旧结果文件没有这个字段），
+		// 与「有值但不认识」是两件事，不能都折成 stateUnrecognized。
+		return ""
+	}
+	if s.Terminal() {
+		return string(s)
+	}
+	return stateUnrecognized
+}
+
+// sanitizeBundleDigest 把扩展包内容摘要折成一个**可进公开结果**的十六进制串。
+//
+// 为什么要卡死字符集：它与 ProfileDigest 并列落进公开文件，调用方会拿它判断
+// 「两次运行挂的是不是同一份扩展包」。摘要本身由 v04.go 的 bundleDigest 产生
+// （sha256 的 hex[:8]，即 16 个十六进制字符），但 store 不能假定调用方一定走了
+// 那条路：一个自由串写进来，既可能让两份不同的 bundle 看起来相同（伪造核验），
+// 也可能把明文带进公开面。所以只放行纯 [0-9a-f] 且长度落在
+// [minBundleDigestLen, maxBundleDigestLen] 区间内的串（空串天然落进「太短」）。
+//
+// 不合法一律折成**空串**：空串在这个字段上的语义是「未核验」，对坏值来说它是
+// 诚实的答案——store 不知道这份内容摘要是什么，就不能给出一个看起来已核验的串。
+//
+// 已知取舍：折空会丢掉「调用方传了个坏值」这个信息（与「本题没配扩展包」同形）。
+// 这里不折成一个显式的坏值常量，是因为这个字段的消费方式是**内容比对**——放一个
+// 常量进去，会让两次无关的运行看起来挂了同一份 bundle，比少一点信息有害得多。
+func sanitizeBundleDigest(s string) string {
+	if len(s) < minBundleDigestLen || len(s) > maxBundleDigestLen {
+		return ""
+	}
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return ""
+		}
+	}
+	return s
+}
+
+// sanitizeCount 把公开结果里的计数字段钳到非负。
+//
+// 为什么负数不能原样落盘：BranchesAbandoned 由调用方累加，出现负数说明某处的
+// 计数逻辑坏了。公开结果里放一个负数，读的人会以为「被放弃的分支数是负的」，
+// 而将来任何跨 run 求和/求均值都会把这个坏值摊进结论里。钳到 0：负数在这个
+// 字段上没有可表达的含义，而 0（没有换支记录）比一个负数更接近事实。
+func sanitizeCount(n int) int {
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // Save 原子写公开结果。

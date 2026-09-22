@@ -21,6 +21,11 @@ import (
 // 本文件里，所以这里用的是明显的假值。
 const canaryFlag = "flag{canary-not-a-real-flag}"
 
+// bundleDigestSample 是一份**合法形态**的扩展包摘要：16 个十六进制字符
+// （sha256 的 hex[:8]，见 v04.go 的 bundleDigest）。它必须是假值，不是任何真实
+// 内容的摘要。
+const bundleDigestSample = "0123456789abcdef"
+
 // baseTime 是固定的起跑时间。用 time.Date 而不是 time.Now：往返断言要求时间戳
 // 逐位相等，而 time.Now 带单调时钟读数（JSON 里不会保留它）。
 var baseTime = time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
@@ -69,6 +74,10 @@ func TestResultFileStoreNeverPersistsCandidatePlaintext(t *testing.T) {
 			Reason: canaryFlag,
 		},
 	}}}
+	// State 与 BundleDigest 是同一类「自由串字段落在公开文件里」的风险：两者都
+	// 必须被脱敏折叠，不能被明文透传（State 折成 stateUnrecognized，摘要折成空串）。
+	run.State = canaryFlag
+	run.BundleDigest = canaryFlag
 	if err := rs.Save(context.Background(), run); err != nil {
 		t.Fatal(err)
 	}
@@ -91,21 +100,30 @@ func TestResultFileStoreNeverPersistsCandidatePlaintext(t *testing.T) {
 		t.Fatalf("题级 reason = %+v，期望被折成 %q（它是原样落盘的自由串）",
 			p.Challenges, reasonUnrecognized)
 	}
+	if p.State != stateUnrecognized {
+		t.Fatalf("state = %q，期望 %q（明文不得透传）", p.State, stateUnrecognized)
+	}
+	if p.BundleDigest != "" {
+		t.Fatalf("bundleDigest = %q，期望被折成空串（它是原样落盘的自由串）", p.BundleDigest)
+	}
 }
 
 func TestResultRoundTripKeepsMetricsAndDropsPlaintext(t *testing.T) {
 	rs := newResultStore(t)
 	ended := baseTime.Add(90 * time.Second)
 	run := harness.RunResult{RunID: "run-rt", Scenario: "sc", ProfileDigest: "pd", Model: "m",
-		StartedAt: baseTime, EndedAt: ended, Completed: true, Reason: harness.ReasonCompleted,
-		Err: "*harness.Error",
+		BundleDigest: bundleDigestSample,
+		StartedAt:    baseTime, EndedAt: ended, Completed: true, Reason: harness.ReasonCompleted,
+		State: harness.RunFinished,
+		Err:   "*harness.Error",
 		Challenges: []harness.ChallengeResult{{
 			Challenge: harness.Challenge{Code: "c1", Category: "cat"},
 			Outcome: harness.OutcomeView{Code: "c1", Reason: harness.ReasonSolved,
 				Flags: []string{canaryFlag}, Candidates: []harness.Candidate{{Flag: canaryFlag}},
 				Submitted: 2, ProgressConfirmed: 7, ProgressTotal: 10, RemainingAtStart: 5,
 				Score: 42, Stats: harness.Stats{CostUSD: 1.25}, Rounds: 3, HintUsed: 1,
-				StartedAt: baseTime, EndedAt: ended},
+				BranchesAbandoned: 3,
+				StartedAt:         baseTime, EndedAt: ended},
 			StartedAt: baseTime, EndedAt: ended,
 		}}}
 	saveRun(t, rs, run)
@@ -118,6 +136,14 @@ func TestResultRoundTripKeepsMetricsAndDropsPlaintext(t *testing.T) {
 		got.Model != run.Model || got.Completed != run.Completed || got.Reason != run.Reason ||
 		got.Err != run.Err {
 		t.Fatalf("run 级字段往返不一致: %+v", got)
+	}
+	// 运行终态与扩展包摘要也必须往返——它们是 v0.4 的新公开面：报告要能回答
+	// 「怎么结束的」与「挂的是哪份扩展包内容」，这两件事事后都无法重算。
+	if got.State != run.State {
+		t.Fatalf("state 往返不一致: %q / %q", got.State, run.State)
+	}
+	if got.BundleDigest != run.BundleDigest {
+		t.Fatalf("bundleDigest 往返不一致: %q / %q", got.BundleDigest, run.BundleDigest)
 	}
 	if !got.StartedAt.Equal(run.StartedAt) || !got.EndedAt.Equal(run.EndedAt) {
 		t.Fatalf("时间戳往返不一致: %v / %v", got.StartedAt, got.EndedAt)
@@ -135,7 +161,8 @@ func TestResultRoundTripKeepsMetricsAndDropsPlaintext(t *testing.T) {
 		c.Outcome.RemainingAtStart != want.Outcome.RemainingAtStart ||
 		c.Outcome.Score != want.Outcome.Score ||
 		c.Outcome.Rounds != want.Outcome.Rounds ||
-		c.Outcome.HintUsed != want.Outcome.HintUsed {
+		c.Outcome.HintUsed != want.Outcome.HintUsed ||
+		c.Outcome.BranchesAbandoned != want.Outcome.BranchesAbandoned {
 		t.Fatalf("挑战指标往返不一致: %+v", c.Outcome)
 	}
 	if math.Abs(c.Outcome.Stats.CostUSD-want.Outcome.Stats.CostUSD) > 1e-9 {
@@ -200,6 +227,178 @@ func TestReasonSanitized(t *testing.T) {
 		harness.ReasonMaxCost, harness.ReasonNoIntent, harness.ReasonSolved, harness.ReasonProviderFailure} {
 		if got := sanitizeReason(r); got != r {
 			t.Fatalf("契约常量 %q 被折成了 %q——脱敏规则不能吃掉合法的 Reason", r, got)
+		}
+	}
+}
+
+// ── 运行终态与扩展包摘要 ──
+
+// TestStateSanitized 钉住 State 的折叠规则。
+//
+// State 与 Reason 同类风险：类型上是契约枚举，底层却是 string，而它会原样落盘。
+func TestStateSanitized(t *testing.T) {
+	cases := []struct {
+		name string
+		in   harness.RunState
+		want string
+	}{
+		{"空串保持空（未记录）", "", ""},
+		{"正常结束放行", harness.RunFinished, "finished"},
+		{"失败放行", harness.RunFailed, "failed"},
+		{"取消放行", harness.RunCancelled, "cancelled"},
+		{"v0.3 旧终态放行", harness.RunCompleted, "completed"},
+		{"明文折叠", canaryFlag, stateUnrecognized},
+		{"大小写不符折叠", "Finished", stateUnrecognized},
+		{"带空格折叠", "finished ", stateUnrecognized},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeState(tc.in); got != tc.want {
+				t.Fatalf("sanitizeState(%q) = %q，期望 %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	// 全部终态常量都必须原样通过（新增终态时这条会立刻暴露折叠规则太严）。
+	terminals := []harness.RunState{harness.RunFinished, harness.RunFailed,
+		harness.RunCancelled, harness.RunCompleted}
+	for _, s := range terminals {
+		if got := sanitizeState(s); got != string(s) {
+			t.Fatalf("终态 %q 被折成了 %q——折叠不能吃掉合法的运行终态", s, got)
+		}
+	}
+	// 非终态一律折叠：结果文件里的这个字段回答的是「运行怎么结束的」，写着一个
+	// 「还在跑」的值本身就是坏数据，读成 unrecognized 比读成 running 安全。
+	for _, s := range []harness.RunState{harness.RunCreated, harness.RunPreparing,
+		harness.RunRunning, harness.RunPaused} {
+		if got := sanitizeState(s); got != stateUnrecognized {
+			t.Fatalf("非终态 %q 折成了 %q，期望 %q", s, got, stateUnrecognized)
+		}
+	}
+}
+
+func TestBundleDigestSanitized(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"空串保持空（未核验）", "", ""},
+		{"十六进制摘要放行", bundleDigestSample, bundleDigestSample},
+		{"完整 sha256 放行", strings.Repeat("abcdef0123456789", maxBundleDigestLen/16), strings.Repeat("abcdef0123456789", maxBundleDigestLen/16)},
+		{"明文折叠成空", canaryFlag, ""},
+		{"大写 hex 折叠", "0123456789ABCDEF", ""},
+		{"非 hex 折叠", "0123456789abcdez", ""},
+		{"带空格折叠", " 0123456789abcdef", ""},
+		{"太短折叠", "abc", ""},
+		{"太长折叠", strings.Repeat("a", maxBundleDigestLen+1), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeBundleDigest(tc.in); got != tc.want {
+				t.Fatalf("sanitizeBundleDigest(%q) = %q，期望 %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewResultFieldsSanitizedOnDisk：坏值落盘后必须是折叠后的值，且文件里
+// 不得留下明文。走的是 Save → 读原始字节 → Get 这条真实路径，而不是直接调
+// 脱敏函数——toPublic 漏接一个字段是这里唯一能抓到的方式。
+func TestNewResultFieldsSanitizedOnDisk(t *testing.T) {
+	root := t.TempDir()
+	rs, err := NewResultStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveRun(t, rs, harness.RunResult{RunID: "run-bad", StartedAt: baseTime,
+		State: canaryFlag, BundleDigest: canaryFlag,
+		Challenges: []harness.ChallengeResult{{
+			Challenge: harness.Challenge{Code: "c1"},
+			Outcome:   harness.OutcomeView{BranchesAbandoned: -3},
+		}}})
+
+	b, err := os.ReadFile(filepath.Join(root, resultsDirName, "run-bad.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsBytes(b, []byte(canaryFlag)) {
+		t.Fatalf("结果文件泄漏了明文: %s", b)
+	}
+	var p publicResult
+	if err := json.Unmarshal(b, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.State != stateUnrecognized {
+		t.Fatalf("落盘 state = %q，期望 %q", p.State, stateUnrecognized)
+	}
+	if p.BundleDigest != "" {
+		t.Fatalf("落盘 bundleDigest = %q，期望空串", p.BundleDigest)
+	}
+	if len(p.Challenges) != 1 || p.Challenges[0].BranchesAbandoned != 0 {
+		t.Fatalf("落盘 branchesAbandoned = %+v，期望被钳到 0", p.Challenges)
+	}
+	got, err := rs.Get(context.Background(), "run-bad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != stateUnrecognized || got.BundleDigest != "" ||
+		got.Challenges[0].Outcome.BranchesAbandoned != 0 {
+		t.Fatalf("读回的值不是折叠后的值: state=%q digest=%q abandoned=%d",
+			got.State, got.BundleDigest, got.Challenges[0].Outcome.BranchesAbandoned)
+	}
+}
+
+// TestNewResultFieldsEmptyStayEmpty：空串是「未记录 / 未核验」，**不得**被折成
+// 兜底值——那会把「这次运行没记终态」谎报成「记了个不认识的终态」。
+func TestNewResultFieldsEmptyStayEmpty(t *testing.T) {
+	root := t.TempDir()
+	rs, err := NewResultStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveRun(t, rs, harness.RunResult{RunID: "run-empty", StartedAt: baseTime})
+
+	b, err := os.ReadFile(filepath.Join(root, resultsDirName, "run-empty.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// omitempty：旧形状的文件里根本不该出现这两个键（读旧文件靠 json 零值兜底）。
+	for _, key := range []string{`"state"`, `"bundleDigest"`} {
+		if strings.Contains(string(b), key) {
+			t.Fatalf("空值不该落盘成 %s: %s", key, b)
+		}
+	}
+	got, err := rs.Get(context.Background(), "run-empty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "" || got.BundleDigest != "" {
+		t.Fatalf("空值往返后变成了 state=%q digest=%q，期望都保持空串", got.State, got.BundleDigest)
+	}
+}
+
+// TestResultFilePinsNewFieldNames：公开文件的**键名**是持久化契约（下游报告、
+// 看板、stats 都按名字读），改名等于静默破坏所有现存消费方。
+func TestResultFilePinsNewFieldNames(t *testing.T) {
+	root := t.TempDir()
+	rs, err := NewResultStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveRun(t, rs, harness.RunResult{RunID: "run-keys", StartedAt: baseTime,
+		State: harness.RunFinished, BundleDigest: bundleDigestSample,
+		Challenges: []harness.ChallengeResult{{
+			Challenge: harness.Challenge{Code: "c1"},
+			Outcome:   harness.OutcomeView{BranchesAbandoned: 2},
+		}}})
+	b, err := os.ReadFile(filepath.Join(root, resultsDirName, "run-keys.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"state":"finished"`, `"bundleDigest":"` + bundleDigestSample + `"`,
+		`"branchesAbandoned":2`} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("公开结果里缺少 %s: %s", want, b)
 		}
 	}
 }
