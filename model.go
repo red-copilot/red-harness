@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"time"
 )
@@ -147,6 +148,29 @@ func (s RunSpec) Digest() string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
+}
+
+// Validate 检查 RunSpec 里那些「配错了不会报错、只会静默不生效」的字段。
+//
+// 为什么需要它：v0.5 之前 HintPolicy **没有任何取值校验**——Run 的轮循环只补了
+// 空串默认，然后 `shouldHint` 用 `== HintAlways` / `== HintAuto` 判断，于是传
+// "alwayss" 与传 "off" 完全等价，且完全静默。这类「看起来在、实际没生效」的
+// 字段在本仓库被明确记为一类比缺失更糟的缺陷（见 v04_test.go 里那条注释）。
+//
+// 调用点在 Harness.Run 的**最开头**，早于跨进程锁：`locker.Lock` 会写
+// `<StoreDir>/run.lock`，那是一处文件系统副作用，而配置错误是纯粹的调用方
+// 错误——没有任何理由先落下副作用再报错。
+func (s RunSpec) Validate() error {
+	if err := s.Profile.Validate(); err != nil {
+		return err
+	}
+	switch s.HintPolicy {
+	case "", HintOff, HintAuto, HintAlways:
+		return nil
+	default:
+		return Ef(KindConfig, "harness.spec",
+			fmt.Sprintf("hintPolicy=%q 不是 off/auto/always 之一", s.HintPolicy), nil)
+	}
 }
 
 // AgentSpec 是 pi（或别的 agent 后端）的启动配置。

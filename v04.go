@@ -119,10 +119,110 @@ type SolverProfile struct {
 	// SystemPrompt 走 pi 的 --append-system-prompt（保留 pi 默认编码能力）。
 	// 它由 Run 在每道题 Start 时注入 agent——放在 profile 里而不是 AgentSpec 里，
 	// 是因为它属于「一次 Run 冻结的解法配置」，而 AgentSpec 描述的是进程参数。
-	SystemPrompt    string         `json:"systemPrompt,omitempty"`
-	ExtensionBundle string         `json:"extensionBundle,omitempty"`
-	Planner         map[string]any `json:"planner,omitempty"`
-	PromptPolicy    map[string]any `json:"promptPolicy,omitempty"`
+	SystemPrompt    string `json:"systemPrompt,omitempty"`
+	ExtensionBundle string `json:"extensionBundle,omitempty"`
+	// Planner / PromptPolicy 在 v0.5 之前是 `map[string]any`。
+	//
+	// 换成显式结构体的理由有两条，都是「不可见」的那一类：
+	//
+	//  1. 键名靠约定。拼错一个字母不会报错——消费点取不到键，就静默回落到默认
+	//     值，于是「我明明配了 5 轮」和「配置没生效」在报告里长得一模一样。
+	//  2. 那个拼错的键**仍然进了 ProfileDigest**（摘要是对整个 map 取的）。于是
+	//     改一个拼错的键，在报告里表现为「换了一次实验分组」——两次本该可比的
+	//     运行被拆开，而没人会想到去查一个拼写错误。
+	//
+	// 换成结构体之后，Go 调用方写错键名**编译不过**；文本进来的配置由
+	// LoadProfile 的 DisallowUnknownFields 挡下。
+	// 用 omitzero 而不是 omitempty：后者对结构体字段**没有效果**（`{}` 照样
+	// 序列化出来），于是「没配」会在 JSON 里长成 `"planner":{}`。omitzero 让
+	// 零值真的消失，`RunSpec.Digest()` 对一份没用这两个键的配置保持旧值——
+	// 少一批无谓的摘要漂移。
+	Planner      PlannerConfig `json:"planner,omitzero"`
+	PromptPolicy PromptConfig  `json:"promptPolicy,omitzero"`
+}
+
+// PlannerConfig 是 SolverProfile.Planner 的 schema。
+type PlannerConfig struct {
+	// DryRoundsBeforeHint 是连续无进展多少轮后允许请求提示。
+	//
+	// 0 表示「没配」，由 Run 依次回落到 PolicySpec.DryRoundsBeforeHint 与内置的
+	// 2 轮。**0 不是「0 轮就提示」**——见 MinProfileLimit 的注释。
+	DryRoundsBeforeHint int `json:"dryRoundsBeforeHint,omitempty"`
+}
+
+// PromptConfig 是 SolverProfile.PromptPolicy 的 schema。
+//
+// ⚠️ MaxFacts 与 MaxNegative 各自管**不同的渲染段**（已知事实段与死胡同段，
+// 见 dag/render.go 的 factsSection / negativeSection），两段各有各的回落默认值
+// （24 / 12）。所以两者之间**没有**「谁不能大于谁」这类跨字段约束——为了看起来
+// 更严而加一条不成立的约束，会让合法配置被拒，而拒绝理由还是编的。
+type PromptConfig struct {
+	MaxFacts    int `json:"maxFacts,omitempty"`
+	MaxNegative int `json:"maxNegative,omitempty"`
+}
+
+// profile 数值项的允许区间。
+//
+// 上界 10000 不是随手取的：这些值直接决定**渲染进 prompt 的条目数**，一个
+// 「999999 条事实」的配置会在跑起来之后把 prompt 撑爆，而那时预算已经花了。
+// 下界 1 而不是 0：0 在这套 schema 里表示「没配，用默认」，不是「取 0 条」。
+const (
+	MinProfileLimit = 1
+	MaxProfileLimit = 10000
+)
+
+// DefaultDryRoundsBeforeHint 是「连续无进展多少轮后允许请求提示」的内置默认值。
+//
+// 它此前是轮循环里的一个字面量 2，而 v0.3 的 engine.go 注释里写的是 3——两处
+// 说法不一致，且没有任何地方说明哪个是生效的。v0.4 实际跑的是 2，所以取 2 并
+// 给它一个名字：改它的人要能看见「这是默认值」，而不是在轮循环里改一个数字。
+const DefaultDryRoundsBeforeHint = 2
+
+// Validate 检查 profile 每一项的取值。
+//
+// 调用点在**任何副作用之前**（Run 的开头，早于跨进程锁）：配置错误是纯粹的
+// 调用方错误，没有任何理由等起完容器、起完题、花掉平台额度之后再告诉他。
+func (p SolverProfile) Validate() error {
+	check := func(field string, v int) error {
+		if v == 0 {
+			return nil // 0 = 没配，交给回落链
+		}
+		if v < MinProfileLimit || v > MaxProfileLimit {
+			return Ef(KindConfig, "harness.profile",
+				fmt.Sprintf("%s=%d 超出允许区间 [%d, %d]", field, v, MinProfileLimit, MaxProfileLimit), nil)
+		}
+		return nil
+	}
+	if err := check("planner.dryRoundsBeforeHint", p.Planner.DryRoundsBeforeHint); err != nil {
+		return err
+	}
+	if err := check("promptPolicy.maxFacts", p.PromptPolicy.MaxFacts); err != nil {
+		return err
+	}
+	return check("promptPolicy.maxNegative", p.PromptPolicy.MaxNegative)
+}
+
+// LoadProfile 从 JSON 读一份 profile。
+//
+// 为什么需要它，而不是让调用方自己 json.Unmarshal：换成结构体只挡住了 Go 调用
+// 方的键名拼写，**文本**进来的配置照样能带未知键，而 encoding/json 的默认行为是
+// 静默忽略。那正是这次要消灭的形状。所以唯一的文本入口在这里关掉那个默认，
+// 并顺手要求「整个 reader 就是一份 profile」——只读第一个 JSON 值会让一个拼接
+// 文件的前半段静默生效。
+func LoadProfile(r io.Reader) (SolverProfile, error) {
+	var p SolverProfile
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return SolverProfile{}, Ef(KindConfig, "harness.profile", "profile 解析失败（未知键或类型不符）", err)
+	}
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		return SolverProfile{}, Ef(KindConfig, "harness.profile", "profile 之后还有多余内容", nil)
+	}
+	if err := p.Validate(); err != nil {
+		return SolverProfile{}, err
+	}
+	return p, nil
 }
 
 func (p SolverProfile) Digest() string {
@@ -130,7 +230,8 @@ func (p SolverProfile) Digest() string {
 	// second hashing policy in the public API.
 	b := struct {
 		Name, SystemPrompt, ExtensionBundle string
-		Planner, PromptPolicy               map[string]any
+		Planner                             PlannerConfig
+		PromptPolicy                        PromptConfig
 	}{p.Name, p.SystemPrompt, p.ExtensionBundle, p.Planner, p.PromptPolicy}
 	return digestJSON(b)
 }
@@ -141,23 +242,10 @@ func (p SolverProfile) Digest() string {
 // 必须调它，不能自己再抄一份字段列表：两处一旦漂移，Run 实际生效的 profile
 // 与 RunSpec 里那份就不是同一个东西，而摘要看起来仍然正常。
 func (p SolverProfile) Empty() bool {
+	// 结构体可以直接比较（字段全是可比较类型）。两处零值判据与 Validate 的
+	// 「0 = 没配」是同一个约定，改字段时三处要一起看。
 	return p.Name == "" && p.SystemPrompt == "" && p.ExtensionBundle == "" &&
-		len(p.Planner) == 0 && len(p.PromptPolicy) == 0
-}
-
-func profilePositiveInt(values map[string]any, key string) (int, bool) {
-	v, exists := values[key]
-	if !exists {
-		return 0, false
-	}
-	switch n := v.(type) {
-	case int:
-		return n, n > 0 && n <= 10000
-	case float64:
-		i := int(n)
-		return i, n > 0 && n <= 10000 && float64(i) == n
-	}
-	return 0, false
+		p.Planner == PlannerConfig{} && p.PromptPolicy == PromptConfig{}
 }
 
 // ResultStore is intentionally separate from the event/snapshot Store. It
@@ -413,6 +501,16 @@ func (h *Harness) Doctor(ctx context.Context) DoctorReport {
 func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	if h == nil {
 		return RunResult{}, Ef(KindConfig, "harness.run", "Harness 为空", nil)
+	}
+	// 配置校验在**一切副作用之前**，包括跨进程锁：`locker.Lock` 会写
+	// `<StoreDir>/run.lock`。校验是纯函数，没有理由让一份写错的配置先落下
+	// 副作用再被拒绝。
+	//
+	// State 显式置 RunFailed：State 的契约是「Run 返回了错误，State 就必是
+	// failed 或 cancelled」——留空串会让调用方退回解析错误字符串，而 errors.go
+	// 明令禁止那么做。
+	if err := spec.Validate(); err != nil {
+		return RunResult{State: RunFailed}, err
 	}
 	if h.locker == nil {
 		return RunResult{}, Ef(KindConfig, "harness.run", "缺少跨进程单运行锁", nil)
@@ -955,14 +1053,14 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 		} else {
 			dryRounds++
 		}
+		// 回落链：PolicySpec → profile.Planner → 内置默认。三级都是「0 = 没配」，
+		// 与 Validate 的约定一致（Validate 只拒越界值，不拒 0）。
 		threshold := spec.Policy.DryRoundsBeforeHint
 		if threshold <= 0 {
-			if n, ok := profilePositiveInt(spec.Profile.Planner, "dryRoundsBeforeHint"); ok {
-				threshold = n
-			}
+			threshold = spec.Profile.Planner.DryRoundsBeforeHint
 		}
 		if threshold <= 0 {
-			threshold = 2
+			threshold = DefaultDryRoundsBeforeHint
 		}
 		// 提示**每题最多一次**。HintAlways 也受这条守卫——v0.2 的文档写着
 		// 「每轮都提示」而代码里没有守卫，那会让提示额度被瞬间打光。

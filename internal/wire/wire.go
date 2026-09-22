@@ -293,8 +293,12 @@ func New(opts Options) (*Runner, error) {
 			// 取视图写盘。题目串行，因此「登记 → 落盘」之间不会插进别的题目。
 			graphs.register(ch.Code, graph)
 			renderer := &dag.Renderer{G: graph}
-			renderer.MaxFacts = profileLimit(profile.PromptPolicy, "maxFacts")
-			renderer.MaxNegative = profileLimit(profile.PromptPolicy, "maxNegative")
+			// 直接读 schema 字段。v0.5 之前这里走 profileLimit(map, key)——那是
+			// 与根包 profilePositiveInt 逐字重复的第二份实现，而两份都「取不到就
+			// 返回 0」，于是「键名对不对」在两边都无从判断。schema 化之后
+			// 0 的含义只有一个：没配，交给渲染层的回落默认值。
+			renderer.MaxFacts = profile.PromptPolicy.MaxFacts
+			renderer.MaxNegative = profile.PromptPolicy.MaxNegative
 			return dag.NewScheduler(graph), renderer
 		},
 		Graphs:  graphs,
@@ -358,25 +362,6 @@ func missingChecks(rep harness.DoctorReport) string {
 // `if h.results != nil`），于是每次运行都跑得好好的、却什么指标都没留下——
 // 而 stats 读的正是这些指标，表现为「跑了几十次，stats 说零次」。
 func optsResultsNil(rs harness.ResultStore) bool { return rs == nil }
-
-func profileLimit(values map[string]any, key string) int {
-	v, ok := values[key]
-	if !ok {
-		return 0
-	}
-	switch n := v.(type) {
-	case int:
-		if n > 0 && n <= 10000 {
-			return n
-		}
-	case float64:
-		i := int(n)
-		if n > 0 && n <= 10000 && float64(i) == n {
-			return i
-		}
-	}
-	return 0
-}
 
 // buildScenario 按名字造场景。返回值里的 *bridge.Client 只在 tsecbench 下非空，
 // 调用方负责在失败路径与 Close 时关掉它。
