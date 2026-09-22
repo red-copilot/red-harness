@@ -259,10 +259,15 @@ func New(opts Options) (*Runner, error) {
 		Results:  results,
 		Locker:   locker,
 		Gate:     func(ch harness.Challenge) harness.CandidateGate { return gate.NewGate(ch.Description) },
-		Planner:  func(ch harness.Challenge) harness.Planner { return dag.NewScheduler(dag.New(ch)) },
-		Renderer: func(ch harness.Challenge) harness.Renderer { return &dag.Renderer{G: dag.New(ch)} },
-		Profile:  profile,
-		Now:      opts.Now,
+		SolverWithProfile: func(ch harness.Challenge, profile harness.SolverProfile) (harness.Planner, harness.Renderer) {
+			graph := dag.New(ch)
+			renderer := &dag.Renderer{G: graph}
+			renderer.MaxFacts = profileLimit(profile.PromptPolicy, "maxFacts")
+			renderer.MaxNegative = profileLimit(profile.PromptPolicy, "maxNegative")
+			return dag.NewScheduler(graph), renderer
+		},
+		Profile: profile,
+		Now:     opts.Now,
 	})
 	if err != nil {
 		return fail(err)
@@ -321,6 +326,25 @@ func missingChecks(rep harness.DoctorReport) string {
 // `if h.results != nil`），于是每次运行都跑得好好的、却什么指标都没留下——
 // 而 stats 读的正是这些指标，表现为「跑了几十次，stats 说零次」。
 func optsResultsNil(rs harness.ResultStore) bool { return rs == nil }
+
+func profileLimit(values map[string]any, key string) int {
+	v, ok := values[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		if n > 0 && n <= 10000 {
+			return n
+		}
+	case float64:
+		i := int(n)
+		if n > 0 && n <= 10000 && float64(i) == n {
+			return i
+		}
+	}
+	return 0
+}
 
 // buildScenario 按名字造场景。返回值里的 *bridge.Client 只在 tsecbench 下非空，
 // 调用方负责在失败路径与 Close 时关掉它。
@@ -459,7 +483,9 @@ func (r *Runner) resolve(spec harness.RunSpec) harness.RunSpec {
 	spec.Executor = harness.ExecutorSpec{Image: sb.Image, CPUs: sb.CPUs, MemoryMB: sb.MemoryMB,
 		PidsLimit: sb.PidsLimit, ReadOnly: true}
 	spec.StoreDir, spec.ResultDir = r.storeDir, r.resultDir
-	spec.Profile = r.profile()
+	if spec.Profile.Empty() {
+		spec.Profile = r.profile()
+	}
 	return spec
 }
 

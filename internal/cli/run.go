@@ -130,6 +130,7 @@ func (f *runFlags) spec() harness.RunSpec {
 			HomeDir:    f.homeDir,
 		},
 		Budget:     f.budget(),
+		Sandbox:    harness.SandboxSpec{Image: f.image},
 		HintPolicy: f.hint,
 		Submit:     f.submit,
 		StoreDir:   f.storeDir(),

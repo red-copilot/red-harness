@@ -126,6 +126,10 @@ func (a *app) stats(args []string) error {
 // 所以 Runs 必须先出现，读者才能自己判断后面的数字该不该信。
 func printStats(w io.Writer, rep harness.StatsReport, q harness.StatsQuery) {
 	fmt.Fprintf(w, "运行数：%d（已完成 %d，完成率 %s）\n", rep.Runs, rep.Completed, percent(rep.CompletionRate, rep.Runs))
+	// 题级口径是主研究指标（见 store.Stats 的注释）：run 级数字会被「同一道
+	// 题跑了多次」稀释，而这两个数才是被比较的对象。分母为 0 时同样打「无样本」，
+	// 不能把「没样本」说成「0%」。
+	fmt.Fprintf(w, "题目数：%d（已解 %d，通过率 %s）\n", rep.Challenges, rep.SolvedChallenges, percent(rep.ChallengeCompletionRate, rep.Challenges))
 	fmt.Fprintf(w, "确认 flag：%d / 起跑剩余 %d\n", rep.ConfirmedFlags, rep.RemainingAtStart)
 	if rep.RemainingAtStart > 0 {
 		fmt.Fprintf(w, "召回率：%.1f%%（%d/%d）\n",

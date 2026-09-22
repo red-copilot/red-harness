@@ -423,7 +423,7 @@ func TestRunWiredMapsFlagsToRunSpec(t *testing.T) {
 
 	args := []string{
 		"run", "--scenario", "fake", "--targets", "demo-1, demo-2",
-		"--store", "/tmp/rh", "--provider", "fake-provider", "--model", "fake-model",
+		"--store", "/tmp/rh", "--provider", "fake-provider", "--model", "fake-model", "--image", "test-runner:v1",
 		"--budget-rounds", "7", "--budget-turns", "99", "--budget-cost", "1.5",
 		"--hint", harness.HintAlways, "--submit=false",
 	}
@@ -448,6 +448,9 @@ func TestRunWiredMapsFlagsToRunSpec(t *testing.T) {
 	}
 	if spec.Agent.Provider != "fake-provider" || spec.Agent.Model != "fake-model" {
 		t.Errorf("Agent = %+v", spec.Agent)
+	}
+	if spec.Sandbox.Image != "test-runner:v1" {
+		t.Errorf("Sandbox.Image = %q", spec.Sandbox.Image)
 	}
 	if spec.Budget.MaxRounds != 7 || spec.Budget.MaxTurns != 99 || spec.Budget.MaxCostUSD != 1.5 {
 		t.Errorf("Budget = %+v", spec.Budget)

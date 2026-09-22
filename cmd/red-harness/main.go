@@ -54,6 +54,7 @@ func newPorts(storeDir string, spec harness.RunSpec, deploy cli.DeployOptions) (
 			SessionDir: spec.Agent.SessionDir,
 			HomeDir:    spec.Agent.HomeDir,
 		},
+		Sandbox: wire.SandboxOptions{Image: spec.Sandbox.Image},
 		Run: wire.RunOptions{
 			Targets:    spec.Targets,
 			Budget:     spec.Budget,
