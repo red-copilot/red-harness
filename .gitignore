@@ -15,3 +15,6 @@ node_modules/
 .pi-sessions/
 .pi-home/
 .claude/worktrees/
+
+# VPN/靶场连接配置（含客户端私钥）——绝不入库
+*.ovpn
