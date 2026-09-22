@@ -874,5 +874,13 @@ func (s *dagGraphSaver) SaveGraph(ctx context.Context, runID harness.RunID, ch h
 	if err := view.PutGraph(blob); err != nil {
 		return fmt.Errorf("%w: %v", harness.ErrGraphWrite, err)
 	}
+	// 人可读导出与图并排落同一处，从**刚落盘的那份真源**派生。`dag.Mermaid`
+	// 自己也从 document() 渲染，双保险地保证导出里不会有答案明文。
+	//
+	// 失败单列一档（export），不与「图没落盘」（write）混用：两者对复盘的人意味着
+	// 完全不同的处境——前者是「有图，只是没画出来」，后者是「图根本没留下」。
+	if err := view.PutGraphExport([]byte(dag.Mermaid(graph))); err != nil {
+		return fmt.Errorf("%w: %v", harness.ErrGraphExport, err)
+	}
 	return nil
 }

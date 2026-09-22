@@ -9,6 +9,7 @@
 //	<StoreDir>/runs/<runID>/
 //	├── run.json       0600  快照
 //	├── graph.json     0600  DAG（store 只透传 []byte，不理解内容）
+//	├── graph.mmd      0600  DAG 的人可读导出（mermaid），与 graph.json 同权限
 //	├── events.jsonl   0600  领域事件，每行一个 DomainEvent
 //	├── private/       0700
 //	│   ├── candidates.jsonl  0600  候选明文账本
@@ -55,8 +56,11 @@ const (
 	runsDirName      = "runs"
 	snapshotFileName = "run.json"
 	graphFileName    = "graph.json"
-	eventsFileName   = "events.jsonl"
-	privateDirName   = "private"
+	// graphExportFileName 是图的人可读导出（mermaid），与 graph.json 并排。
+	// 它与图同一个权限：里面有凭证事实与目标地址，只是**形状**更适合人读。
+	graphExportFileName = "graph.mmd"
+	eventsFileName      = "events.jsonl"
+	privateDirName      = "private"
 	// candidatesFileName 是候选明文账本。
 	candidatesFileName = "candidates.jsonl"
 	evidenceDirName    = "evidence"
@@ -503,6 +507,33 @@ func (s *FileStore) SetSnapshotHook(fn func() error) { s.snapshotHook = fn }
 
 func (s *FileStore) snapshotPath() string { return filepath.Join(s.dir, snapshotFileName) }
 func (s *FileStore) graphPath() string    { return filepath.Join(s.dir, graphFileName) }
+func (s *FileStore) graphExportPath() string {
+	return filepath.Join(s.dir, graphExportFileName)
+}
+
+// PutGraphExport 写图的人可读导出（mermaid），与 graph.json 并排、同权限。
+//
+// **为什么由 store 写而不是让装配层自己 os.WriteFile**：权限与原子性只有这一处
+// 定义。绕过它自己写，文件权限会落到进程的 umask（通常是 0644），而这份导出里有
+// 凭证事实与目标地址——`dag.Graph.Save` 的注释专门为这个理由把权限定在 0600。
+//
+// 载荷对 store 依然是不透明的：它不理解 mermaid，只负责路径、权限与原子性
+// （与 PutGraph 同一条纪律）。
+func (s *FileStore) PutGraphExport(blob []byte) error {
+	if s.runID == "" {
+		return &harness.Error{
+			Kind: harness.KindConfig, Op: "store.put_graph_export",
+			Msg: "根句柄不能写图导出：先用 ForRun 取运行视图",
+		}
+	}
+	if err := writeFileAtomic(s.graphExportPath(), blob, privatePerm); err != nil {
+		return &harness.Error{
+			Kind: harness.KindPersistence, Op: "store.put_graph_export", RunID: s.runID,
+			Msg: "写图导出失败", Err: err,
+		}
+	}
+	return nil
+}
 
 // validRunID 校验 RunID 能安全地当**单个目录名**用。
 //

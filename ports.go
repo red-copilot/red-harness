@@ -383,8 +383,12 @@ type GraphStore interface {
 var (
 	// ErrGraphMarshal 表示图没能序列化（擦洗/编码阶段）。
 	ErrGraphMarshal = errors.New("图序列化失败")
-	// ErrGraphWrite 表示图没能写出去（落盘阶段）。
+	// ErrGraphWrite 表示图没能写出去（落盘阶段）。**它专指机器读的那份
+	// graph.json**——用它表示「人可读导出没写出来」会让人以为图根本没落盘。
 	ErrGraphWrite = errors.New("图落盘失败")
+	// ErrGraphExport 表示人可读导出（mermaid）没写出来，而图本身已经落盘。
+	// 单列一档就是为了让公开指标能区分「没有图」与「有图但没导出」。
+	ErrGraphExport = errors.New("图导出失败")
 )
 
 // GraphSaver 把某次运行里某道题的 DAG 落盘。

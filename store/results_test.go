@@ -123,8 +123,8 @@ func TestGraphSaveFailuresUseTheirOwnWhitelist(t *testing.T) {
 		Challenge: harness.Challenge{Code: "fake"},
 		Outcome: harness.OutcomeView{
 			Reason: harness.ReasonSolved,
-			// 两个合法枚举 + 一个白名单外的值 + 一个明文 canary。
-			GraphSaveFailures: []string{"write", "marshal", "boom", canaryFlag},
+			// 三个合法枚举 + 一个白名单外的值 + 一个明文 canary。
+			GraphSaveFailures: []string{"write", "marshal", "export", "boom", canaryFlag},
 		},
 	}}}
 	if err := rs.Save(context.Background(), run); err != nil {
@@ -142,15 +142,15 @@ func TestGraphSaveFailuresUseTheirOwnWhitelist(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := p.Challenges[0].GraphSaveFailures
-	if len(got) != 2 || got[0] != "write" || got[1] != "marshal" {
-		t.Fatalf("graphSaveFailures = %v，期望恰好 [write marshal]（白名单外的值必须被丢弃）", got)
+	if len(got) != 3 || got[0] != "write" || got[1] != "marshal" || got[2] != "export" {
+		t.Fatalf("graphSaveFailures = %v，期望恰好 [write marshal export]（白名单外的值必须被丢弃）", got)
 	}
 	// 走一轮往返：公开结构里的值要能读回 OutcomeView（否则 stats 与后续分析看不见）。
 	back, err := rs.Get(context.Background(), "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(back.Challenges) != 1 || len(back.Challenges[0].Outcome.GraphSaveFailures) != 2 {
+	if len(back.Challenges) != 1 || len(back.Challenges[0].Outcome.GraphSaveFailures) != 3 {
 		t.Fatalf("往返后 graphSaveFailures 丢了: %+v", back.Challenges)
 	}
 }

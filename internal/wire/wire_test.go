@@ -254,6 +254,26 @@ func TestDagGraphSaverWritesUnderStoreDir(t *testing.T) {
 	if left != 0 {
 		t.Errorf("落盘后登记项应清空，还剩 %d 条", left)
 	}
+
+	// 人可读导出与图并排，同权限。它是这条链路**唯一**能被人直接看的东西——
+	// 只落 graph.json 而没人画得出来，等于图还在但复盘仍然做不了。
+	mmd, err := os.ReadFile(filepath.Join(dir, "runs", string(runID), "graph.mmd"))
+	if err != nil {
+		t.Fatalf("人可读导出没有落盘: %v", err)
+	}
+	if !strings.HasPrefix(string(mmd), "flowchart TD") {
+		t.Errorf("导出不是一份 mermaid 文档:\n%s", mmd)
+	}
+	if !strings.Contains(string(mmd), "nginx/1.18.0") {
+		t.Errorf("导出里没有图里的事实:\n%s", mmd)
+	}
+	stMmd, err := os.Stat(filepath.Join(dir, "runs", string(runID), "graph.mmd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := stMmd.Mode().Perm(); perm != 0o600 {
+		t.Errorf("graph.mmd 权限 = %o，期望 600（它与 graph.json 同级，含凭证事实与目标地址）", perm)
+	}
 }
 
 // TestDagGraphSaverScrubsPlaintextOnWrite：答案明文不得顺着图落盘出去。

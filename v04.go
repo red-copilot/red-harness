@@ -372,10 +372,14 @@ func graphSaverDetail(h *Harness) string {
 // 为什么要这一步：公开结果里**不能**出现原始错误文本（可能带路径、目标地址、
 // 平台响应片段）。原始错误仍在 err 链上（它不参与序列化），供调用方查日志。
 func graphSaveStage(err error) string {
-	if errors.Is(err, ErrGraphWrite) {
+	switch {
+	case errors.Is(err, ErrGraphExport):
+		return "export"
+	case errors.Is(err, ErrGraphWrite):
 		return "write"
+	default:
+		return "marshal"
 	}
-	return "marshal"
 }
 
 func (h *Harness) Doctor(ctx context.Context) DoctorReport {

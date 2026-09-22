@@ -177,11 +177,14 @@ func sanitizeCleanupFailures(failures []string) []string {
 // agent/sandbox/scenario，把 "write" 塞进去会被**静默丢弃**——于是账记了但
 // 公开面看不见，等于没记。两份白名单各自对应各自的值域，混用就是又一次
 // 「失败被静默吞掉」。
+//
+// 三档对应三种不同的处境，不能合并：marshal=图没序列化出来，
+// write=图根本没落盘，export=图在盘上但没导出成人可读的 mermaid。
 func sanitizeGraphSaveFailures(failures []string) []string {
 	var out []string
 	for _, failure := range failures {
 		switch failure {
-		case "marshal", "write":
+		case "marshal", "write", "export":
 			out = append(out, failure)
 		}
 	}
