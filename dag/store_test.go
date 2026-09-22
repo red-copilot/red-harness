@@ -485,13 +485,15 @@ func TestJSONMarshalRoundTrip(t *testing.T) {
 //  2. 普通事实的 Raw——工具输出的原文摘录；
 //  3. 意图目标——agent 自己的散文（AddIntent 会净化信封形态，但裸串形态的残留
 //     只能靠落盘口兜底）。
-func TestRawScrubbedOnSave(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "dag.json")
-	g := newTestGraph(t)
-	const secret = "flag{plaintext_must_not_hit_disk}"
-	const fragment = "plaintext_must_not_hit_disk"
-
+//
+// plaintextCorpus 造一份三种来源都带 flag 明文的语料，并断言前置条件成立。
+//
+// 三个来源各有对应的事故：被拒审计（命中答案形状的原文）、Raw（工具输出里带
+// flag 的原文摘录）、Goal（散文里嵌的明文）。两个「图 → 字节」出口
+// （Save 与 MarshalJSON）都必须洗掉这三处，所以语料只定义一次——
+// 语料分了家，两条出口的严格程度就会跟着分家。
+func plaintextCorpus(t *testing.T, g *Graph, secret, fragment string) {
+	t.Helper()
 	// 1) 一条会被**拒收**的答案形状事实：拒收记录里会带上内容原文。
 	if _, err := g.AddFact(Node{Kind: NodeFact, FactKind: FactArtifact,
 		Content: secret, Source: "bash: cat /tmp/f", ToolCallID: "c1"}); err == nil {
@@ -510,7 +512,10 @@ func TestRawScrubbedOnSave(t *testing.T) {
 		t.Fatalf("意图应能入库: %v", err)
 	}
 
-	// 前置条件：Raw 里确实有明文（否则下面的断言可能是在空转）
+	// 前置条件：三条来源里确实有明文（否则下面的断言可能是在空转）
+	if len(g.rejected) == 0 || !strings.Contains(g.rejected[0].Content, fragment) {
+		t.Fatal("拒收审计里没有明文（前置条件不成立，第 1 条来源会空转）")
+	}
 	hasRaw := false
 	for _, n := range g.Facts("") {
 		if strings.Contains(n.Raw, secret) {
@@ -520,6 +525,16 @@ func TestRawScrubbedOnSave(t *testing.T) {
 	if !hasRaw {
 		t.Fatal("语料没覆盖到 Raw 里的明文（前置条件不成立，测试会空转）")
 	}
+}
+
+func TestRawScrubbedOnSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dag.json")
+	g := newTestGraph(t)
+	const secret = "flag{plaintext_must_not_hit_disk}"
+	const fragment = "plaintext_must_not_hit_disk"
+
+	plaintextCorpus(t, g, secret, fragment)
 
 	if err := g.Save(path); err != nil {
 		t.Fatal(err)
@@ -540,5 +555,87 @@ func TestRawScrubbedOnSave(t *testing.T) {
 	}
 	if errs := back.Validate(); len(errs) != 0 {
 		t.Errorf("载回后不变量校验失败: %v", errs)
+	}
+}
+
+// TestMarshalJSONScrubsLikeSave 钉住「图 → 字节」的两条出口擦洗范围一致。
+//
+// 这条测试是补一个真实缺口：MarshalJSON 曾经自己拼了一份 document，漏掉了
+// `Rejected[].Content` 的擦洗——而拒收审计里装的正是**命中答案形状的原文**
+// （见 reject 与 ErrAnswerShaped），于是 `json.Marshal(g)` 会把 flag 明文原样
+// 写出去。Save 那条路一直是对的，所以既有的两条明文测试全绿，缺口看不见。
+//
+// 今天没有生产调用方 marshal 整张图，所以它不是线上泄漏；但任何「把图落盘」
+// 的新功能都会走这条最自然的路（json.Marshal → 字节 → 存储），所以它必须先钉住。
+func TestMarshalJSONScrubsLikeSave(t *testing.T) {
+	g := newTestGraph(t)
+	const secret = "flag{plaintext_must_not_hit_disk}"
+	const fragment = "plaintext_must_not_hit_disk"
+
+	plaintextCorpus(t, g, secret, fragment)
+
+	b, err := json.Marshal(g)
+	if err != nil {
+		t.Fatalf("MarshalJSON 失败: %v", err)
+	}
+	blob := string(b)
+	if strings.Contains(blob, secret) || strings.Contains(blob, fragment) {
+		t.Fatalf("flag 明文不得从 MarshalJSON 出去（它必须与 Save 同一份擦洗）:\n%s", blob)
+	}
+	// 指纹要在——与 Save 的判据同一条，否则「两条出口一致」只证明了「都不输出」。
+	if !strings.Contains(blob, FlagFingerprint(secret)) {
+		t.Errorf("明文应被替换为指纹 %s", FlagFingerprint(secret))
+	}
+	// 擦洗不能把图弄坏：反序列化回来仍能过不变量复查。
+	var back Graph
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("UnmarshalJSON 失败（擦洗把图弄坏了）: %v", err)
+	}
+	if errs := back.Validate(); len(errs) != 0 {
+		t.Errorf("载回后不变量校验失败: %v", errs)
+	}
+}
+
+// TestSaveAndMarshalJSONAgree 钉住两条出口的擦洗范围由同一处定义。
+//
+// 只断言「各自都不含明文」是不够的：两份实现可以都擦掉明文、却在别的字段上
+// 分家（Rejected 是刚补上的那一处，次一处还不知道在哪）。这里改比对**同样的
+// 结构**——除 savedAt 外逐字节相同，任何一处再分家都会当场红。
+func TestSaveAndMarshalJSONAgree(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dag.json")
+	g := newTestGraph(t)
+	const secret = "flag{plaintext_must_not_hit_disk}"
+	const fragment = "plaintext_must_not_hit_disk"
+	plaintextCorpus(t, g, secret, fragment)
+
+	if err := g.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marshalled, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Save 用 MarshalIndent、MarshalJSON 用紧凑版：比对规范化后的 JSON 结构。
+	var a, b any
+	if err := json.Unmarshal(saved, &a); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(marshalled, &b); err != nil {
+		t.Fatal(err)
+	}
+	// savedAt 由时钟生成，两次调用必然不同，不参与比对。
+	for _, m := range []map[string]any{a.(map[string]any), b.(map[string]any)} {
+		delete(m, "savedAt")
+	}
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	if string(ja) != string(jb) {
+		t.Errorf("Save 与 MarshalJSON 的落盘结构不一致（擦洗范围又分家了）:\nSave: %s\nMarshal: %s", ja, jb)
 	}
 }

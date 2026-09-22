@@ -36,6 +36,33 @@ type document struct {
 	Rejected []Rejection `json:"rejected,omitempty"`
 }
 
+// document 把当前图折成落盘结构。
+//
+// **Save 与 MarshalJSON 都只走它**：擦洗范围只能有一处定义。这两条出口曾经各拼
+// 一份 document，而 MarshalJSON 那份漏了 `Rejected[].Content` 的擦洗——那条路
+// 上 `json.Marshal(g)` 会把答案明文原样写出去（被拒审计里装的正是命中答案形状的
+// 原文，见 reject 与 ErrAnswerShaped），而两条既有的明文测试都只覆盖 Save。
+// 一份定义 + 一条同时钉住两个出口的测试，才是这类漂移的对策。
+func (g *Graph) document() document {
+	doc := document{
+		Schema:  SchemaVersion,
+		Harness: harness.Version,
+		SavedAt: g.now().UTC().Format(time.RFC3339),
+		Code:    g.Code, Category: g.Category, Shape: g.Shape,
+		Round: g.Round, Seq: g.seq,
+		Edges: g.edges,
+	}
+	for _, id := range g.order {
+		doc.Nodes = append(doc.Nodes, g.scrubNode(g.nodes[id]))
+	}
+	for _, r := range g.rejected {
+		rc := r
+		rc.Content = g.scrub(rc.Content)
+		doc.Rejected = append(doc.Rejected, rc)
+	}
+	return doc
+}
+
 // Save 把图落盘（JSON + schema 版本）。
 //
 // 两个实现细节各有对应的事故：
@@ -54,26 +81,13 @@ type document struct {
 // 审计、以及抽取器留下的取证片段（Raw）。Raw 最容易漏——它是工具输出的原文摘录，
 // 「agent 把 flag 写进文件再 cat 出来」时，flag 就在 Raw 里，而它不参与任何判定，
 // 很容易被当成「无所谓的一小段」放过。
+//
+// 擦洗本身在 document() 里，两个出口共用。
 func (g *Graph) Save(path string) error {
 	if path == "" {
 		return errors.New("dag: Save 路径为空")
 	}
-	doc := document{
-		Schema:  SchemaVersion,
-		Harness: harness.Version,
-		SavedAt: g.now().UTC().Format(time.RFC3339),
-		Code:    g.Code, Category: g.Category, Shape: g.Shape,
-		Round: g.Round, Seq: g.seq,
-		Edges: g.edges,
-	}
-	for _, id := range g.order {
-		doc.Nodes = append(doc.Nodes, g.scrubNode(g.nodes[id]))
-	}
-	for _, r := range g.rejected {
-		rc := r
-		rc.Content = g.scrub(rc.Content)
-		doc.Rejected = append(doc.Rejected, rc)
-	}
+	doc := g.document()
 
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -348,17 +362,12 @@ func normalizeStates(doc *document) {
 // MarshalJSON 不导出内部索引（它们是派生数据，落盘没有意义且会不同步）。
 // 这里只是把 Graph 的直接序列化指向 document，防止有人直接 json.Marshal(g)
 // 得到一个缺一半字段的对象。
+//
+// ⚠️ **它必须与 Save 走同一个 document()**：这条出口曾经自己拼了一份 document，
+// 漏掉 `Rejected[].Content` 的擦洗 ⇒ `json.Marshal(g)` 会把命中答案形状的原文
+// 原样写出去。任何「图 → 字节」的新出口都必须复用 document()，不要另拼一份。
 func (g *Graph) MarshalJSON() ([]byte, error) {
-	doc := document{
-		Schema: SchemaVersion, Harness: harness.Version,
-		SavedAt: g.now().UTC().Format(time.RFC3339),
-		Code:    g.Code, Category: g.Category, Shape: g.Shape,
-		Round: g.Round, Seq: g.seq, Edges: g.edges, Rejected: g.rejected,
-	}
-	for _, id := range g.order {
-		doc.Nodes = append(doc.Nodes, g.scrubNode(g.nodes[id]))
-	}
-	return json.Marshal(doc)
+	return json.Marshal(g.document())
 }
 
 // UnmarshalJSON 让 json.Unmarshal 走与 Load 相同的迁移 + 索引重建路径，
