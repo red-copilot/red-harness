@@ -1,0 +1,6 @@
+# `go build ./...` 在「包路径就是 module 根且是 main 包」时会**落下可执行文件**
+# （名字取自 module 路径的最后一段）。它是构建产物，不是源码。
+#
+# 一条 `go build -o /dev/null ./...` 就不会产生它，但 N0.1 的验收命令写的是
+# `go build ./...`——所以这里兜住，免得那个二进制被 `git add` 顺手带进仓库。
+/red-harness-external-check

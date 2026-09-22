@@ -17,7 +17,8 @@ import (
 //
 //  1. 根包零内部依赖（不许 import 任何子包）；
 //  2. 实现包两两互不 import（executor 不认识 scenario，scenario 不认识 dag）；
-//  3. 只有 internal/wire 同时 import 多个实现包。
+//  3. 同时 import 多个实现包的**恰好只有一个**（今天它是 `local/`；迁移窗口内
+//     `internal/wire` 是它的薄转发层，但转发层自己也不 import 实现包）。
 //
 // 它们此前**只写在文档里**。文档不会因为一次 `import` 而变红，所以漂移的代价是
 // 事后有人读注释才发现——而这两条恰恰是「一个子包 = 一个 agent、波次内文件不相交」
@@ -41,6 +42,23 @@ var implPkgs = map[string]bool{
 }
 
 var sharedLeaves = map[string]bool{"answer": true, "legacy": true}
+
+// assemblyPkgs 是**允许**「同时 import ≥2 个实现包」的那一个装配点。
+//
+// 为什么是集合而不是一个字面量：N0.1 把装配实现从 `internal/wire` 搬到了
+// `local/`（搬家的理由见 `local/wire.go` 的包文档：Go 的 internal 可见性规则
+// 让 `internal/wire` 只能被本模块 import，于是仓库内的示例证明不了「外部可用」），
+// 而 `internal/wire` 作为薄转发层还要留一轮迁移窗口。于是「装配点在哪」在迁移
+// 期间有两个合法取值——但这条断言要钉住的从来不是某个路径字符串，而是
+// **「装配点只有一个」**：多一个就意味着「谁把 X 交给 Y」这件事有两个地方会做，
+// 而两个地方迟早会不一致。
+//
+// ⚠️ 两个名字都**不**属于 implPkgs，也**不**属于 sharedLeaves：前者会让
+// `TestLayeringImplementationPackagesAreDisjoint` 把装配点自己的 import 当成
+// 违规（放行它正是本条断言的内容），后者会让「没有实现包 import 它」这件事
+// 变成一条没人检查的假设。迁移窗口结束、`internal/wire` 删掉之后，这里应当
+// 收紧回单个 `local`（那是一次**收紧**，不是等价改写）。
+var assemblyPkgs = map[string]bool{"local": true, "internal/wire": true}
 
 // pkgImports 扫描 moduleRoot 下所有包的生产代码（跳过 _test.go），返回
 // 「包相对路径 → 它 import 的本模块包路径集合」。
@@ -160,7 +178,9 @@ func TestLayeringOnlyWireAssemblesMultipleImplPackages(t *testing.T) {
 		}
 	}
 	sort.Strings(multi)
-	if len(multi) != 1 || multi[0] != "internal/wire" {
-		t.Fatalf("同时 import ≥2 个实现包的包 = %v，期望恰好只有 internal/wire", multi)
+	// **恰好一个**：不是「至少一个」，也不是「都在白名单里就行」。两个装配点
+	// 意味着同一份接线有两份实现，而它们只会在某次运行的行为差异里被发现。
+	if len(multi) != 1 || !assemblyPkgs[multi[0]] {
+		t.Fatalf("同时 import ≥2 个实现包的包 = %v，期望恰好只有 local 或 internal/wire 中的一个", multi)
 	}
 }
