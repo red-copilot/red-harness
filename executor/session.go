@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -25,6 +26,22 @@ func (d *Docker) NewSession(ctx context.Context, spec harness.SandboxSpec) (harn
 	if strings.TrimSpace(spec.Workdir) == "" {
 		return nil, harness.Ef(harness.KindConfig, "sandbox.session", "Workdir 不能为空", nil)
 	}
+	// SandboxSpec.Workdir 是**容器内**路径（见 v04.go 的字段说明与
+	// defaultSandboxWorkdir），下面要把它渲染成 `--workdir` 与一条 tmpfs。
+	// 所以校验强度对齐 planRun 对 ExecutorSpec.Workdir 的那两条：
+	//   - 相对路径会被 Docker 当成**具名卷**静默挂成一个空卷（不是报错，
+	//     而是「工作目录里什么都没有」，agent 的表现会诡异到无法归因）；
+	//   - 冒号会把 `-v src:dst` / `--tmpfs <path>:<opts>` 的语法拆坏
+	//     （Linux 上 `/tmp/a:b` 是**合法目录名**，Docker 不会报错）。
+	// 用 path.IsAbs 而不是 filepath.IsAbs：它是容器内路径，与宿主无关。
+	if !path.IsAbs(spec.Workdir) {
+		return nil, harness.Ef(harness.KindConfig, "sandbox.session",
+			fmt.Sprintf("SandboxSpec.Workdir 必须是容器内绝对路径，got %q（相对路径会被 Docker 当具名卷，静默挂成空卷）", spec.Workdir), nil)
+	}
+	if strings.Contains(spec.Workdir, ":") {
+		return nil, harness.Ef(harness.KindConfig, "sandbox.session",
+			fmt.Sprintf("SandboxSpec.Workdir 不得含冒号（会把挂载/tmpfs 的语法拆坏），got %q", spec.Workdir), nil)
+	}
 	if spec.ProfileDir != "" {
 		if !filepath.IsAbs(spec.ProfileDir) || strings.Contains(spec.ProfileDir, ":") {
 			return nil, harness.Ef(harness.KindConfig, "sandbox.session", "ProfileDir 必须是绝对路径且不得含冒号", nil)
@@ -37,23 +54,40 @@ func (d *Docker) NewSession(ctx context.Context, spec harness.SandboxSpec) (harn
 		RunID:  spec.RunID,
 		Target: spec.Target,
 		Executor: harness.ExecutorSpec{
-			Image: spec.Image, Workdir: "/work", CPUs: spec.CPUs,
+			// Workdir 在这里是**容器内**路径（ExecutorSpec.Workdir，见 spec.go
+			// 的 planRun：它进 WorkdirCtr，进而进 --workdir、HOME 与 tmpfs）。
+			// 调用方指定的工作目录必须一路传到这里，否则 agent 的 cwd 会落在
+			// 只读 rootfs 上——Docker 对只读 rootfs 下不存在的 workdir 是**宽容**的。
+			Image: spec.Image, Workdir: spec.Workdir, CPUs: spec.CPUs,
 			MemoryMB: spec.MemoryMB, PidsLimit: spec.PidsLimit,
 			// The allowlist comes from the authorized platform's Target.Addrs
 			// (resolved by the harness in Run), never from the caller.
 			ReadOnly: true, AllowHosts: append([]string(nil), spec.Target.Addrs...), Env: cloneEnv(spec.Env),
 		},
-		Workdir: spec.Workdir,
+		// Workdir 是**宿主**侧字段（ExecSpec.Workdir，语义是「唯一允许挂进容器
+		// 的宿主目录」）。v0.4 一个宿主目录都不挂，所以这里刻意**不**把容器内
+		// 路径塞进宿主字段——那会让 planRun 的三条宿主路径校验（绝对、非 /、
+		// 非冒号）变成一次空转：校验的是一串根本不是宿主路径的字符串。只填一个
+		// 恒定占位值，让「v0.4 不挂任何宿主目录」这件事在代码里是显式的。
+		Workdir: sessionPlaceholderHostDir,
 	}
 	p, err := planRun(execSpec, d.cfg)
 	if err != nil {
 		return nil, err
 	}
-	// v0.4 never bind-mounts a writable host work directory. /work is a
+	// v0.4 never bind-mounts a writable host work directory. <Workdir> is a
 	// bounded tmpfs owned by this container; only the optional solver profile is
 	// mounted from the trusted host and it is read-only.
 	p.Mounts = nil
-	p.ExtraTmpfs = []string{"/work:rw,nosuid,nodev,size=64m,mode=1777"}
+	// WorkdirHost 是宿主路径字段，在 v0.4 下没有任何消费者（挂载面已清空）。
+	// 清成空串是有意的**惰性**取值：真要有人拿它去挂载，会得到一个明确的
+	// Docker 报错，而不是静默挂上一个空卷。
+	p.WorkdirHost = ""
+	// tmpfs 的路径**必须跟着 spec.Workdir 走**：工作目录不是 /work 时，固定写
+	// /work 会让 tmpfs 落在一个不存在的目录上，而 agent 真正的工作目录在只读
+	// rootfs 下没有任何可写区。size= 上限是「有界」的核心（无上限的 tmpfs 等于
+	// 回到 307 GB 事故的起点）。
+	p.ExtraTmpfs = []string{spec.Workdir + ":rw,nosuid,nodev,size=64m,mode=1777"}
 	if spec.ProfileDir != "" {
 		p.ReadonlyMounts = map[string]string{spec.ProfileDir: "/profile"}
 	}
@@ -87,6 +121,19 @@ func (d *Docker) NewSession(ctx context.Context, spec harness.SandboxSpec) (harn
 	}
 	return &dockerSession{docker: d, spec: spec, execSpec: execSpec, plan: p}, nil
 }
+
+// sessionPlaceholderHostDir 是 v0.4 下 planRun 的宿主工作目录占位值。
+//
+// 为什么需要它：planRun 的契约要求 ExecSpec.Workdir 是一个合法宿主绝对路径
+// （它的历史语义是「唯一允许挂进容器的宿主目录」，见 model.go），而 v0.4 一个
+// 宿主目录都不挂。传空会直接撞上 planRun 的 `ExecSpec.Workdir 为空` 校验；
+// 把**容器内**路径传进去则会让那几条宿主路径校验变成空转（校验的是一串根本
+// 不是宿主路径的字符串），而且一旦有人把 p.Mounts = nil 那行删掉，
+// `-v /work:/work` 会静默挂出一个空卷。用这个显式占位值，两种情况都能被看见：
+// 它不是一个「看起来像工作目录」的路径。
+//
+// 目录不需要存在：v0.4 不挂它，planRun 也只看字符串。
+const sessionPlaceholderHostDir = "/nonexistent/red-harness/v04-no-host-mount"
 
 type dockerSession struct {
 	docker   *Docker
