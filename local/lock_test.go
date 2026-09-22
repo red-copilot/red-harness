@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,19 @@ import (
 // 本文件只测锁的**可观察行为**，不测它的实现细节（fd、flock 参数）。
 // 每一条都对应一个真实事故形态，不是「为了覆盖率」。
 
+// lockTestName 是这些用例用的锁文件名。
+//
+// 命名规则（按 daemon 端点取指纹）与落点（`/run/lock/red-harness/`）**不在本文件
+// 里钉**：那两条是装配策略，由 TestDefaultLockIsKeyedByEndpoint 与 wire_test.go 的
+// 装配级用例负责。这里测的是 FileLock 本身，所以用一个不依赖任何策略的名字。
+const lockTestName = "run.lock"
+
+// lockTestPath 返回一个临时目录下的锁路径（每个用例各自一份）。
+func lockTestPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), lockTestName)
+}
+
 // TestFileLockMutualExclusion 钉「同一时刻只有一个持有者」。
 //
 // 为什么用两个**独立实例**而不是同一个实例重复 Lock：flock 的语义是「与打开
@@ -21,7 +35,7 @@ import (
 // 会各自 open 一次，得到两个互相冲突的描述符——这正是「两个进程」在单进程里的
 // 等价物。真实的跨进程互斥由 TestFileLockCrashDoesNotBlock 里的子进程覆盖。
 func TestFileLockMutualExclusion(t *testing.T) {
-	path := filepath.Join(t.TempDir(), runLockName)
+	path := lockTestPath(t)
 	a, b := NewFileLock(path), NewFileLock(path)
 
 	if err := a.Lock(context.Background()); err != nil {
@@ -51,7 +65,7 @@ func TestFileLockMutualExclusion(t *testing.T) {
 // 没有这条，`Lock` 一旦改成忙等就再也没人发现——而它挂在的是 Ctrl-C 的清理路径
 // 上（CLI 的 SIGINT 走 ctx 取消）。
 func TestFileLockCancelReturnsError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), runLockName)
+	path := lockTestPath(t)
 	held := NewFileLock(path)
 	if err := held.Lock(context.Background()); err != nil {
 		t.Fatalf("预置持有者失败: %v", err)
@@ -84,7 +98,7 @@ func TestFileLockCancelReturnsError(t *testing.T) {
 // 为什么这是硬要求：调用方会同时用 defer 与显式路径释放（装配失败路径也会放），
 // 第二次若报错，那个错误会把真正的失败原因盖掉。
 func TestFileLockUnlockIdempotent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), runLockName)
+	path := lockTestPath(t)
 	l := NewFileLock(path)
 	if err := l.Lock(context.Background()); err != nil {
 		t.Fatalf("Lock 失败: %v", err)
@@ -105,7 +119,7 @@ func TestFileLockUnlockIdempotent(t *testing.T) {
 // flock 下同一个描述符重复 LOCK_EX 是成功的；如果实现改成「先关再开」，第二次
 // Lock 会把第一次的锁放掉——那是个只在重入路径上出现的静默 bug。
 func TestFileLockSameInstanceRelockIsNoop(t *testing.T) {
-	path := filepath.Join(t.TempDir(), runLockName)
+	path := lockTestPath(t)
 	l := NewFileLock(path)
 	if err := l.Lock(context.Background()); err != nil {
 		t.Fatalf("首次 Lock 失败: %v", err)
@@ -145,7 +159,7 @@ func TestFileLockCrashDoesNotBlock(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, runLockName)
+	path := filepath.Join(dir, lockTestName)
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatalf("取测试可执行文件失败: %v", err)
@@ -185,4 +199,75 @@ func TestFileLockCrashDoesNotBlock(t *testing.T) {
 		t.Fatalf("崩溃残留的锁文件挡住了新进程（flock 的意义就是它不该挡）: %v", err)
 	}
 	_ = l.Unlock()
+}
+
+// TestDefaultLockIsKeyedByEndpoint 钉「缺省锁的落点与命名由 **daemon 端点**决定」。
+//
+// 这是 N0.2 的出口门：锁过去落在 `<StoreDir>/run.lock`，而 flock 绑的是 **inode**
+// 不是路径——`rm -rf` 掉旧 store（或换一个 `--store`）之后，同一个路径指向新
+// inode，正在跑的那次部署**被静默解锁**。所以「锁不能与它保护的数据住在一起」
+// 这条必须被两条断言同时钉住：落点不在 StoreDir 下（本用例），以及不同端点拿不同
+// 的文件（下面一条 + wire_test.go 的装配级用例）。
+func TestDefaultLockIsKeyedByEndpoint(t *testing.T) {
+	def := harness.DefaultDockerEndpoint()
+	// 默认端点的指纹是**常量**，所以默认部署下的锁文件名是确定的。这条断言的
+	// 价值不在「13c4025c 这个数」，而在于「它不随 StoreDir / cwd / 时间变」。
+	// 名字一变，正在跑的部署与即将启动的部署就会各锁一个文件（互斥静默失效）。
+	if got := runLockName(def); got != "run-13c4025c.lock" {
+		t.Errorf("默认端点的锁文件名 = %q，期望 run-13c4025c.lock", got)
+	}
+
+	fl, ok := defaultLock(def).(*FileLock)
+	if !ok {
+		t.Fatalf("缺省锁应当是 *FileLock，得到 %T", defaultLock(def))
+	}
+	if want := filepath.Join(DefaultLockDir, "run-13c4025c.lock"); fl.path != want {
+		t.Errorf("缺省锁落点 = %q，期望 %q", fl.path, want)
+	}
+	if strings.HasPrefix(fl.path, "/tmp/") {
+		t.Errorf("缺省锁不该落在任何临时目录下: %q", fl.path)
+	}
+
+	// 另一个**本地 socket** 是另一个 daemon：不同容器、不同网络、不同 iptables 表，
+	// 本就不该互斥。用同一个指纹会把它们串行化——那是把「作用域算错」换成另一个
+	// 方向的算错。
+	other, err := harness.ResolveDockerEndpoint(func(k string) string {
+		if k == "DOCKER_HOST" {
+			return "unix:///run/docker-alt.sock"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("解析备用端点失败: %v", err)
+	}
+	otherLock, _ := defaultLock(other).(*FileLock)
+	if otherLock.path == fl.path {
+		t.Fatalf("两个不同的 daemon 端点拿到了同一个锁文件 %q：互斥范围与资源范围不一致", fl.path)
+	}
+	// 反过来说：同一个端点必须拿到同一个文件（否则「同一时刻只有一个 run」不成立）。
+	if again, _ := defaultLock(def).(*FileLock); again.path != fl.path {
+		t.Errorf("同端点两次取锁得到不同路径: %q vs %q", again.path, fl.path)
+	}
+}
+
+// TestFileLockMkdirFailureIsPersistenceError 钉「锁目录建不出来时报错，**不兜底**」。
+//
+// 为什么必须有这条：`/run/lock` 在某些宿主上不可写（没以 root 跑、或宿主布局不同）。
+// 此时唯一正确的行为是**失败**——回落到 StoreDir 会让上面那条 inode 缺陷原样复活，
+// 而且只在失败路径上复活（正常路径看不出来），那是最难查的一类回归。
+// 判据用「父路径是一个普通文件」来构造 mkdir 失败：它稳定、不依赖权限位。
+func TestFileLockMkdirFailureIsPersistenceError(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := NewFileLock(filepath.Join(blocker, "run.lock"))
+	err := l.Lock(context.Background())
+	if err == nil {
+		t.Fatal("锁目录建不出来时 Lock 返回了 nil")
+	}
+	if !harness.IsKind(err, harness.KindPersistence) {
+		t.Fatalf("应当是落盘类错误（而不是「拿不到锁」的配置类），得到 %v", err)
+	}
 }

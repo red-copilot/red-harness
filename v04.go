@@ -99,14 +99,25 @@ type Sandbox interface {
 	// Reclaim removes the labelled leftovers of one specific run.
 	Reclaim(context.Context, RunID) error
 	// ReclaimStale removes every labelled container/network/rule whose run is
-	// **not** in live, and returns what it reclaimed.
+	// **not** in live, returning the full report: what was deleted, **and what was
+	// found but deliberately kept**.
 	//
 	// 为什么不能只用 Reclaim(新 runID)：新 run 的 ID 是刚生成的，宿主上不可能
 	// 有它的遗留——那次调用是空转，而**上次崩溃留下的**容器与网络会一直攒着。
 	// 每个孤儿 bridge 占一个网段，攒够之后新 run 连网络都建不出来（表现为
 	// 「起题失败」，而真因在几天前的崩溃现场）。所以启动前必须按 label 扫一遍，
 	// 只保留 live 里的。
-	ReclaimStale(ctx context.Context, live map[RunID]bool) ([]RunID, error)
+	//
+	// ⚠️ **报告必须上抛，Pending 不得再被丢弃**（N0.2 的中间态到此结束）：
+	// 「发现了但不该删」是一个判定结果，没有通道的判定等于没做——收错对象与
+	// 漏收对象在旧签名（只返回 `[]RunID`）下都会表现为「什么都没发生」。
+	// 调用方负责决定明细的去处：公开面只放计数（见 OutcomeView / RunResult），
+	// 明细（哪个 runID、哪种资源、为什么没删）是本机资源拓扑，只进私密面或日志。
+	//
+	// 实现方在**拒绝执行**（例如 owner 不可判定）时返回零值报告加错误：那一刻
+	// 连「哪些资源像我的」都还没看，凭空给出一份 Pending 会让调用方以为这是一次
+	// 已经做完的判定。
+	ReclaimStale(ctx context.Context, live map[RunID]bool) (ReclaimReport, error)
 }
 
 // SolverProfile is immutable run input. The bundle is mounted read-only by a
@@ -398,6 +409,17 @@ type RunResult struct {
 	Err       string
 	// Manifest 是本次运行**实际生效的配置与产物身份**。
 	Manifest RunManifest
+	// ReclaimedStale / PendingStale 是**启动前那次**遗留资源回收的两个计数。
+	//
+	// 只放计数：`Pending` 的明细（哪个 runID、哪种资源、为什么没删）是本机资源
+	// 拓扑，进了这份文件就等于把它拷进了会被转发、归档、贴工单的结果里。明细的
+	// 去处由 `Sandbox.ReclaimStale` 的调用方决定（私密面或日志）。
+	//
+	// 为什么计数必须上公开面：`Pending` 非空意味着宿主上躺着**归属无法证明**的
+	// 容器与网络——旧签名把这一整类判定丢掉了，于是「回收跑过了、什么都没删」
+	// 与「宿主上本来就没有孤儿」在结果里完全同形。
+	ReclaimedStale int
+	PendingStale   int
 }
 
 // RunManifest 是冻结下来的运行清单。
@@ -614,8 +636,8 @@ func NewHarness(opts HarnessOptions) (*Harness, error) {
 // 有没有图可看」的，缺席时要能一眼看出是「没接」而不是「接了没写出来」。
 // ⚠️ 这是**装配在位**的断言，不是「本次真的写出了图」的证明。
 //
-// 两者必须分开说：`dagGraphSaver` 在题目没登记过图时**静默返回 nil**（那不是
-// 失败，是「这一轮没有图」），所以「已接入」永远不蕴含「文件在盘上」。把装配
+// 两者必须分开说：`dagGraphSaver` 在题目没登记过图时返回 `GraphAbsent`
+// （那不是失败，是「这一题没有图」），所以「已接入」永远不蕴含「文件在盘上」。把装配
 // 当作产物来报，会让「图没写出来」变成一次看不见的缺失——而 open items 那套
 // 判据正是拿「有没有人看得见」当标准的。
 func graphSaverDetail(h *Harness) string {
@@ -657,36 +679,49 @@ func graphSaveStage(err error) string {
 	case errors.Is(err, ErrGraphMarshal):
 		return "marshal"
 	default:
-		return "unknown"
+		return graphStageUnknown
 	}
 }
 
+// graphStageUnknown 是阶段枚举里「不是本包的三种失败」的那一格。
+//
+// 它被两处引用：graphSaveStage 的 default，以及调用点给「实现方报了 GraphFailed
+// 却没带 err」补的那一格。写成常量而不是两处字面量，是因为它是**公开面**上的值
+// （进 GraphSaveFailures，随结果落盘），两处写不一致就会让同一个含义出现两个值。
+const graphStageUnknown = "unknown"
+
 // foldGraphState 把「图落盘走到哪一步」折成 GraphState 的四态之一。
 //
-// ⚠️ **过渡状态（本波）**：`GraphSaver.SaveGraph` 现在的签名只返回 `error`，于是
-// 它的 nil 同时承担「没有失败」与「有文件产生」两个意思——装配层那条「这一题没有
-// 登记过图」的正常分支同样返回 nil。所以本轮**无法**从返回值区分 saved 与 absent：
+// 签名切到四态直返之后（N0），它只剩两件事——**不再需要从 nil error 里猜
+// 「有没有文件产生」**，那一格由实现方如实回答（见 ports.go 的 GraphSaver）：
 //
-//	端口不在位（saver == nil）        ⇒ GraphDisabled（只由根包折算，见 ports.go）
-//	有失败阶段（failures 非空）        ⇒ GraphFailed，卡在哪由阶段枚举说明
-//	nil error，且不是上面两档         ⇒ **GraphAbsent**
+//	端口不在位（saver == nil）  ⇒ GraphDisabled
+//	有失败阶段（failures 非空）  ⇒ GraphFailed，卡在哪由阶段枚举说明
+//	其余                        ⇒ **照实现方返回的值**
 //
-// 最后一档是刻意的取舍：nil 只证明「没有报错」，**不证明有文件产生**。把它读成
-// GraphSaved 正是这个类型被引入时要消灭的那句话（「图没写出来被读成写了」），
-// 而这里没有任何东西可以证明文件在盘上。宁可少报一档（读的人去目录里看一眼就会
-// 发现文件其实在），也不要多报（那一栏从此永久说谎）。
+// 第一档是**装配事实**，所以只能由这里折算，实现方明令不得返回它（ports.go）：
+// 「端口在位但这一题不需要图」与「压根没有端口」合流之后，后者——配置错误里
+// 最需要被看见的那一档——就消失了。同理，实现方若返回 `disabled`，那是它违反了
+// 端口契约而不是它有权做的判定：端口在位，所以它的答案只能是某种「没有文件」，
+// 折成 GraphAbsent。
 //
-// 下一波 `SaveGraph` 直接返回四态之后，这一档由实现方如实回答，本函数退化成一次
-// 转发——调用点不用动。
-//
-// 不变式（ports.go）：`GraphState == GraphFailed` ⟺ `len(failures) > 0`。
-func foldGraphState(saver GraphSaver, failures []string) GraphState {
+// 第二档压过第三档，是为了保住不变式（ports.go）：
+// `GraphState == GraphFailed` ⟺ `len(failures) > 0`。**方向只能是这一边**——
+// 以阶段为准反推状态，而不是以状态为准伪造一个阶段：前者的最坏结果是多报一次
+// 失败（读的人去目录里看一眼就知道真相），后者是让公开面声称一件我们并不知道
+// 的事（「图没序列化出来」），而那正是 graphSaveStage 的注释里记着的旧事故。
+func foldGraphState(saver GraphSaver, state GraphState, failures []string) GraphState {
 	switch {
 	case saver == nil:
 		return GraphDisabled
 	case len(failures) > 0:
 		return GraphFailed
+	case state == GraphSaved || state == GraphAbsent:
+		return state
 	default:
+		// 四态之外的值（含空串）或实现方不该返回的 disabled：端口在位 ⇒ 这一格
+		// 只能是「没有文件产生」。宁可少报一档（读的人去目录里看一眼就会发现
+		// 文件其实在），也不要为了好看折成 saved——那一栏会从此永久说谎。
 		return GraphAbsent
 	}
 }
@@ -729,9 +764,10 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	if h == nil {
 		return RunResult{}, Ef(KindConfig, "harness.run", "Harness 为空", nil)
 	}
-	// 配置校验在**一切副作用之前**，包括跨进程锁：`locker.Lock` 会写
-	// `<StoreDir>/run.lock`。校验是纯函数，没有理由让一份写错的配置先落下
-	// 副作用再被拒绝。
+	// 配置校验在**一切副作用之前**，包括跨进程锁：`locker.Lock` 会落下锁文件
+	// （位置由锁实现决定——装配层的默认实现在 `/run/lock/red-harness/` 下按
+	// daemon 端点取文件名，**不在 StoreDir 里**；理由见 local/lock.go）。
+	// 校验是纯函数，没有理由让一份写错的配置先落下副作用再被拒绝。
 	//
 	// State 显式置 RunFailed：State 的契约是「Run 返回了错误，State 就必是
 	// failed 或 cancelled」——留空串会让调用方退回解析错误字符串，而 errors.go
@@ -820,9 +856,16 @@ func (h *Harness) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	// State 就必是 failed 或 cancelled」——留空串会让调用方退回解析错误字符串，
 	// 而 errors.go 明令禁止那么做。这几条路径都发生在**任何题目起跑之前**，
 	// 所以是 failed 而不是 cancelled（用户没按 Ctrl-C）。
-	if err := h.reclaimStale(ctx, runID); err != nil {
+	// 报告**先折进公开结果再判错误**：回收失败时实现方返回的是「已经删掉的那批」
+	// 加错误（它不回滚已完成的删除），所以即使这次调用报错，那两个计数仍然描述了
+	// 宿主上真实发生的事情——把它们丢掉会让「删了一半就失败」在结果里变成
+	// 「什么都没发生」。
+	rep, reclaimErr := h.reclaimStale(ctx, runID)
+	result.ReclaimedStale = rep.ReclaimedTotal()
+	result.PendingStale = rep.PendingTotal()
+	if reclaimErr != nil {
 		result.State = RunFailed
-		return result, err
+		return result, reclaimErr
 	}
 	challenges, err := h.scenario.Discover(ctx, spec)
 	if err != nil {
@@ -970,13 +1013,22 @@ func (h *Harness) appendAudit(ctx context.Context, runID RunID, code string, c C
 }
 
 // reclaimStale 回收上一次运行留下的、本次不用的沙箱资源。
-func (h *Harness) reclaimStale(ctx context.Context, keep RunID) error {
+//
+// 返回**完整报告**（删了什么 + 发现了但没删什么）加错误：报告由调用方折进公开
+// 结果的计数，错误决定这次运行还要不要继续。两者都要，因为它们是两件事——
+// 「回收跑完了但宿主上还有归属不明的资源」不是失败，而「回收跑到一半 docker
+// 挂了」才是。
+func (h *Harness) reclaimStale(ctx context.Context, keep RunID) (ReclaimReport, error) {
 	live := map[RunID]bool{keep: true}
-	_, err := h.sandbox.ReclaimStale(ctx, live)
+	rep, err := h.sandbox.ReclaimStale(ctx, live)
 	if err == nil || errors.Is(err, context.Canceled) {
-		return nil
+		// 取消是**预期**的收场（Ctrl-C / 超时），不是回收故障：把它报成错误会让
+		// 一次用户主动中断在结果里长成一次「回收失败」。
+		//
+		// ⚠️ 报告仍然原样返回：取消时实现方可能已经删掉了一批，那批计数必须留下。
+		return rep, nil
 	}
-	return Ef(KindExecutor, "harness.reclaim", "回收遗留 sandbox 失败", err)
+	return rep, Ef(KindExecutor, "harness.reclaim", "回收遗留 sandbox 失败", err)
 }
 
 // runCompleted 判定一次运行是否「成功」。
@@ -1040,12 +1092,13 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	cr.Outcome.StartedAt = cr.StartedAt
 	// 图产物的**默认**结果先落下来，早于 Prepare/沙箱/Probe 的每一条出口：那几条
 	// 出口上「本题没有图」是**可证的**（我们连 SaveGraph 都没调到），落到这里的是
-	// 「端口不在位」与「没有文件产生」两档；真走到落盘的那条路由下面的 defer 覆盖。
+	// 「端口不在位」（disabled）与「端口在位但还没有文件产生」（absent）两档；
+	// 真走到落盘的那条路由下面的 defer 用实现方如实返回的状态覆盖。
 	//
 	// 与 StartedAt/EndedAt 同一条理由：逐条出口补必然漏，而漏掉的那一格会是一个
 	// **没定义**的值（空串），读的人只能自己猜它是什么意思——GraphState 的四个取值
 	// 是穷举的，空串不在其中。
-	cr.Outcome.GraphState = foldGraphState(h.graphs, nil)
+	cr.Outcome.GraphState = foldGraphState(h.graphs, GraphAbsent, nil)
 	target, err := h.scenario.Prepare(ctx, ch)
 	if err != nil {
 		cr.EndedAt = h.now()
@@ -1137,18 +1190,30 @@ func (h *Harness) runChallenge(ctx context.Context, runID RunID, spec RunSpec, c
 	// 静默翻转——而翻转的表现是数据竞争，不是编译错误。
 	defer func() {
 		sink.Close()
+		// ⚠️ `h.graphs == nil` 就是接口值本身为 nil，**不用反射或 typed-nil 的
+		// 检测技巧**：一个 typed-nil（例如 `(*dagGraphSaver)(nil)` 装进接口）在
+		// 这里**不是** nil，那是调用方的类型错误，而把它当 nil 处理只会让它绕过
+		// GraphSaver 的端口契约、得到一个静默的 disabled。
 		if h.graphs != nil {
 			// 独立的有界 context：走到这里时 ctx 可能已被取消（取消/超时路径），
 			// 而图恰恰是那些路径上最值得留下的东西。与 cleanup 同一个理由。
 			saveCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if err := h.graphs.SaveGraph(saveCtx, runID, ch); err != nil {
+			state, err := h.graphs.SaveGraph(saveCtx, runID, ch)
+			if err != nil {
 				cr.Outcome.GraphSaveFailures = append(cr.Outcome.GraphSaveFailures, graphSaveStage(err))
 			}
+			if state == GraphFailed && err == nil {
+				// 实现方报了失败却没给错误。端口契约（ports.go）要求失败必须带
+				// err——阶段是从 err 链上的哨兵推出来的。补一条 unknown 阶段，
+				// 保住「failed ⟺ 阶段非空」这条不变式；否则公开面会出现「状态说
+				// 失败、却没有任何阶段可查」的自相矛盾。
+				cr.Outcome.GraphSaveFailures = append(cr.Outcome.GraphSaveFailures, graphStageUnknown)
+			}
+			cr.Outcome.GraphState = foldGraphState(h.graphs, state, cr.Outcome.GraphSaveFailures)
 		}
-		// 折算点只有这一处：本题**走到过**落盘这一步，结果由失败阶段决定。
-		// 「端口不在位」与「没走到这一步」两档在函数开头就已经落下来了。
-		cr.Outcome.GraphState = foldGraphState(h.graphs, cr.Outcome.GraphSaveFailures)
+		// 端口不在位时这里**什么都不做**：函数开头落下的 GraphDisabled 已经是
+		// 正确答案，而它只由这一处（根包）折算——实现方不得返回它。
 	}()
 	if h.gate != nil && (h.solverWithProfile != nil || h.solver != nil || h.planner != nil && h.renderer != nil) {
 		if h.solverWithProfile != nil {

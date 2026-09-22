@@ -99,9 +99,24 @@ type Options struct {
 	// Scenario 是场景名：ScenarioFake / ScenarioTSecBench。为空按 fake 处理。
 	Scenario string
 
-	// Lock 是跨进程单运行锁。**为空时装配层自己建一个**（`<StoreDir>/run.lock`
-	// 上的 flock）——单运行互斥是生产必需，不该靠调用方记得传。
+	// Lock 是跨进程单运行锁。**为空时装配层自己建一个**（`/run/lock/red-harness/`
+	// 下按 daemon 端点取名的 flock，见 lock.go）——单运行互斥是生产必需，不该靠
+	// 调用方记得传。给非 nil 值时**完全以调用方为准**（连落点一起）：那是显式
+	// 覆盖，装配层不再过问它放在哪。
 	Lock harness.RunLocker
+
+	// Owner 覆盖**资源归属**（Docker 标签 `red-harness.owner` 的值，以及 iptables
+	// 注释里那一段由它派生的指纹）。为空时由 hostname + uid 派生
+	// （harness.ResolveOwner）。
+	//
+	// 为什么允许覆盖：owner 是**删除闸门**的输入，而 hostname 在多机共享同一个
+	// daemon、或在容器里 hostname 不稳定时并不是一个可靠的部署身份。调用方比装配
+	// 层更清楚「哪些进程算同一个部署主体」。
+	//
+	// ⚠️ 非空值必须**自己就是安全串**（判据见 validOwnerOverride）：这里刻意
+	// **不做**字符集归一化。归一化会把两个不同的 owner 映射成同一个，而映射的
+	// 方向恰好是「外来的看起来像我的」——那正是删除闸门最不能出的错。
+	Owner string
 
 	// FakeChallenges 是离线场景的题目夹具 JSON 路径。为空时用内置演示题。
 	// 见 loadFakeFixture。
@@ -183,6 +198,14 @@ type Runner struct {
 	// storeDir / resultDir 是绝对化之后的目录。
 	storeDir  string
 	resultDir string
+	// ident 是本次装配的**部署身份**（owner + daemon endpoint）。它在这一层是
+	// 只读事实：doctor 报告它、`Run` 不再重新解析（重新解析就是「锁按 A 端点、
+	// 标签按 B 端点」的那条错配路径）。
+	ident harness.ExecutionIdentity
+	// lockPath 是装配层**自己**建的那把锁的落点（调用方给了 Options.Lock 时为空）。
+	// 留它是为了让体检与测试能回答「这把锁到底锁在哪个文件上」——那正是 N0.2
+	// 修的那个缺陷的可见证据。它只在装配层建锁时被填，不会是「猜」出来的值。
+	lockPath string
 }
 
 // 编译期断言：Runner 就是 CLI 要的那两个动作（形状由 internal/cli 的窄接口定义，
@@ -235,14 +258,68 @@ func New(opts Options) (*Runner, error) {
 		name = ScenarioFake
 	}
 
+	// ── 部署身份：解析**一次**，分发给两个消费者 ──
+	//
+	// ⚠️ **必须在任何副作用之前**（建目录、起 bridge 子进程、连 daemon）：身份
+	// 不可判定时唯一正确的行为是「什么都没发生就拒绝」。放到下面任何一步之后，
+	// 都会让一次配置错误在磁盘或宿主上留下一半现场。
+	//
+	// 为什么只解析一次：owner 进**资源标签**（executor 的删除闸门），endpoint 进
+	// **锁路径**与 docker 子进程环境。分头解析会出现「锁按 A 端点、标签按 B 端点」，
+	// 而那种错配的表现是「回收删不掉自己的资源，或删掉了别人的」——两个方向都
+	// 无法从现场归因。
+	//
+	// 失败一律 KindConfig（`ResolveExecutionIdentity` 自己就是这么报的），且
+	// **不兜底**：归属是删除闸门，一个编造出来的身份比一次拒绝危险得多。
+	//
+	// os.Hostname 的错误刻意**不在这里分叉**：它唯一的去处是 ResolveOwner 的
+	// hostname 入参，而后者对空 hostname 已经 fail closed（KindConfig，消息就是
+	// 「无法确定本机 hostname」）。再判一次只会多一条永远走不到的分支。
+	host, _ := os.Hostname()
+	ident, err := harness.ResolveExecutionIdentity(os.Getenv, host, os.Getuid())
+	if err != nil {
+		return nil, err
+	}
+	if o := strings.TrimSpace(opts.Owner); o != "" {
+		if err := validOwnerOverride(o); err != nil {
+			return nil, err
+		}
+		ident.Owner = harness.OwnerID(o)
+	}
+
 	// 公开指标存储：它同时是「生产必需端口」之一（缺了它 Run 的结果无处落盘）。
 	results, err := store.NewResultStore(resultDir)
 	if err != nil {
 		return nil, err
 	}
+	// 提交就绪闸：`Submit=true` 却没有审计落点 ⇒ **在任何平台调用之前拒绝装配**。
+	//
+	// 为什么与「图落盘没接」不同：图缺席只是少一份研究材料，而 `Submit=true` 意味
+	// 着一串**不可追回的平台写操作**（起题、提交、关题），没有审计就永远答不出
+	// 「提交了什么、平台怎么判的」——2026-09-22 那次授权真跑里「147 次提交」这类
+	// 事实会彻底不可复核。根包在 `Harness.Run` 里也有一条同样的闸（v04.go），这里
+	// 的一条是**装配层**的：它把失败提前到「New 返回错误」这个时刻（CLI 还没有
+	// 起 bridge、还没有连平台），而不是「第一次 Run 跑了一半」。
+	//
+	// 判据必须与真正接线的那**一个**端口同源（即下面交给 `HarnessOptions.Results`
+	// 的那个值）：`store.ResultFileStore` 同时实现 ResultStore 与 AuditStore，根包
+	// 从 Results 上按类型断言取审计端口。所以这里断言的是同一个接口、同一个对象。
+	//
+	// 位置说明：它只能在 results 建好之后（判据是关于这个端口的），但仍在
+	// buildScenario **之前**——平台侧副作用（bridge 子进程与后续任何平台调用）
+	// 都在这之后才发生。
+	if opts.Run.Submit && !auditReady(results) {
+		return nil, harness.Ef(harness.KindConfig, "wire.new",
+			"RunOptions.Submit=true 但没有可用的候选审计落点（Results 未实现 AuditStore）："+
+				"平台写操作不可追回，缺审计时提交了什么将不可复核", nil)
+	}
 
-	// 图存储的**根句柄**。图落在 <StoreDir>/runs/<runID>/graph.json，而不是结果树
+	// 图存储的**根句柄**。图落在
+	// `<StoreDir>/runs/<runID>/challenges/<题目 ID>/attempts/1/` 下，而不是结果树
 	// ——两者缺省同根，但 --results 一旦不同，混用就会把 graph.json 写进结果目录。
+	//
+	// ⚠️ 落点必须**带题目身份**：一 run 一图（`runs/<runID>/graph.json`）时后一题
+	// 会盖掉前一题，跑完只剩最后一道题的图，而复盘的人无从知道前面那些题留过图。
 	//
 	// store.New 在构造时就 mkdirAllPrivate：这同时是一次装配期的「这台机器写不写
 	// 得动」探针，失败发生在第 0 秒，而不是第 N 题跑完之后。
@@ -250,7 +327,20 @@ func New(opts Options) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	graphs := &dagGraphSaver{root: graphRoot, live: map[string]*dag.Graph{}}
+	// ⚠️ 「图端口在不在位」在这台装配上只有**一个**表达式——下面这个 graphs
+	// 变量。它有两个消费者，必须同源：
+	//
+	//  1. `HarnessOptions.Graphs`（nil ⇒ 根包折出 `GraphDisabled`）；
+	//  2. 产物索引里 run 级的 `GraphSaver` 字段（`wired` / `disabled`），由
+	//     dagGraphSaver 在登记时写入（store 对它有两道闸：值域，以及
+	//     `disabled` 不许配任何非 absent 的产物状态）。
+	//
+	// 两处各算各的后果是**响的**（store 拒登记 ⇒ run 报 KindConfig），不是静默的；
+	// 但那时「装配身份」就有了两个定义点，而它们只会在某一条路径上不一致。所以
+	// 将来若要加「关掉图落盘」的开关，要改的是这一个变量（以及下面那行传参），
+	// 而不是在登记处再判一次 nil。
+	graphs := &dagGraphSaver{root: graphRoot, live: map[string]*dag.Graph{},
+		saver: store.ArtifactSaverWired}
 
 	sc, client, err := buildScenario(name, opts, storeDir)
 	if err != nil {
@@ -288,14 +378,21 @@ func New(opts Options) (*Runner, error) {
 	// 缺省字段。
 	dockerCfg := executor.DefaultDockerConfig()
 	dockerCfg.ProviderAllowHosts = hosts
+	// 身份两项都从**上面那次解析**来（与锁路径同源）：owner 进资源标签，endpoint
+	// 进 DOCKER_HOST。不在这里重新解析一遍——那正是「锁按 A 端点、标签按 B 端点」
+	// 的入口。
+	dockerCfg.Owner = string(ident.Owner)
+	dockerCfg.Endpoint = ident.Endpoint
 	docker, err := executor.NewDocker(dockerCfg)
 	if err != nil {
 		return fail(err)
 	}
 
 	locker := opts.Lock
+	lockPath := ""
 	if locker == nil {
-		locker = defaultLock(storeDir)
+		locker = defaultLock(ident.Endpoint)
+		lockPath = filepath.Join(DefaultLockDir, runLockName(ident.Endpoint))
 	}
 
 	profile := opts.Profile
@@ -363,7 +460,8 @@ func New(opts Options) (*Runner, error) {
 		return fail(harness.Ef(harness.KindConfig, "wire.new", "缺少必需端口: Results（公开指标存储）", nil))
 	}
 	return &Runner{h: h, docker: docker, scenario: name, bridgeClient: client,
-		opts: optsCopy, results: results, storeDir: storeDir, resultDir: resultDir}, nil
+		opts: optsCopy, results: results, storeDir: storeDir, resultDir: resultDir,
+		ident: ident, lockPath: lockPath}, nil
 }
 
 // Results 返回公开指标存储，供 CLI 的 `list` / `stats` 读取。
@@ -399,6 +497,49 @@ func missingChecks(rep harness.DoctorReport) string {
 // `if h.results != nil`），于是每次运行都跑得好好的、却什么指标都没留下——
 // 而 stats 读的正是这些指标，表现为「跑了几十次，stats 说零次」。
 func optsResultsNil(rs harness.ResultStore) bool { return rs == nil }
+
+// auditReady 报告公开指标存储是否**同时**是候选审计落点。
+//
+// 判据是类型断言而不是「某个具体类型」：根包就是从 `HarnessOptions.Results` 上
+// 断言 `AuditStore` 的（`v04.go` 的 `audits, _ := opts.Results.(AuditStore)`），
+// 这里判同一件事、同一个对象。写成 `*store.ResultFileStore` 的具体类型判断会在
+// 换实现（或包一层装饰器）时给出**错误**的答案，而那时审计其实照样能写。
+func auditReady(rs harness.ResultStore) bool {
+	_, ok := rs.(harness.AuditStore)
+	return ok
+}
+
+// validOwnerOverride 校验显式给出的 owner。
+//
+// 它是**拒绝**判据，不是归一化：白名单外的字符一律拒绝，绝不替换。
+// 替换的方向是「把两个不同的身份变成同一个」，而 owner 是删除闸门的输入——
+// 「外来的看起来像我的」正是那道闸门唯一不能出的错（见 harness.ResolveOwner
+// 与 parseScan 里「owner 不做任何规范化」的同一条理由）。
+//
+// 允许 `/`：派生形态就是 `host/uid`（harness.ResolveOwner），显式覆盖时也应该
+// 能表达同一个形态。长度上限取 128：这个值会进 Docker label，并被
+// `harness.OwnerID.Fingerprint` 摘成 8 位十六进制后进 iptables 注释——上限是
+// 防呆，不是协议要求。
+func validOwnerOverride(o string) error {
+	if o == "" {
+		return harness.Ef(harness.KindConfig, "wire.new", "Owner 覆盖值为空白串：要么不传，要么给一个真身份", nil)
+	}
+	if len(o) > 128 {
+		return harness.Ef(harness.KindConfig, "wire.new", "Owner 覆盖值超过 128 字符：它要进资源标签与规则注释", nil)
+	}
+	for _, r := range o {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-', r == '/':
+		default:
+			// 不回显那个字符（也不回显整个值）：owner 会进资源标签与规则注释，
+			// 而这条消息会进公开结果与终端。
+			return harness.Ef(harness.KindConfig, "wire.new",
+				"Owner 覆盖值含非法字符（只允许 [A-Za-z0-9._-/]）：它原样进资源标签，不做归一化", nil)
+		}
+	}
+	return nil
+}
 
 // challengeShape 是本装配层对「这道题的答案形态」的**唯一**判定。
 //
@@ -682,6 +823,7 @@ func (r *Runner) Doctor(ctx context.Context) harness.DoctorReport {
 	rep := r.h.Doctor(ctx)
 	rep.Checks = append(rep.Checks,
 		harness.DoctorCheck{Name: "scenario_name", OK: true, Detail: r.scenario},
+		identityCheck(r.ident),
 		r.dockerCheck(ctx),
 		r.imageCheck(ctx),
 		credentialCheck(r.opts.Agent.Provider, r.opts.EnvFile),
@@ -695,6 +837,28 @@ func (r *Runner) Doctor(ctx context.Context) harness.DoctorReport {
 		}
 	}
 	return rep
+}
+
+// identityCheck 报告本次装配的**部署身份**。
+//
+// 为什么它必须在体检里：身份决定了「锁锁在哪儿」与「资源标签写的是什么」，而
+// 这两件事此前各算各的（那正是 N0.2 修的缺陷）。它是**非 Fatal**——走到这里时
+// 身份已经解析成功（解析失败在 New 就拒绝了），这一行只是为了让人能**核对**
+// 「这次跑的锁与标签是不是同一个部署」。
+//
+// ⚠️ **只放指纹与来源，绝不放原值**：owner 的原值来自 hostname，它的用处已经
+// 全部由指纹承担（同一个身份在任何地方都算出同一个指纹），而体检报告会被贴进
+// 工单。endpoint 的 ID 是规范化后的 `unix://<绝对路径>`——它已剥掉任何凭据
+// （见 harness.DockerEndpoint），且是「锁到底锁在哪个 daemon 上」的唯一判据，
+// 必须可见。
+func identityCheck(ident harness.ExecutionIdentity) harness.DoctorCheck {
+	fp := ident.Owner.Fingerprint()
+	if fp == "" {
+		fp = "（未解析）"
+	}
+	return harness.DoctorCheck{Name: "execution_identity", OK: true, Fatal: false,
+		Detail: "endpoint=" + ident.Endpoint.ID() + "（来源 " + ident.Endpoint.Source() +
+			"）；owner 指纹=" + fp + "（锁与资源标签同源于它；原值不打印）"}
 }
 
 // dockerCheck 检查 Docker daemon 是否可用。
@@ -868,20 +1032,30 @@ func dockerCommand(ctx context.Context, args ...string) dockerResult {
 // ── 图落盘 ──
 
 // dagGraphSaver 实现 harness.GraphSaver：把每道题的 DAG 落到
-// <StoreDir>/runs/<runID>/graph.json。
+// `<StoreDir>/runs/<runID>/challenges/<题目 ID>/attempts/1/`。
 //
 // **为什么由装配层做**：图的创建者是这里的 SolverWithProfile 闭包，而根包不许
 // import dag（那是并行开发的前提）。装配层同时认识 dag 与 store，是唯一能把这
 // 两端接起来的地方；根包只见 `SaveGraph(runID, ch)` 这一个窄接口。
 //
-// 为什么按题目编号登记而不是按 runID：闭包的签名里没有 runID（它是公开面，
+// **为什么按题目编号登记而不是按 runID**：闭包的签名里没有 runID（它是公开面，
 // 加参数会波及所有 fake），而题目串行执行，「登记 → 落盘」之间不会插进别的题目。
 // 落盘后立刻删掉登记项，避免 Harness 跨 Run 复用时把上一轮的图认成本轮的。
+//
+// ⚠️ 上面这条「题目串行」是**本实现的前提条件**，不是可以顺手放宽的东西：真要
+// 支持并发题目，登记表就得按 (runID, code) 索引，那是一次接口变更（N1）。
 type dagGraphSaver struct {
 	root *store.FileStore
 
 	mu   sync.Mutex
 	live map[string]*dag.Graph
+
+	// saver 是写进产物索引的 run 级「图端口在不在位」（wired / disabled）。
+	//
+	// 它由**构造处**给出（local.New 里那个唯一的 graphs 变量），不在这里判
+	// `root == nil` 之类的近似条件：装配身份必须只有一个定义点，否则索引会与
+	// 根包折出的 GraphDisabled 分家。见 local.New 里那段注释。
+	saver string
 }
 
 var _ harness.GraphSaver = (*dagGraphSaver)(nil)
@@ -892,42 +1066,135 @@ func (s *dagGraphSaver) register(code string, g *dag.Graph) {
 	s.live[code] = g
 }
 
-func (s *dagGraphSaver) SaveGraph(ctx context.Context, runID harness.RunID, ch harness.Challenge) error {
+// SaveGraph 写一道题一次尝试的图与导出，并**如实回答**结果。
+//
+// 返回值是四态里的三态之一（`disabled` 由根包折出，实现方不得返回，见 ports.go）：
+//
+//	没登记过这张图  ⇒ GraphAbsent（**没有文件产生**，不是失败）
+//	两份都写成功    ⇒ GraphSaved
+//	任何一步没写成  ⇒ GraphFailed + 带 ErrGraph* 哨兵的错误
+//
+// ⚠️ 失败**必须**带错误：阶段枚举（marshal / write / export）是从 err 链上的
+// 哨兵推出来的。报失败却不带 err 的实现会让公开面出现「状态说失败、却没有任何
+// 阶段可查」的自相矛盾（根包会补一条 unknown 兜住，但那是兜底，不是许可）。
+//
+// 每一份产物都在产物索引里留一行**真实**的落点与摘要：索引是事后回答「图留下来
+// 了没有」的唯一凭据，所以哪怕写失败也要登记——不登记等于「这次运行什么都没留下」，
+// 而真相是「留下了一份写了一半的图」。
+func (s *dagGraphSaver) SaveGraph(ctx context.Context, runID harness.RunID, ch harness.Challenge) (harness.GraphState, error) {
 	s.mu.Lock()
 	graph, ok := s.live[ch.Code]
 	delete(s.live, ch.Code)
 	s.mu.Unlock()
 	if !ok {
-		// 没登记过（例如自定义 Planner 的调用方）不是错误：图落盘是可选面。
-		return nil
+		// 没登记过（例如自定义 Planner 的调用方）不是错误，也**没有文件产生**：
+		// 切签名之前这里返回 nil，于是「没登记」与「写成功了」在调用方眼里同形。
+		return harness.GraphAbsent, nil
 	}
+	// 题目身份：产物路径与索引键都用它。它必须**与题号同源**——executor 与
+	// runPlan 侧那两处 fail-closed 校验用的是同一个函数（ChallengeIDFor），
+	// 另拼一份会让「图落在 A 题的目录、资源标签写着 B 题」。
+	cid, err := harness.ChallengeIDFor(ch.Code)
+	if err != nil {
+		return harness.GraphFailed, fmt.Errorf("%w: %v", harness.ErrGraphWrite, err)
+	}
+
+	// carried 是「已经写出去的那一份」的状态，随每一步推进更新。
+	absent := store.ArtifactDeclaration{State: harness.GraphAbsent}
 	// ⚠️ 必须走 json.Marshal（它现在与 dag.Graph.Save 共用同一份擦洗，见
 	// dag/store.go 的 document()）。另拼一份序列化会把 Rejected[].Content 里的
 	// 答案明文写出去——那条路曾经真的漏过。
 	blob, err := json.Marshal(graph)
 	if err != nil {
-		return fmt.Errorf("%w: %v", harness.ErrGraphMarshal, err)
+		return s.finish(runID, cid, ch.Code,
+			store.ArtifactDeclaration{State: harness.GraphFailed, Stage: stageMarshal}, absent,
+			harness.GraphFailed, fmt.Errorf("%w: %v", harness.ErrGraphMarshal, err))
 	}
 	if err := ctx.Err(); err != nil {
 		// 端口收 ctx 是有意的：Harness 用一个**独立的有界** context 调它（取消路径
 		// 上主 ctx 已经没了，而图恰恰是那时最值得留下的）。store 的写接口不收 ctx，
 		// 所以这里至少尊重已到期的边界，而不是在取消之后再写一份。
-		return fmt.Errorf("%w: %v", harness.ErrGraphWrite, err)
+		return s.finish(runID, cid, ch.Code,
+			store.ArtifactDeclaration{State: harness.GraphFailed, Stage: stageWrite}, absent,
+			harness.GraphFailed, fmt.Errorf("%w: %v", harness.ErrGraphWrite, err))
 	}
-	view, err := s.root.ForRun(runID)
+	att, err := s.root.ForAttempt(runID, cid, harness.FirstAttempt)
 	if err != nil {
-		return fmt.Errorf("%w: %v", harness.ErrGraphWrite, err)
+		// ForAttempt 失败时连目录都没建：没有文件产生，但**状态仍是 failed**——
+		// 「该有的图没写出来」与「这一题本来就没有图」是两件事。
+		return s.finish(runID, cid, ch.Code,
+			store.ArtifactDeclaration{State: harness.GraphFailed, Stage: stageWrite}, absent,
+			harness.GraphFailed, fmt.Errorf("%w: %v", harness.ErrGraphWrite, err))
 	}
-	if err := view.PutGraph(blob); err != nil {
-		return fmt.Errorf("%w: %v", harness.ErrGraphWrite, err)
+	if err := att.PutGraph(blob); err != nil {
+		return s.finish(runID, cid, ch.Code,
+			store.ArtifactDeclaration{State: harness.GraphFailed, Stage: stageWrite}, absent,
+			harness.GraphFailed, fmt.Errorf("%w: %v", harness.ErrGraphWrite, err))
 	}
 	// 人可读导出与图并排落同一处，从**刚落盘的那份真源**派生。`dag.Mermaid`
 	// 自己也从 document() 渲染，双保险地保证导出里不会有答案明文。
 	//
 	// 失败单列一档（export），不与「图没落盘」（write）混用：两者对复盘的人意味着
 	// 完全不同的处境——前者是「有图，只是没画出来」，后者是「图根本没留下」。
-	if err := view.PutGraphExport([]byte(dag.Mermaid(graph))); err != nil {
-		return fmt.Errorf("%w: %v", harness.ErrGraphExport, err)
+	if err := att.PutGraphExport([]byte(dag.Mermaid(graph))); err != nil {
+		return s.finish(runID, cid, ch.Code,
+			store.ArtifactDeclaration{State: harness.GraphSaved},
+			store.ArtifactDeclaration{State: harness.GraphFailed, Stage: stageExport},
+			harness.GraphFailed, fmt.Errorf("%w: %v", harness.ErrGraphExport, err))
 	}
-	return nil
+	return s.finish(runID, cid, ch.Code,
+		store.ArtifactDeclaration{State: harness.GraphSaved},
+		store.ArtifactDeclaration{State: harness.GraphSaved},
+		harness.GraphSaved, nil)
+}
+
+// 失败阶段串。它们是**公开面**上的值域（公开结果的 graphSaveFailures 与产物索引
+// 的 stage），白名单的唯一判据在 store（graphStageAllowed），这里只是那三个值的
+// 本地名字——拼字面量会让「改了这儿忘了那儿」变成一次静默的值域漂移。
+const (
+	stageMarshal = "marshal"
+	stageWrite   = "write"
+	stageExport  = "export"
+)
+
+// finish 把两份产物的实际状态登记进索引，并给出最终返回值。
+//
+// 登记失败时的处理是**响的**：它不覆盖已经拿到的阶段（primary 仍在 err 链上，
+// 公开面照旧报得出「卡在 marshal / write / export」），而是把登记失败拼进同一条
+// 消息。若本来就没有 primary（两份都写成了却登记不进去），返回一个**不带任何
+// ErrGraph* 哨兵**的错误 ⇒ 公开面折成 unknown 阶段——那是对的：图其实在盘上，
+// 坏的是账，而「账坏了」不属于那三档中的任何一档。
+func (s *dagGraphSaver) finish(runID harness.RunID, cid harness.ChallengeID, code string,
+	graph, export store.ArtifactDeclaration, state harness.GraphState, primary error,
+) (harness.GraphState, error) {
+	err := s.record(runID, cid, code, graph, export)
+	switch {
+	case err != nil && primary != nil:
+		return harness.GraphFailed, fmt.Errorf("%w；且产物索引登记失败: %v", primary, err)
+	case err != nil:
+		return harness.GraphFailed, fmt.Errorf("登记题目产物失败: %w", err)
+	default:
+		return state, primary
+	}
+}
+
+// record 登记一道题一次尝试的两份产物。
+//
+// 它现取 run 视图（`ForRun`）而不是复用某个句柄：`RecordChallengeArtifacts`
+// 在根句柄上会被拒绝（它需要 run 身份），而这里唯一的输入就是 runID。
+func (s *dagGraphSaver) record(runID harness.RunID, cid harness.ChallengeID, code string,
+	graph, export store.ArtifactDeclaration) error {
+	view, err := s.root.ForRun(runID)
+	if err != nil {
+		return err
+	}
+	return view.RecordChallengeArtifacts(store.ArtifactEntry{
+		ChallengeID: cid,
+		Code:        code,
+		Attempt:     harness.FirstAttempt,
+		// run 级字段：由构造处给出（见 dagGraphSaver.saver 的注释）。
+		GraphSaver:  s.saver,
+		Graph:       graph,
+		GraphExport: export,
+	})
 }

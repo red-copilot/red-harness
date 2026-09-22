@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -51,15 +52,29 @@ func (s *fakeSandbox) Reclaim(_ context.Context, id RunID) error {
 	return nil
 }
 
-func (s *fakeSandbox) ReclaimStale(_ context.Context, live map[RunID]bool) ([]RunID, error) {
+func (s *fakeSandbox) ReclaimStale(_ context.Context, live map[RunID]bool) (ReclaimReport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.staleCalls++
-	// 假件模拟「宿主上有一个上次崩溃的遗留 run」。
-	if _, ok := live["run-crashed"]; !ok {
-		return []RunID{"run-crashed"}, nil
+	// 假件模拟宿主上的三种遗留：
+	//   - 一个属于本部署、且不属于任何活跃 run 的崩溃残留 ⇒ 该删，进 Reclaimed；
+	//   - 一个属于**别人**的（owner 不匹配）⇒ 只报告，进 Pending；
+	//   - 一个没有 owner 标签的旧资源（升级前留下的）⇒ 同样只报告。
+	//
+	// 为什么假件一定要带 Pending：切签名之前 `Pending` 被实现方直接丢弃，于是
+	// 「扫到了东西但一件都没删」与「宿主上根本没有孤儿」在调用方眼里同形。
+	// 这条假件就是用来钉住「Pending 必须被看见，但**只有计数**能进公开面」的
+	// （见 TestRunReclaimCountsPublicWithoutPendingDetails）。
+	if _, ok := live["run-crashed"]; ok {
+		return ReclaimReport{}, nil
 	}
-	return nil, nil
+	return ReclaimReport{
+		Reclaimed: []RunID{"run-crashed"},
+		Pending: []StaleObject{
+			{Kind: "container", RunID: "run-foreign", Owner: "otherhost/0", Reason: StaleOwnerMismatch},
+			{Kind: "network", RunID: "run-legacy", Reason: StaleOwnerUnknown},
+		},
+	}, nil
 }
 
 type fakeSession struct {
@@ -383,6 +398,47 @@ func TestRunReclaimsStaleBeforeStart(t *testing.T) {
 	for _, id := range sb.reclaimed {
 		if id == "run-crashed" {
 			t.Error("Reclaim 不得回收本次 run 之外的资源")
+		}
+	}
+}
+
+// TestRunReclaimCountsPublicWithoutPendingDetails：回收的两个计数必须进公开结果，
+// 而 **Pending 的明细绝不能**。
+//
+// 为什么计数必须上公开面：`Pending` 非空意味着宿主上躺着**归属无法证明**的容器与
+// 网络（那些容器里跑的可能是上次崩溃留下的进攻性工具进程）。旧签名把这一整类判定
+// 丢掉了，于是「回收跑过了、一件都没删」与「宿主上本来就没有孤儿」在结果里完全
+// 同形——最需要被看见的那一档被报成了「没事」。
+//
+// 为什么明细不能上公开面：Pending 的每一条带 runID 与 owner，那是**本机资源拓扑**。
+// 结果文件会被拷走、归档、贴进工单、进 CI 日志——「这台机器上还躺着哪些别人的
+// run」不该跟着它走。计数已经足够回答「有没有事」，明细的去处是私密面或日志。
+func TestRunReclaimCountsPublicWithoutPendingDetails(t *testing.T) {
+	sc := &stubScenario{challenges: []Challenge{{Code: "c1", FlagCount: 1}},
+		answers: map[string]string{"c1": "flag{x}"}}
+	sb := &fakeSandbox{}
+	h := newTestHarness(t, sc, sb, &scriptedAgentFactory{agent: &fakeAgent{}},
+		func(Challenge) CandidateGate { return newStubGate() })
+
+	res, err := h.Run(context.Background(), testRunSpec())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ReclaimedStale != 1 {
+		t.Errorf("ReclaimedStale = %d，期望 1（假件里恰好一个本部署的崩溃残留）", res.ReclaimedStale)
+	}
+	if res.PendingStale != 2 {
+		t.Errorf("PendingStale = %d，期望 2（owner 不匹配与无 owner 标签各一个）", res.PendingStale)
+	}
+	// 「公开面只有计数与指纹」这条纪律在**序列化之后**才成立：字段名对了、值却
+	// 带着明细，从结构体上是看不出来的。
+	blob, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("序列化 RunResult: %v", err)
+	}
+	for _, leak := range []string{"run-foreign", "run-legacy", "otherhost/0", "owner_mismatch", "owner_unknown"} {
+		if strings.Contains(string(blob), leak) {
+			t.Errorf("Pending 的明细泄漏进了公开结果（含 %q）", leak)
 		}
 	}
 }
@@ -1091,11 +1147,19 @@ func TestRunNonPersistenceErrorDoesNotStopWholeRun(t *testing.T) {
 
 // ── 图落盘 ──
 
-// recordingGraphSaver 是记账型 GraphSaver：记下「哪次运行的哪道题被要求落盘」。
+// recordingGraphSaver 是记账型 GraphSaver：记下「哪次运行的哪道题被要求落盘」，
+// 并如实回答这次落盘的产物状态。
 type recordingGraphSaver struct {
 	mu    sync.Mutex
 	calls []graphSaveCall
 	err   error
+	// state 是**实现方如实回答**的产物状态。零值（空串）折成 GraphAbsent——
+	// 「没登记过图」是装配层实现的一条正常分支，它不是失败，也没有文件产生。
+	//
+	// 三个允许取值之外的值（含 GraphDisabled——那是装配事实，实现方不得返回）
+	// 一律折成 absent：这条折法与真实现无关，它是**假件自己**对端口契约的最小
+	// 遵守（真实现返回越权值时由根包的 foldGraphState 兜住）。
+	state GraphState
 }
 
 type graphSaveCall struct {
@@ -1103,11 +1167,16 @@ type graphSaveCall struct {
 	code  string
 }
 
-func (s *recordingGraphSaver) SaveGraph(_ context.Context, runID RunID, ch Challenge) error {
+func (s *recordingGraphSaver) SaveGraph(_ context.Context, runID RunID, ch Challenge) (GraphState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, graphSaveCall{runID: runID, code: ch.Code})
-	return s.err
+	switch s.state {
+	case GraphSaved, GraphAbsent, GraphFailed:
+		return s.state, s.err
+	default:
+		return GraphAbsent, s.err
+	}
 }
 
 func (s *recordingGraphSaver) snapshot() []graphSaveCall {
@@ -1291,11 +1360,17 @@ func TestRunWithoutGraphSaverIsNotAnError(t *testing.T) {
 // 最后到底有没有图可看），不是某个函数的返回值。只把折算函数测绿、却没有调用方
 // 读它，正是本仓库反复记为「比缺失更糟」的形状（字段在、机制在、没接线）。
 //
-// ⚠️ 「端口在位且落盘成功」那一档要的是 GraphAbsent 而**不是** GraphSaved：根包
-// 现在只能从 `SaveGraph == nil` 推出「没有失败」，推不出「产生了文件」——装配层的
-// SaveGraph 有一条「这一题没有登记过图」的正常分支同样返回 nil，而那一档没有文件。
-// 这正是 GraphState 这个类型存在的理由（见 ports.go），所以过渡期宁可少报。
-// 下一波把端口签名换成四态直返之后，这一格会变成 GraphSaved，届时改的是这一行。
+// 四档的分工（N0 切签名之后）：
+//
+//	disabled —— **装配事实**：`HarnessOptions.Graphs == nil`。只由根包折出，
+//	            实现方不得返回（ports.go）。
+//	absent   —— 端口在位、**这一题没有文件产生**（实现方如实回答）。
+//	saved    —— 两份产物都写出来了（实现方如实回答）。
+//	failed   —— 没写出来或只写了一半，卡在哪由 GraphSaveFailures 说明。
+//
+// 另外两档是**兜底**，也各有一条用例：实现方报了 failed 却不带 err（契约要求失败
+// 必须带 err，根包补一条 unknown 保住不变式），以及实现方越权返回 disabled（端口
+// 在位 ⇒ 它的答案只能是「没有文件」，折成 absent）。
 func TestRunGraphStateFoldsEveryOutcome(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -1310,10 +1385,23 @@ func TestRunGraphStateFoldsEveryOutcome(t *testing.T) {
 		wantFailures  []string
 	}{
 		{name: "端口不在位", saver: nil, want: GraphDisabled, wantSaveCalls: 0},
-		{name: "端口在位，落盘没有报错", saver: &recordingGraphSaver{},
+		{name: "端口在位，实现方回 absent", saver: &recordingGraphSaver{state: GraphAbsent},
 			want: GraphAbsent, wantSaveCalls: 1},
-		{name: "端口在位，落盘失败", saver: &recordingGraphSaver{err: fmt.Errorf("磁盘满了: %w", ErrGraphWrite)},
-			want: GraphFailed, wantSaveCalls: 1, wantFailures: []string{"write"}},
+		{name: "端口在位，实现方回 saved", saver: &recordingGraphSaver{state: GraphSaved},
+			want: GraphSaved, wantSaveCalls: 1},
+		{name: "端口在位，实现方回 failed 且带错误",
+			saver: &recordingGraphSaver{state: GraphFailed, err: fmt.Errorf("磁盘满了: %w", ErrGraphWrite)},
+			want:  GraphFailed, wantSaveCalls: 1, wantFailures: []string{"write"}},
+		// 报失败却不带 err：端口契约（ports.go）要求失败必须带 err。补一条
+		// unknown 阶段兜住不变式，而不是让公开面出现「状态说失败、却没有阶段可查」。
+		{name: "端口在位，实现方回 failed 但没带错误",
+			saver: &recordingGraphSaver{state: GraphFailed},
+			want:  GraphFailed, wantSaveCalls: 1, wantFailures: []string{"unknown"}},
+		// 越权返回 disabled：那是装配事实。端口在位 ⇒ 折成 absent（宁可少报一档，
+		// 也不要为了好看折成 saved——那一栏会从此永久说谎）。
+		{name: "端口在位，实现方越权回 disabled",
+			saver: &recordingGraphSaver{state: GraphDisabled},
+			want:  GraphAbsent, wantSaveCalls: 1},
 		{name: "Probe 就失败，没走到落盘",
 			saver: &recordingGraphSaver{}, probeErr: Ef(KindExecutor, "sandbox.probe", "假探测失败", nil),
 			want: GraphAbsent, wantSaveCalls: 0},

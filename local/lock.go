@@ -12,13 +12,37 @@ import (
 	harness "github.com/red-copilot/red-harness"
 )
 
-// runLockName 是跨进程单运行锁的文件名。
+// DefaultLockDir 是缺省锁文件所在目录。
 //
-// 它落在 `<StoreDir>/` 下而不是某个 run 目录里：这把锁保护的是「整台宿主上
-// 同一时刻只有一个 red-harness 在跑」，与具体某一次运行无关——两个并发的 run
-// 会在平台侧互相踩（重复起题、重复提交），而且各自按 run label 回收容器与网络
-// 时会**互相删掉对方正在用的资源**。
-const runLockName = "run.lock"
+// ⚠️ **它不在 StoreDir 里，这是本文件最重要的一条规矩。** 锁过去落在
+// `<StoreDir>/run.lock`，而那是一个真实缺陷：flock 绑的是 **inode**，不是路径。
+// `rm -rf` 掉旧 store（或换一个 `--store`）之后，同一个文件路径会指向一个新的
+// inode，于是正在跑的那次部署**被静默解锁**——下一个进程顺手就拿到了锁，两个
+// run 同时开跑，各自按 run label 回收时互相删掉对方正在用的容器与网络。
+// 一句话：**锁不能与被它保护的数据住在一起**。
+//
+// 选 `/run/lock` 是因为它是 FHS 给「锁文件」留的位置，且**重启即清空**（tmpfs）
+// ——与 flock 的语义正好配套：锁由内核持有，进程一死就自动释放，残留文件不构成
+// 阻塞（见 FileLock 的注释），所以「重启后锁文件没了」不是问题，反而是有意的。
+//
+// 它同时是**装配层策略**而不是根包知识：根包只提供端点身份（Fingerprint），
+// 「锁文件叫什么、放哪儿」由装配层决定——根包不该知道 `/run/lock` 这种宿主布局。
+const DefaultLockDir = "/run/lock/red-harness"
+
+// runLockName 是跨进程单运行锁的文件名：按 **daemon 端点**取指纹。
+//
+// 它保护的是「同一个 daemon 上同一时刻只有一个 red-harness 在跑」，与具体某一次
+// 运行、以及 store 放在哪里都无关——两个并发的 run 会在平台侧互相踩（重复起题、
+// 重复提交），而且各自按 run label 回收容器与网络时会**互相删掉对方正在用的资源**。
+//
+// **为什么按端点区分而不是一把全局锁**：同一个宿主上两个不同的本地 socket 是
+// **两个不同的 daemon**，它们不共享容器、网络或 iptables 表，本就不该互斥；一把
+// 全局锁会把它们串行化，那是把「作用域算错」换成另一个方向的算错。默认端点
+// （`unix:///var/run/docker.sock`）的指纹是常量 `13c4025c`，所以默认部署下的锁
+// 文件名是确定的：`run-13c4025c.lock`。
+func runLockName(ep harness.DockerEndpoint) string {
+	return "run-" + ep.Fingerprint() + ".lock"
+}
 
 // 退避参数。首次重试要快（大多数情况下锁马上就会被放开），上限要小到
 // 不会让 ctx 取消后的响应变迟钝。
@@ -57,13 +81,19 @@ var _ harness.RunLocker = (*FileLock)(nil)
 // NewFileLock 返回路径上的文件锁。构造不碰文件系统——目录可能在后面才建。
 func NewFileLock(path string) *FileLock { return &FileLock{path: path} }
 
-// defaultLock 是装配层在调用方没给锁时用的那把：`<StoreDir>/run.lock` 上的 flock。
+// defaultLock 是装配层在调用方没给锁时用的那把：`/run/lock/red-harness/` 下按
+// daemon 端点取名的 flock。见 DefaultLockDir 与 runLockName。
 //
 // 为什么缺省要有锁，而不是「不传就没有互斥」：跨进程单运行互斥是**生产必需**
 // （两个并发 run 会在平台侧互相踩、并互相删掉对方正在用的容器与网络），把它做成
 // 「调用方记得传」的选项，等于让最危险的那种部署成为最容易发生的那种。
-func defaultLock(storeDir string) harness.RunLocker {
-	return NewFileLock(filepath.Join(storeDir, runLockName))
+//
+// **没有回落到 StoreDir 的分支**：那种「尽力而为」正是这条路径上最坏的选择——
+// 它只在 mkdir 失败时生效（`/run/lock` 不可写 ⇒ 多半是没以 root 跑或宿主布局
+// 不同），而回落到 StoreDir 会让上面那条 inode 缺陷原样复活，且**只在失败路径
+// 上**复活（正常路径看不出来）。所以目录建不出来就报 KindPersistence，不兜底。
+func defaultLock(ep harness.DockerEndpoint) harness.RunLocker {
+	return NewFileLock(filepath.Join(DefaultLockDir, runLockName(ep)))
 }
 
 // Lock 取得锁：拿不到就按退避重试，ctx 结束时返回错误。

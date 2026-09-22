@@ -614,18 +614,24 @@ func TestIntegrationReclaimStale(t *testing.T) {
 	containerID := h.ContainerID
 
 	// live 为空 ⇒ 这次 run 是「重启后的孤儿」。
-	reclaimed, err := d.ReclaimStale(ctx, nil)
+	rep, err := d.ReclaimStale(ctx, nil)
 	if err != nil {
 		t.Fatalf("ReclaimStale: %v", err)
 	}
 	found := false
-	for _, id := range reclaimed {
+	for _, id := range rep.Reclaimed {
 		if id == runID {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("ReclaimStale 应回收 %s, got %v", runID, reclaimed)
+		t.Errorf("ReclaimStale 应回收 %s, got %v", runID, rep.Reclaimed)
+	}
+	// 回收清单是**已经删掉**的那些：报出来的每一个都必须真的不在宿主上了。
+	// 带外核对（而不是只看返回值）是这条断言的要点——返回值与宿主状态分家时，
+	// 「报了但没删」与「删了但没报」都只在这两处对不上时才看得见。
+	if rep.ReclaimedTotal() != len(rep.Reclaimed) {
+		t.Errorf("ReclaimedTotal=%d 与清单长度 %d 不一致", rep.ReclaimedTotal(), len(rep.Reclaimed))
 	}
 	if out, _ := d.run(ctx, nil, "ps", "--all", "--filter", "id="+containerID, "--format", "{{.ID}}"); strings.TrimSpace(out) != "" {
 		t.Errorf("ReclaimStale 后容器仍在: %q", out)
@@ -772,15 +778,60 @@ func TestIntegrationReclaimStaleKeepsForeignObjects(t *testing.T) {
 	}
 
 	// ── 删除面 ──
-	// Pending 当前被 ReclaimStale 丢弃（签名未切），所以这里不只看返回值，
-	// 而是**回宿主上确认对象还在**。
-	reclaimed, err := d.ReclaimStale(ctx, live)
+	// 判定面算得对不等于执行面做得对，所以这里**再走一遍真路径**（ReclaimStale
+	// 自己扫描 + 判定 + 删除），并同时断言两件事：外来的对象没被删，以及它们
+	// **被如实报进了 Pending**。
+	//
+	// ⚠️ 「没删」与「没报」是两种不同的失败：只确认「对象还在」时，一个把外来的
+	// 对象整个**看不见**的实现（扫描时按 owner 过滤掉了）也照样绿——而那意味着
+	// 宿主上躺着一批谁也不认识的进攻性工具容器，且没有任何一处会说出来。
+	rep2, err := d.ReclaimStale(ctx, live)
 	if err != nil {
 		t.Fatalf("ReclaimStale: %v", err)
 	}
-	for _, id := range reclaimed {
+	for _, id := range rep2.Reclaimed {
 		if id == noOwnerRun || id == otherRun {
-			t.Fatalf("ReclaimStale 返回了外来的 run %s: %v", id, reclaimed)
+			t.Fatalf("ReclaimStale 返回了外来的 run %s: %v", id, rep2.Reclaimed)
+		}
+	}
+	pending2 := map[string]harness.StaleReason{}
+	for _, o := range rep2.Pending {
+		pending2[o.Kind+"/"+string(o.RunID)] = o.Reason
+	}
+	if got := pending2["container/"+string(noOwnerRun)]; got != harness.StaleOwnerUnknown {
+		t.Errorf("ReclaimStale 漏报/错报了无 owner 的容器: reason=%q（Pending=%+v）", got, rep2.Pending)
+	}
+	if got := pending2["network/"+string(noOwnerRun)]; got != harness.StaleOwnerUnknown {
+		t.Errorf("ReclaimStale 漏报/错报了无 owner 的网络: reason=%q（Pending=%+v）", got, rep2.Pending)
+	}
+	if got := pending2["container/"+string(otherRun)]; got != harness.StaleOwnerMismatch {
+		t.Errorf("ReclaimStale 漏报/错报了他人 owner 的容器: reason=%q（Pending=%+v）", got, rep2.Pending)
+	}
+	// Pending 必须**逐个对象**地报，而不是被同一个 runID 去重掉。这里不钉「总数
+	// 恰好是 3」：`live` 是扫描那一刻的快照，同一台宿主上另一个 worktree 的集成
+	// 门可能在下一瞬建出对象——那会让总数多一条，与「去重」这件事无关。
+	// 钉「同一个 runID 下容器与网络各报一条」既精确又不受那种并发干扰。
+	var sameRunPending []harness.StaleObject
+	for _, o := range rep2.Pending {
+		if o.RunID == noOwnerRun {
+			sameRunPending = append(sameRunPending, o)
+		}
+	}
+	if len(sameRunPending) != 2 {
+		t.Errorf("同一个 run 的容器与网络应当各报一条 Pending，得到 %d 条: %+v",
+			len(sameRunPending), rep2.Pending)
+	}
+	if rep2.PendingTotal() != len(rep2.Pending) {
+		t.Errorf("PendingTotal=%d 与清单长度 %d 不一致", rep2.PendingTotal(), len(rep2.Pending))
+	}
+	if rep2.ReclaimedTotal() != len(rep2.Reclaimed) {
+		t.Errorf("ReclaimedTotal=%d 与清单长度 %d 不一致", rep2.ReclaimedTotal(), len(rep2.Reclaimed))
+	}
+	// 报出来的每一条都必须带上「为什么留下它」的依据：一个只有 runID 的 Pending
+	// 让人无从判断该不该人工介入。
+	for _, o := range rep2.Pending {
+		if o.Kind == "" || o.RunID == "" || o.Reason == "" {
+			t.Errorf("Pending 条目缺字段: %+v", o)
 		}
 	}
 	if !exists("ps", "--all", "--filter", "label="+LabelRun+"="+string(noOwnerRun), "--format", "{{.ID}}") {

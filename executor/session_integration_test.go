@@ -992,18 +992,26 @@ func TestV04ReclaimStaleRemovesCrashLeftover(t *testing.T) {
 	}
 
 	// live 里只有 liveID ⇒ crashID 是「重启后的孤儿」。
-	reclaimed, err := d.ReclaimStale(ctx, map[harness.RunID]bool{liveID: true})
+	out, err := d.ReclaimStale(ctx, map[harness.RunID]bool{liveID: true})
 	if err != nil {
 		t.Fatalf("ReclaimStale: %v", err)
 	}
 	found := false
-	for _, id := range reclaimed {
+	for _, id := range out.Reclaimed {
 		if id == crashID {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("ReclaimStale 应回收 %s, got %v", crashID, reclaimed)
+		t.Errorf("ReclaimStale 应回收 %s, got %v", crashID, out.Reclaimed)
+	}
+	// 这一条是「别把别人报成自己人」的入口：crashID 是本部署的孤儿，所以它必须
+	// 出现在**回收**清单里，而不是待定清单里。两者互换的表现是「孤儿永远不被收，
+	// 而每次运行都报一堆待定」——没人会注意到，因为运行本身是成功的。
+	for _, o := range out.Pending {
+		if o.RunID == crashID {
+			t.Errorf("本部署的孤儿被报成了待定（%+v）：它会被永久留在宿主上", o)
+		}
 	}
 
 	// 遗留必须没了（容器与网络）。

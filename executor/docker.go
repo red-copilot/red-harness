@@ -303,18 +303,25 @@ func (d *Docker) Reclaim(ctx context.Context, runID harness.RunID) error {
 //
 // live 是当前仍应存在的 runID 集合（由引擎从 store 里读出来）。
 //
-// ⚠️ **Pending 在本轮被丢弃**：ReclaimStale 的签名（harness.Sandbox 端口）还没
-// 切到 harness.ReclaimReport，所以「发现了但不该删」这件事暂时没有通道。这是
-// 有意的中间态，且严格比切之前安全——切之前那些对象会被直接删掉。
+// 返回值是两个集合而不是一个：`Reclaimed` 是**这次真的删掉的**，`Pending` 是
+// **发现了但不该删的**。切签名之前 `Pending` 被直接丢弃，于是「扫到了东西、但
+// 一件都没删」与「宿主上根本没有孤儿」在调用方眼里完全同形——前者意味着有容器
+// 正以不可证的归属躺在宿主上（那是最需要被看见的一档），却被报成后者。
+// Pending 里的对象带 owner 与原因（owner_mismatch / owner_unknown / unparsable），
+// 它们是**资源拓扑**，所以去处由调用方决定：计数进公开面，明细只进私密面或日志。
+//
+// 拒绝（owner 解析不出来）时返回**零值报告**：此时连扫描都还没开始，一个空报告
+// 是唯一诚实的答案——给一个带 Pending 的报告会让调用方以为「扫过了、没发现问题」。
 //
 // 为什么必须有它：宿主重启后内存里的 run 列表没了，只有磁盘上的 run 目录还在。
 // 没有这个扫描，重启前起的容器会永久占着网段与内存，而它们跑的 agent 已经
 // 没有任何人在看了——那是一个无人监督的进攻性工具进程。
-func (d *Docker) ReclaimStale(ctx context.Context, live map[harness.RunID]bool) ([]harness.RunID, error) {
+func (d *Docker) ReclaimStale(ctx context.Context, live map[harness.RunID]bool) (harness.ReclaimReport, error) {
 	// owner 在任何副作用之前解析（判据的输入，缺了它一律不删）。
 	self, err := d.selfOwner()
 	if err != nil {
-		return nil, err
+		// 零值报告：扫描尚未发生（见上面「拒绝时」那段）。
+		return harness.ReclaimReport{}, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, d.cfg.PrepareTimeout)
 	defer cancel()
@@ -325,22 +332,27 @@ func (d *Docker) ReclaimStale(ctx context.Context, live map[harness.RunID]bool) 
 	for _, kind := range []string{"container", "network"} {
 		part, err := d.scanLabeled(ctx, kind)
 		if err != nil {
-			return nil, err
+			return harness.ReclaimReport{}, err
 		}
 		objs = append(objs, part...)
 	}
 
 	rep := judgeStale(objs, self, live)
-	// 删除逐个走 Reclaim（它自己有 owner 闸门），失败时返回**已删的那批**加错误——
-	// 与切之前同形：调用方拿到的是「这次实际删掉了什么」，而不是一个空集合。
-	reclaimed := make([]harness.RunID, 0, rep.ReclaimedTotal())
+	// 删除逐个走 Reclaim（它自己有 owner 闸门）。判定的结果原样交出去，只把
+	// `Reclaimed` 收窄成**实际删掉的那批**——判据说「该删」不等于删成功了，
+	// 而 Pending 与「该删但没删掉」是两件事，不能混进同一个集合。
+	deleted := make([]harness.RunID, 0, rep.ReclaimedTotal())
 	for _, id := range rep.Reclaimed {
 		if err := d.Reclaim(ctx, id); err != nil {
-			return reclaimed, err
+			// 失败时把**已经删掉的那批**放回报告再返回：与切之前同形（调用方拿到
+			// 的是「这次实际删掉了什么」，而不是一个空集合），同时保住 Pending。
+			rep.Reclaimed = deleted
+			return rep, err
 		}
-		reclaimed = append(reclaimed, id)
+		deleted = append(deleted, id)
 	}
-	return reclaimed, nil
+	rep.Reclaimed = deleted
+	return rep, nil
 }
 
 // scanLabeled 扫描宿主上带 LabelRun 标签的对象，返回**逐个对象**的归属信息

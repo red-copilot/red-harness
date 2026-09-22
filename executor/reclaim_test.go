@@ -349,7 +349,16 @@ func TestSelfOwnerFailsClosed(t *testing.T) {
 	if err := (&Docker{cfg: DockerConfig{}}).Reclaim(t.Context(), "run-1"); err == nil {
 		t.Error("Owner 未解析时 Reclaim 必须拒绝（不得在副作用之后才失败）")
 	}
-	if _, err := (&Docker{cfg: DockerConfig{}}).ReclaimStale(t.Context(), nil); err == nil {
+	// 拒绝时返回的报告是**零值**，这不是随手写的：扫描**根本没有发生**，所以
+	// 「回收了 0 个、待定 0 个」是唯一如实的答案。若这里返回一个「已回收 N 个」
+	// 的非空报告，调用方会把一次「我拒绝执行」读成「我干完了」——那正是
+	// owner 未解析这条路径最危险的读法。
+	rep, err := (&Docker{cfg: DockerConfig{}}).ReclaimStale(t.Context(), nil)
+	if err == nil {
 		t.Error("Owner 未解析时 ReclaimStale 必须拒绝")
+	}
+	if rep.ReclaimedTotal() != 0 || rep.PendingTotal() != 0 {
+		t.Errorf("拒绝时报告必须是零值（扫描尚未发生），得到 回收=%d 待定=%d",
+			rep.ReclaimedTotal(), rep.PendingTotal())
 	}
 }

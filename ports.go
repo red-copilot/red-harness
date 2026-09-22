@@ -385,9 +385,21 @@ var (
 // `document()`）：图里不许出现候选明文，而 `Rejected[].Content` 装的恰恰是命中
 // 答案形状的原文。
 //
+// **返回值是四态而不是 error**（N0 切换）：实现方**如实回答**这一题的产物到底
+// 有没有落到盘上——它只准返回 `GraphSaved` / `GraphAbsent` / `GraphFailed`
+// 三者之一，`GraphDisabled` 是装配事实、由根包折算（见 GraphState）。
+//
+// 这一刀修的是一个具体的误读：过去返回 `error`，于是 `nil` 同时承担「没有失败」
+// 与「有文件产生」两个意思，而装配层的实现有一条「这一题没有登记过图」的正常
+// 分支同样返回 nil——「图没写出来」被读成「写了」。
+//
+// 失败时**必须**返回 `GraphFailed` 并带上错误：阶段枚举（marshal / write /
+// export）是从 err 链上的哨兵推出来的（见 ErrGraph*），报失败却不带 err 的实现
+// 会让公开面出现「状态说失败、却没有任何阶段可查」的自相矛盾。
+//
 // 为 nil 表示不落盘（干跑、离线测试，以及不关心图研究的调用方）。
 type GraphSaver interface {
-	SaveGraph(ctx context.Context, runID RunID, ch Challenge) error
+	SaveGraph(ctx context.Context, runID RunID, ch Challenge) (GraphState, error)
 }
 
 // GraphState 是**某一题图产物的实际结果**。
