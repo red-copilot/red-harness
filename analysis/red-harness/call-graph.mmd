@@ -14,6 +14,7 @@ graph TD
   n_cmd_red_harness["cmd/red-harness"]
   n_piai_testdata_stubpi["stubpi（测试替身）"]
   n_runner_Dockerfile["runner/Dockerfile（镜像构建）"]
+  n_runner_Dockerfile_teststub["Dockerfile.teststub（测试镜像）"]
   n_dom_agent --> n_dom_contract
   n_dom_agent --> n_dom_data
   n_dom_agent ==> n_dom_execution
@@ -39,5 +40,6 @@ graph TD
   n_cmd_red_harness --> n_dom_composition
   n_piai_testdata_stubpi --> n_dom_agent
   n_runner_Dockerfile --> n_dom_execution
+  n_runner_Dockerfile_teststub --> n_dom_execution
   classDef entry fill:#1f6feb,stroke:#0b3d91,color:#fff
-  class n_bridge_bridge_py,n_cmd_red_harness,n_piai_testdata_stubpi,n_runner_Dockerfile entry
+  class n_bridge_bridge_py,n_cmd_red_harness,n_piai_testdata_stubpi,n_runner_Dockerfile,n_runner_Dockerfile_teststub entry

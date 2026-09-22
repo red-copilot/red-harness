@@ -15,7 +15,7 @@
    无装配方"，本脚本对它们做**抑制**处理（见 NAIVE_GRAPH_FALSE_POSITIVES）。
 3. **入口点在部署/构建描述里**。Go 的 `main()`、Python 子进程的 argv、Dockerfile 的
    ENTRYPOINT——不解析它们，顶层模块看起来全都不可达。
-4. **死端只在边齐了之后才有意义**。本项目的提取结果是 0，而"看起来像孤岛"的三处全部
+4. **死端只在边齐了之后才有意义**。本项目的提取结果是 0，而"看起来像孤岛"的每一处都
    命中抑制规则。这不是空结果，这是结论。
 
 不读凭据：脚本显式跳过 `.env*` / `*.ovpn` / `.agent.env`，且只引用环境变量**名**
@@ -66,6 +66,7 @@ MODULES = [
     ("store", "store", "dom:store", "go", "store", "module"),
     ("executor", "executor", "dom:execution", "go", "executor", "module"),
     ("runner/Dockerfile", "runner/Dockerfile（镜像构建）", "dom:execution", "dockerfile", "runner/Dockerfile", "job"),
+    ("runner/Dockerfile.teststub", "Dockerfile.teststub（测试镜像）", "dom:execution", "dockerfile", "runner/Dockerfile.teststub", "job"),
     ("piai", "piai", "dom:agent", "go", "piai", "module"),
     ("piai/testdata/stubpi", "stubpi（测试替身）", "dom:agent", "go", "piai/testdata/stubpi", "module"),
     ("bridge", "bridge（Go 侧）", "dom:agent", "go", "bridge", "module"),
@@ -84,6 +85,7 @@ DATASTORES = [
     ("ds:events.jsonl", "events.jsonl", "领域事件日志，0600，序号单调"),
     ("ds:run.json", "run.json", "原子快照，0600，恢复以 lastAppliedSeq 为基线"),
     ("ds:graph.json", "graph.json", "DAG 载荷，0600；落盘前 scrub 擦明文"),
+    ("ds:graph.mmd", "graph.mmd", "同图的 mermaid 导出，0600；从刚落盘的那份真源派生"),
     ("ds:candidates.jsonl", "private/candidates.jsonl", "候选明文账本，0600——全仓明文唯一落点"),
     ("ds:evidence", "private/evidence/", "原始工具输出（含明文），0700/0600"),
     ("ds:private-trace", "private/<runID>/*.jsonl", "原始事件 trace，单文件 64 MiB 上限"),
@@ -143,20 +145,24 @@ RUNTIME_EDGES = [
     # 存储写入面：store 是这些落点的唯一写者（单写者模型）
     ("store", "ds:events.jsonl", "write", "**能力边**：FileStore 在 v0.4 无装配方。Append 先事件后快照的顺序仍是硬契约"),
     ("store", "ds:run.json", "write", "**能力边**：FileStore 在 v0.4 无装配方"),
-    ("store", "ds:graph.json", "write", "**能力边**：端口有、装配方无；`HarnessOptions` 没有 Graph 字段"),
+    ("store", "ds:graph.json", "write", "v0.4 **实际生效**：`PutGraph` 由装配层的 dagGraphSaver 驱动（`wire.go:300` 恒提供 `Graphs`）"),
+    ("store", "ds:graph.mmd", "write", "v0.4 **实际生效**：`PutGraphExport`，与 graph.json 并列、同权限 0600"),
+    ("internal/wire", "ds:graph.json", "write", "装配层 `dagGraphSaver.SaveGraph`：`ForRun(runID).PutGraph(json.Marshal(graph))`，载荷走 dag 的统一擦洗"),
+    ("internal/wire", "ds:graph.mmd", "write", "同一处 `PutGraphExport(dag.Mermaid(graph))`，从**刚落盘的真源**派生，不另拼一份"),
     ("store", "ds:candidates.jsonl", "write", "**能力边**：`Private()`/`PutCandidate` 零生产调用方"),
     ("store", "ds:evidence", "write", "**能力边**：零生产调用方"),
     ("store", "ds:private-trace", "write", "v0.4 **实际生效**：题目名 sha256 后当文件名"),
     ("store", "ds:results", "write", "v0.4 **实际生效**：只 marshal 计数与指纹"),
     ("store", "ds:report", "write", "**能力边**：生产调用方为零，`report/` 包不存在"),
     ("internal/wire", "ds:run.lock", "write", "flock；进程以任何方式退出都由内核释放"),
-    ("dag", "ds:graph.json", "read", "**能力边**：Load/LoadOrNew 零生产调用方（v0.4 不做续跑）"),
+    ("dag", "ds:graph.json", "read", "**能力边**：`Load`/`LoadOrNew` 零生产调用方（v0.4 不做续跑）。注意方向：dag 是**写**侧的载荷与擦洗所有者（`document()`，与 `Save` 共用），但落盘动作在装配层"),
     ("bridge", "ds:bridge-stderr", "write", "把桥的 stderr 落到 private/，否则平台异常无从定位"),
     # 执行隔离
     ("executor", "ds:docker-daemon", "call", "docker CLI（info/run/exec/ps/network），全程 argv 级"),
     ("executor", "ds:host-netfilter", "write", "按 run 安装/卸载 DOCKER-USER 链规则"),
     ("executor", "ds:runner-image", "read", "image inspect 拿 ID，再 run 起容器"),
-    ("runner/Dockerfile", "ds:runner-image", "write", "docker build 产出镜像"),
+    ("runner/Dockerfile", "ds:runner-image", "write", "docker build 产出镜像（tag 由 runner/README 记录）"),
+    ("runner/Dockerfile.teststub", "ds:runner-image", "write", "集成门现场构建 `red-harness-runner:teststub`：静态编译的 stub pi，不需要 provider 凭据"),
     ("executor", "ds:provider-api", "write", "容器出网只走白名单代理（provider allowHosts）"),
     # 平台与 agent
     ("bridge/bridge.py", "ds:tsecbench-api", "read", "list / get / start / hint / check_vpn"),
@@ -171,14 +177,17 @@ ENTRY_POINTS = [
     ("bridge/bridge.py", "Python 子进程入口：JSONL over stdio，启动先打一行 hello 握手"),
     ("runner/Dockerfile", "镜像入口：docker build 的产物 tag 是 executor 的缺省镜像"),
     ("piai/testdata/stubpi", "假 pi 进程入口：仅 go test 编译，是 pi RPC 帧格式的唯一可执行规范"),
+    ("runner/Dockerfile.teststub", "测试镜像入口：由 `executor/session_integration_test.go` 现场 docker build，证明 stub pi 真的跑在目标容器里而不是宿主"),
 ]
 
-# 朴素图（只看 import/文本 grep）会误判成孤岛的三处。`/modernize-map` 的规则是：
+# 朴素图（只看 import/文本 grep）会误判成孤岛的两处。`/modernize-map` 的规则是：
 # 任何"可能是未解析动态调用的目标"都不许进 deadEnds，只能记进 observations。
-# 这三处全部命中，所以本图的 deadEnds 是空集——这不是提取失败，这是结论。
+# 两处全部命中，所以本图的 deadEnds 是空集——这不是提取失败，这是结论。
+#
+# 注：这份清单**曾经有三条**，第一条是 `ds:graph.json`（当时的判词是「端口有、装配方无」）。
+# 2026-09-22 复核时该判词已过期：装配层 `wire.go` 现在恒提供 `Graphs`，图有生产写入方了。
+# 它因此**不再是**死端候选（有入边），整条从清单移除——留下的两条是复核后仍然成立的。
 NAIVE_GRAPH_FALSE_POSITIVES = [
-    ("ds:graph.json", "harness.GraphStore 是动态端口（`engine.Options.Graph` 就长这样），"
-                      "装配层只是**当前**没接。grep 看不到端口，会判成死代码。"),
     ("ds:report", "`store.FileStore.PutReport` 是公开方法，未来的 `report/` 包或任何 SDK 调用方"
                   "都能直接调。生产调用方为零 ≠ 不可达。"),
     ("harness.New / RegisterEngine", "`engine.go` 里的引擎注册表，全仓只有 `contract_test.go` 在调。"
@@ -188,13 +197,13 @@ NAIVE_GRAPH_FALSE_POSITIVES = [
 ]
 
 OBSERVATIONS = [
-    "**CLAUDE.md 的架构描述曾整段落后一代，2026-09-22 已按本图修正。** 提取时它仍在描述 v0.3：`engine/` 是「中心缺口」（实际 v0.4 的 `NewHarness`（v04.go:309）直接构造 `*Harness`、绕开注册表，装配在 `internal/wire`）、装配点写作 `internal/cli/wire.go`（实际 `internal/wire/wire.go`）、CLI 列了 8 个子命令（实际 4 个）、`piai` 契约「未对齐」（实际 `piai/factory.go:72` 已有 `var _ harness.Agent` 断言）、`scenario/` 「尚未创建」（实际已存在）。逐条对照见 `docs/v0.4-open-items.md` D 节。**这条观察留着是因为它会再发生**——CLAUDE.md 没有 CI 校验，而 v0.4 是破坏性升级。",
-    "**`internal/wire` 是唯一同时看得见全部 7 个实现包的模块。** 实现包之间两两互不 import（executor 不认识 scenario，scenario 不认识 dag），这是「一个子包 = 一个 agent」并行编排能成立的前提。代价：它是编译耦合的单点，也是「谁把 X 交给 Y」这个问题的唯一答案所在。",
-    "**三条把系统拼起来的边在 import 图里完全不可见**（已按 dispatch 建模）：`internal/cli → internal/wire`（`cli.SetWire` 装包级 `WireFunc` 变量）、`scenario → bridge`（`Platform` 窄接口由 wire 注入）、`piai → executor`（`AgentFactory.New` 收 `harness.SandboxSession`）。任何 grep-import 的依赖图都会漏掉它们，并据此把 cli/scenario/piai 误判成孤立。",
-    "**明文只有一个落点，而它有四个入口。** `store/private.go` 是唯一允许出现候选明文的地方；gate 不 import store，它经 `harness.EvidenceStore` 写账本——这是第四条不可见的边。出私密面的最后一道闸是 `dag.Graph.Save` 落盘前的 `scrub`，而 `Raw` 字段（工具输出原文摘录）是最容易漏的那个。",
-    "**两个外部边界的契约由测试替身钉死，它们不是可选的脚手架。** `bridge/testdata/mock_sdk.py` 与真 SDK 逐字段对齐，**连两个源码级缺陷一起照抄**（畸形载荷抛裸 KeyError、2xx 非 JSON 抛 JSONDecodeError）——「修好」它们等于删掉桥必须包住的失效模式；`piai/testdata/stubpi` 是 pi RPC 帧格式唯一的可执行规范。",
-    "**整个事件溯源底座在 v0.4 没有生产调用方——这是本次提取最重的发现。** `store.FileStore`（events.jsonl / run.json / graph.json / candidates.jsonl / evidence/ / report.*）**只被 `store/store_test.go` 构造**，`store.New` 在装配路径上从不出现；`harness.Store`(ports.go:382) / `GraphStore`(ports.go:373) / `EvidenceStore`(ports.go:392) 三个端口与 `dag.Graph.Save/Load/LoadOrNew` 同样零生产调用方。v0.4 真正落的只有 `results/<runID>.json`（公开指标）与 `<ResultDir>/private/<runID>/*.jsonl`（trace）。**注意本图仍画着 `store → ds:events.jsonl` 这类 write 边**：它们是 store 的**能力**（代码里确实能写），不是当前**接线**（FileStore 从未被构造）。区分「端口存在」与「装配存在」是这张图最容易骗人的地方。详见 `docs/v0.4-open-items.md` A 节。**明文纪律没有破**——trace 目录同样 0700/0600——但落点与 CLAUDE.md 写的 `runs/<id>/private/` 不是同一个。",
-    "**未解析的动态目标只有一处，但它有两副面孔。** `bridge.py` 的 SDK 解析是个二选一：`TSEC_MOCK=1` + `PYTHONPATH=bridge/testdata` 走 mock_sdk，否则 `import tsec_benchmark` 走真 SDK。本图只解析了前一条边。后一条在本机**必然失败**（宿主 py3.12 缺 httpx），真跑的唯一路径是 `docker exec <容器> python3 -m bridge`——所以这条未解析边同时是「本机限制」的体现。",
+    "**文档与代码的漂移是双向的，这次漂的是本图自己。** 16:16 那版提取给 `ds:graph.json` 的判词是「端口有、装配方无」，而装配层随后补上了 `dagGraphSaver`（`internal/wire/wire.go:300` 恒提供 `Graphs`）——图从此有了生产写入方。同一份 `CLAUDE.md` 当时还在描述 v0.3（`engine/` 是中心缺口、CLI 8 个子命令、`scenario/` 尚未创建），17:44 已按实况改写，反而比图更准。**两边都没有 CI 校验，所以两边的漂移都只能靠下一次复核抓到**：本脚本的 dispatch 证据回查挡得住「源码挪了」，挡不住「语义变了、证据模式还在」这种漂移——`graph.json` 这条正是后者（端口名没变，装配方从无到有）。",
+    "**`internal/wire` 是唯一同时看得见全部 7 个实现包的模块，而真正把系统拼起来的边在 import 图里完全不可见。** 实现包之间两两互不 import（executor 不认识 scenario，scenario 不认识 dag），这是「一个子包 = 一个 agent」并行编排能成立的前提；代价是 wire 成为编译耦合的单点，也是「谁把 X 交给 Y」这个问题的唯一答案所在。三条最关键的边因此只能按 dispatch 建模：`internal/cli → internal/wire`（`cli.SetWire` 装包级 `WireFunc` 变量）、`scenario → bridge`（`Platform` 窄接口由 wire 注入）、`piai → executor`（`AgentFactory.New` 收 `harness.SandboxSession`）。任何 grep-import 的依赖图都会漏掉它们，并据此把 cli/scenario/piai 误判成孤立——本图的 11 条 dispatch 边每条都带源码证据回查，就是为了让这种误判当场露馅。",
+    "**明文的纪律比它的落点更稳定——落点换过一次，纪律没换。** 允许出现候选明文的地方只有私密面：v0.4 **实际生效**的是 `<ResultDir>/private/<runID>/*.jsonl`（目录 0700、文件 0600），而 `store/private.go` 那条账本（`PutCandidate`/`PutEvidence`）当前零生产调用方。gate 不 import store，它经 `harness.EvidenceStore` 写账本——这是装配层之外又一条不可见的边。出私密面的最后一道闸是图落盘前的**统一**擦洗（`dag` 的 `document()`，由装配层的 dagGraphSaver 驱动，`Save` 与 `json.Marshal` 共用同一份），而 `Raw` 字段（工具输出原文摘录）是最容易漏的那个——它曾经真的漏过。",
+    "**桥的两侧契约都由可执行替身钉死，而其中一条边本机永远走不通。** `bridge/testdata/mock_sdk.py` 与真 SDK 逐字段对齐，**连两个源码级缺陷一起照抄**（畸形载荷抛裸 KeyError、2xx 非 JSON 抛 JSONDecodeError）——「修好」它们等于删掉桥必须包住的失效模式；`piai/testdata/stubpi` 是 pi RPC 帧格式唯一的可执行规范。而 `bridge.py` 的 SDK 解析是个**二选一**：`TSEC_MOCK=1` + `PYTHONPATH=bridge/testdata` 走 mock_sdk，否则 `import tsec_benchmark` 走真 SDK。本图只解析了前一条。后一条在宿主上**必然失败**（py3.12 缺 httpx），真跑的唯一路径是 `docker exec <容器> python3 -m bridge`——所以这条未解析边同时是「本机限制」与「SDK 装在容器层」的体现。",
+    "**落盘面在 v0.4 裂成两半：图那一半已接线，事件溯源那一半仍悬空。** `store.FileStore` **确实在装配路径上被构造了**（`wire.go:219` 的 `store.New(storeDir)`，拿的是图存储的根句柄），`PutGraph`/`PutGraphExport`/`ForRun` 因此有生产写入方，落点是 `<StoreDir>/runs/<runID>/graph.json` + `graph.mmd`（0600）。但同一个 `FileStore` 的另一半——`Append`（events.jsonl）、`PutSnapshot`（run.json）、`PutCandidate`、`PutEvidence`（private/）、`PutReport`（report.*）——**生产调用方仍然是零**，`Private()` 也无人调用。**本图照样画着 `store → ds:events.jsonl` 这类 write 边**：那是 store 的**能力**（代码里确实能写），不是当前**接线**。区分「端口存在」与「装配存在」是这张图最容易骗人的地方，而它现在在同一张图上**同时出现两种答案**。详见 `docs/v0.4-open-items.md` A 节（注意该文写于图落盘落地之前，它的 `graph.json` 行已过期）。**明文纪律没有破**：v0.4 的明文落点是 `<ResultDir>/private/<runID>/*.jsonl`，目录 0700、文件 0600，图的载荷另经 dag 的统一擦洗。",
+    "**发布门的缺口在这张图上就是一条边：`bridge/bridge.py ⇒ ds:tsecbench-api` 的 submit 从未成功过。** 真实 pi 已在 sandbox 内跑通工具调用并从靶场拿到 200，但平台 `submit` 返回 `app_error (http 501)`，尚无平台确认的提交闭环（`docs/roadmap.md` M4 记「未通过」）。harness 的处理是对的——按「提交结果不确定」结束本题、先对账、并正确关掉了题目容器（平台侧确认 `stopped`、无遗留）——但这意味着**这条边在图上只应读作「已实现、未验证」**。同一张图上还有一条类似的边：`executor → ds:host-netfilter`，它的边界已在 `roadmap.md` 与 `docs/offensive-harness-sdk-roadmap.md` 写明——**同一 Docker bridge 内的流量不经过当前 iptables 规则**，所以「非授权端点不可达」成立，「对任意同桥容器也隔离」不成立。两条最该被质疑的边都不是画错，是**证据边界**。",
+    "**v0.5 已规划一次明确的破坏性整理，本图的双代结构是它的主要目标。** `docs/offensive-harness-sdk-roadmap.md`（新增）第 3 节列出：把 `SolverProfile` 的任意 `map[string]any` 换成带 schema 的配置、补私密候选审计记录、给 v0.3 的 `Engine`/`RunHandle`/`New`/`RegisterEngine`/`Store`/`EvidenceStore`/旧 `Executor` 标注 legacy 并在无生产调用方时移出根包，同时保留 `Reason*` 字符串、图 schema 读取能力与 `answer.Fingerprint` 唯一实现。**这就是本图里那些「零生产调用方」落点最终的去向**——它们不是待修的缺口，是已排期的废弃面。",
 ]
 
 
@@ -497,7 +506,8 @@ def mermaid_data_lineage(edges, tree):
 
     lines = ["graph LR",
              "  %% 读写线（由 extract_topology.py 生成）。--> 读，==> 写。",
-             "  %% 圆柱 = 数据存储。注意 store 是下面 8 个落点的唯一写者（单写者模型）。"]
+             "  %% 圆柱 = 数据存储。store 是绝大多数落点的写者，例外是图：",
+             "  %% graph.json / graph.mmd 由装配层的 dagGraphSaver 驱动（store 提供方法，wire 提供装配）。"]
     for nid in order:
         name = leaves[nid]
         if nid.startswith("ds:"):
@@ -595,12 +605,12 @@ def load_flows():
             "description": "在授权环境里敲一条命令，跑完一批题，结束时拿到分数与可复现的运行记录。",
             "steps": [
                 {"label": "敲下 run，指定场景与预算", "nodes": ["cmd/red-harness", "internal/cli"]},
-                {"label": "装配层把契约与实现拼成一台 Harness", "nodes": ["internal/wire", "harness"]},
-                {"label": "抢到全机唯一的那把运行锁", "nodes": ["ds:run.lock"]},
+                {"label": "装配层把契约与实现拼成一台 Harness，并抢下全机唯一那把锁", "nodes": ["internal/wire", "harness", "ds:run.lock"]},
                 {"label": "从平台取回题目清单与目标地址", "nodes": ["scenario", "bridge", "bridge/bridge.py", "ds:tsecbench-api"]},
                 {"label": "为这道题拉起隔离容器与内网", "nodes": ["executor", "ds:docker-daemon", "ds:runner-image"]},
                 {"label": "在容器里驱动 pi 跑题，事件实时回流", "nodes": ["piai", "executor"]},
-                {"label": "过程与快照落盘（公开面只有指纹）", "nodes": ["store", "ds:events.jsonl", "ds:run.json"]},
+                {"label": "过程与候选落进私密 trace，公开面只留指纹", "nodes": ["store", "ds:private-trace"]},
+                {"label": "每题终态的 DAG 落盘，供事后复盘剪枝链", "nodes": ["internal/wire", "ds:graph.json", "ds:graph.mmd"]},
                 {"label": "写完公开指标，list / stats 读得到", "nodes": ["ds:results", "internal/cli"]},
             ],
         },
@@ -614,8 +624,8 @@ def load_flows():
                 {"label": "出网只走白名单代理", "nodes": ["ds:host-netfilter", "ds:provider-api"]},
                 {"label": "工具输出被实时判读成候选证据", "nodes": ["gate", "answer"]},
                 {"label": "事实与意图进图，供下一轮提示剪枝", "nodes": ["dag"]},
-                {"label": "候选明文只写私密账本", "nodes": ["store", "ds:candidates.jsonl", "ds:evidence"]},
-                {"label": "提交答案换分", "nodes": ["bridge/bridge.py", "ds:tsecbench-api"]},
+                {"label": "候选明文只写私密 trace（0700/0600）", "nodes": ["store", "ds:private-trace"]},
+                {"label": "把候选提交回平台换分——这条边**尚未被平台确认过**（submit 501）", "nodes": ["bridge/bridge.py", "ds:tsecbench-api"]},
             ],
         },
         {
@@ -623,11 +633,11 @@ def load_flows():
             "persona": "合规审计员（以及事后复盘的人）",
             "description": "不碰私密目录，只读公开面，核验候选明文一次都没有离开过受控范围。",
             "steps": [
-                {"label": "只读公开面：快照、事件日志、指标", "nodes": ["ds:run.json", "ds:events.jsonl", "ds:results"]},
-                {"label": "每条候选在公开面只有指纹", "nodes": ["answer", "store"]},
-                {"label": "落图前 scrub 擦明文（含最易漏的 Raw）", "nodes": ["dag", "ds:graph.json"]},
-                {"label": "要验明文必须进 private/（0700/0600）", "nodes": ["ds:candidates.jsonl", "ds:evidence"]},
-                {"label": "跨机读不到：目录 0700、文件 0600", "nodes": ["store"]},
+                {"label": "只读公开面：结果文件里只有计数与指纹", "nodes": ["ds:results", "internal/cli"]},
+                {"label": "每条候选在公开面只以一个指纹出现", "nodes": ["answer", "store"]},
+                {"label": "要核明文必须进 private/<runID>/（0700/0600）", "nodes": ["ds:private-trace", "store"]},
+                {"label": "图落盘前被统一擦洗一遍（含最易漏的 Raw 字段）", "nodes": ["internal/wire", "dag", "ds:graph.json"]},
+                {"label": "桥的平台异常只从这里定位，且同样在私密面", "nodes": ["ds:bridge-stderr", "bridge"]},
             ],
         },
         {
@@ -640,6 +650,7 @@ def load_flows():
                 {"label": "等桥打出 hello 握手行（探活判据）", "nodes": ["bridge", "bridge/bridge.py"]},
                 {"label": "平台响应体落 private stderr 供定位", "nodes": ["ds:bridge-stderr", "store"]},
                 {"label": "用 fake 场景跑通全流程，不碰网络", "nodes": ["scenario", "internal/wire"]},
+                {"label": "证明 pi 真的跑在目标容器里而不是宿主", "nodes": ["runner/Dockerfile.teststub", "ds:runner-image", "piai/testdata/stubpi"]},
             ],
         },
     ]
@@ -701,11 +712,11 @@ def print_summary(topo, edges, evidence_report, computed_dead, dead_ends, locs, 
 
     print(f"\n── 死端候选 ──")
     print(f"    计算得 {len(computed_dead)} 个无入边叶子，抑制后 **{len(dead_ends)}** 个。")
-    print("    朴素图（只 grep import）会误判成孤岛的三处，全部命中抑制规则：")
+    print("    朴素图（只 grep import）会误判成孤岛的每一处，都命中抑制规则：")
     for did, why in NAIVE_GRAPH_FALSE_POSITIVES:
         print(f"      [抑制] {did}\n             {why}")
     if bad == 0 and not dead_ends:
-        print("    结论：没有孤儿模块。看起来像孤岛的三处全是「动态端口的预定目标」，不是死代码。")
+        print("    结论：没有孤儿模块。看起来像孤岛的每一处都是「动态端口的预定目标」，不是死代码。")
 
     print(f"\n── 架构观察（{len(topo['observations'])} 条）──")
     for i, o in enumerate(topo["observations"], 1):

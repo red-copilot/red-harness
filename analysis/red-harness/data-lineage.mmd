@@ -1,16 +1,18 @@
 graph LR
   %% 读写线（由 extract_topology.py 生成）。--> 读，==> 写。
-  %% 圆柱 = 数据存储。注意 store 是下面 8 个落点的唯一写者（单写者模型）。
+  %% 圆柱 = 数据存储。store 是绝大多数落点的写者，例外是图：
+  %% graph.json / graph.mmd 由装配层的 dagGraphSaver 驱动（store 提供方法，wire 提供装配）。
   n_store["store"]
   n_ds_events_jsonl[("events.jsonl")]
   n_ds_run_json[("run.json")]
   n_ds_graph_json[("graph.json")]
+  n_ds_graph_mmd[("graph.mmd")]
+  n_internal_wire["internal/wire"]
   n_ds_candidates_jsonl[("private/candidates.jsonl")]
   n_ds_evidence[("private/evidence/")]
   n_ds_private_trace[("private/<runID>/*.jsonl")]
   n_ds_results[("results/<runID>.json")]
   n_ds_report[("report.json / report.md")]
-  n_internal_wire["internal/wire"]
   n_ds_run_lock[("run.lock")]
   n_dag["dag"]
   n_bridge["bridge（Go 侧）"]
@@ -19,6 +21,7 @@ graph LR
   n_ds_host_netfilter[("宿主 netfilter")]
   n_ds_runner_image[("runner 镜像（docker images）")]
   n_runner_Dockerfile["runner/Dockerfile（镜像构建）"]
+  n_runner_Dockerfile_teststub["Dockerfile.teststub（测试镜像）"]
   n_ds_provider_api[("模型 provider API")]
   n_bridge_bridge_py["bridge.py（Python 桥）"]
   n_ds_tsecbench_api[("TSecBench 平台 API")]
@@ -28,6 +31,9 @@ graph LR
   n_store ==>|write| n_ds_events_jsonl
   n_store ==>|write| n_ds_run_json
   n_store ==>|write| n_ds_graph_json
+  n_store ==>|write| n_ds_graph_mmd
+  n_internal_wire ==>|write| n_ds_graph_json
+  n_internal_wire ==>|write| n_ds_graph_mmd
   n_store ==>|write| n_ds_candidates_jsonl
   n_store ==>|write| n_ds_evidence
   n_store ==>|write| n_ds_private_trace
@@ -39,10 +45,11 @@ graph LR
   n_executor ==>|write| n_ds_host_netfilter
   n_executor -->|read| n_ds_runner_image
   n_runner_Dockerfile ==>|write| n_ds_runner_image
+  n_runner_Dockerfile_teststub ==>|write| n_ds_runner_image
   n_executor ==>|write| n_ds_provider_api
   n_bridge_bridge_py -->|read| n_ds_tsecbench_api
   n_bridge_bridge_py ==>|write| n_ds_tsecbench_api
   n_piai -->|read| n_ds_env_file
   n_piai ==>|write| n_ds_pi_session
   classDef store fill:#8b5cf6,stroke:#5b21b6,color:#fff
-  class n_ds_events_jsonl,n_ds_run_json,n_ds_graph_json,n_ds_candidates_jsonl,n_ds_evidence,n_ds_private_trace,n_ds_results,n_ds_report,n_ds_run_lock,n_ds_bridge_stderr,n_ds_host_netfilter,n_ds_runner_image,n_ds_provider_api,n_ds_tsecbench_api,n_ds_env_file,n_ds_pi_session store
+  class n_ds_events_jsonl,n_ds_run_json,n_ds_graph_json,n_ds_graph_mmd,n_ds_candidates_jsonl,n_ds_evidence,n_ds_private_trace,n_ds_results,n_ds_report,n_ds_run_lock,n_ds_bridge_stderr,n_ds_host_netfilter,n_ds_runner_image,n_ds_provider_api,n_ds_tsecbench_api,n_ds_env_file,n_ds_pi_session store
