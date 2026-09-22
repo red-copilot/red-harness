@@ -523,14 +523,14 @@ func TestRecallDeltaEdgeCases(t *testing.T) {
 func seedFilterRuns(t *testing.T, rs *ResultFileStore) {
 	t.Helper()
 	saveRun(t, rs, harness.RunResult{RunID: "run-a", Scenario: "sc-a", ProfileDigest: "pd-a",
-		Model: "m-a", StartedAt: baseTime, Completed: true,
+		BundleDigest: "0123456789abcdef", Model: "m-a", StartedAt: baseTime, Completed: true,
 		Challenges: []harness.ChallengeResult{{
 			Challenge: harness.Challenge{Code: "c-a", Category: "cat-a"},
 			Outcome: harness.OutcomeView{ProgressTotal: 10, ProgressConfirmed: 7,
 				RemainingAtStart: 5, Score: 10, Stats: harness.Stats{CostUSD: 0.5}, HintUsed: 1},
 		}}})
 	saveRun(t, rs, harness.RunResult{RunID: "run-b", Scenario: "sc-b", ProfileDigest: "pd-b",
-		Model: "m-b", StartedAt: baseTime.Add(2 * time.Hour),
+		BundleDigest: "fedcba9876543210", Model: "m-b", StartedAt: baseTime.Add(2 * time.Hour),
 		Challenges: []harness.ChallengeResult{{
 			Challenge: harness.Challenge{Code: "c-b", Category: "cat-b"},
 			Outcome: harness.OutcomeView{ProgressTotal: 4, ProgressConfirmed: 1,
@@ -551,6 +551,14 @@ func TestStatsFilters(t *testing.T) {
 	}{
 		{"ProfileDigest 命中", harness.StatsQuery{ProfileDigest: "pd-a"}, 1, 2, 5},
 		{"ProfileDigest 不命中", harness.StatsQuery{ProfileDigest: "pd-z"}, 0, 0, 0},
+		{"BundleDigest 命中", harness.StatsQuery{BundleDigest: "0123456789abcdef"}, 1, 2, 5},
+		{"BundleDigest 不命中", harness.StatsQuery{BundleDigest: "ffffffffffffffff"}, 0, 0, 0},
+		// 这两个维度是**独立**的：ProfileDigest 里存的只是 bundle 的**路径**，
+		// 同一个路径换了内容它不会变。所以「profile 命中但 bundle 不命中」必须
+		// 过滤掉——不这么做，两次不同的扩展包会被算作同一次实验，而输出上
+		// 完全看不出来。
+		{"Profile+Bundle 同时命中", harness.StatsQuery{ProfileDigest: "pd-a", BundleDigest: "0123456789abcdef"}, 1, 2, 5},
+		{"Profile 命中但 Bundle 不命中", harness.StatsQuery{ProfileDigest: "pd-a", BundleDigest: "fedcba9876543210"}, 0, 0, 0},
 		{"Model 命中", harness.StatsQuery{Model: "m-b"}, 1, 1, 4},
 		{"Model 不命中", harness.StatsQuery{Model: "m-z"}, 0, 0, 0},
 		{"Scenario 命中", harness.StatsQuery{Scenario: "sc-a"}, 1, 2, 5},

@@ -18,6 +18,7 @@ import (
 type statsFlags struct {
 	store     string
 	profile   string
+	bundle    string
 	model     string
 	scenario  string
 	challenge string
@@ -29,6 +30,7 @@ type statsFlags struct {
 func (f *statsFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.store, "store", "runs", "运行目录根")
 	fs.StringVar(&f.profile, "profile", "", "按 profile 摘要过滤（SolverProfile.Digest()）")
+	fs.StringVar(&f.bundle, "bundle", "", "按扩展包内容摘要过滤（RunResult.BundleDigest）；与 --profile 合用才能锁定同一次实验")
 	fs.StringVar(&f.model, "model", "", "按模型名过滤")
 	fs.StringVar(&f.scenario, "scenario", "", "按场景名过滤（fake / tsecbench）")
 	fs.StringVar(&f.challenge, "challenge", "", "按题目 code 过滤")
@@ -58,6 +60,7 @@ func (f *statsFlags) query() (harness.StatsQuery, error) {
 	}
 	return harness.StatsQuery{
 		ProfileDigest: f.profile,
+		BundleDigest:  f.bundle,
 		Model:         f.model,
 		Scenario:      f.scenario,
 		Challenge:     f.challenge,
@@ -172,6 +175,7 @@ func filterText(q harness.StatsQuery) string {
 		}
 	}
 	add("profile", q.ProfileDigest)
+	add("bundle", q.BundleDigest)
 	add("model", q.Model)
 	add("scenario", q.Scenario)
 	add("challenge", q.Challenge)

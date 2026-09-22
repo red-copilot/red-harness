@@ -817,7 +817,7 @@ func TestStatsMapsFiltersToQuery(t *testing.T) {
 	a.stdout, a.stderr = &out, &errb
 
 	args := []string{"stats", "--store", "/tmp/rh",
-		"--profile", "p1", "--model", "m1", "--scenario", "fake",
+		"--profile", "p1", "--bundle", "b1", "--model", "m1", "--scenario", "fake",
 		"--challenge", "c1", "--category", "web",
 		"--since", "2026-01-02", "--until", "2026-01-03T04:05:06Z"}
 	if code := dispatch(args, *a); code != 0 {
@@ -827,7 +827,7 @@ func TestStatsMapsFiltersToQuery(t *testing.T) {
 		t.Fatalf("Stats 调用次数 = %d，期望 1", len(res.queries))
 	}
 	q := res.queries[0]
-	if q.ProfileDigest != "p1" || q.Model != "m1" || q.Scenario != "fake" ||
+	if q.ProfileDigest != "p1" || q.BundleDigest != "b1" || q.Model != "m1" || q.Scenario != "fake" ||
 		q.Challenge != "c1" || q.Category != "web" {
 		t.Errorf("过滤条件映射错了：%+v", q)
 	}

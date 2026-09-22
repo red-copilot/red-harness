@@ -192,12 +192,19 @@ type RunLocker interface {
 
 type StatsQuery struct {
 	ProfileDigest string
-	Model         string
-	Scenario      string
-	Challenge     string
-	Category      string
-	Since         time.Time
-	Until         time.Time
+	// BundleDigest 按**扩展包内容**摘要过滤。
+	//
+	// 为什么 ProfileDigest 之外还要它：ProfileDigest 是对 profile 规格取的，而
+	// 其中的 ExtensionBundle 只是一个**路径字符串**。同一个路径下的内容换了，
+	// ProfileDigest 不变——于是只按它分组，会把两份不同的扩展包算作同一次实验，
+	// profile 对照实验的结论随之失真。要正确分组，两个维度都得用上。
+	BundleDigest string
+	Model        string
+	Scenario     string
+	Challenge    string
+	Category     string
+	Since        time.Time
+	Until        time.Time
 }
 
 // StatsReport 是按维度聚合的公开指标。

@@ -539,8 +539,13 @@ func recallDelta(o harness.OutcomeView) (delta, remaining int, ok bool) {
 }
 
 // statsMatchRun 是 run 级的过滤维度。
+//
+// ProfileDigest 与 BundleDigest 是**两个独立维度**：前者是 profile 规格的摘要，
+// 而其中的 ExtensionBundle 只是一个路径字符串；同一个路径下换了内容，前者不变。
+// 所以要锁定「同一次实验」，两个都得给（见 harness.StatsQuery 的注释）。
 func statsMatchRun(r harness.RunResult, q harness.StatsQuery) bool {
 	if q.ProfileDigest != "" && r.ProfileDigest != q.ProfileDigest ||
+		q.BundleDigest != "" && r.BundleDigest != q.BundleDigest ||
 		q.Model != "" && r.Model != q.Model ||
 		q.Scenario != "" && r.Scenario != q.Scenario {
 		return false
