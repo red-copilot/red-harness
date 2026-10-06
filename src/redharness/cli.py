@@ -10,6 +10,7 @@ import uvicorn
 from pydantic import ValidationError
 
 from .gateway import ModelPricing, create_gateway_app
+from .gateway_runtime import GatewayConfig
 from .models import load_agent, load_suite, load_task
 from .orchestrator import Orchestrator
 from .policy import load_policy
@@ -20,6 +21,26 @@ app = typer.Typer(
     help="Reproducible evaluation runtime for security agents.",
     no_args_is_help=True,
 )
+
+
+def _gateway_config(
+    *,
+    enabled: bool,
+    policy: Path | None,
+    model_upstream: str | None,
+    model_api_key_env: str,
+    input_price: float,
+    output_price: float,
+) -> GatewayConfig | None:
+    if not enabled:
+        return None
+    return GatewayConfig(
+        policy_path=policy.resolve() if policy else None,
+        model_upstream=model_upstream,
+        model_api_key=os.environ.get(model_api_key_env),
+        input_price_per_million_usd=input_price,
+        output_price_per_million_usd=output_price,
+    )
 
 
 @app.command()
@@ -55,6 +76,17 @@ def run(
     runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".redharness/runs"),
     repeat: Annotated[int, typer.Option("--repeat", min=1)] = 1,
     seed: Annotated[int, typer.Option("--seed", min=0)] = 0,
+    gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
+    gateway_policy: Annotated[
+        Path | None,
+        typer.Option("--gateway-policy", exists=True, dir_okay=False),
+    ] = None,
+    model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
+    model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
+        "REDHARNESS_MODEL_API_KEY"
+    ),
+    input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
+    output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
     allow_host_agent: Annotated[
         bool,
         typer.Option(
@@ -66,6 +98,14 @@ def run(
     """Run one task with one agent."""
     task_spec = load_task(task)
     agent_spec = load_agent(agent)
+    gateway_config = _gateway_config(
+        enabled=gateway_enabled,
+        policy=gateway_policy,
+        model_upstream=model_upstream,
+        model_api_key_env=model_api_key_env,
+        input_price=input_price,
+        output_price=output_price,
+    )
     orchestrator = Orchestrator(runs_root)
     results = [
         orchestrator.run(
@@ -75,6 +115,7 @@ def run(
             agent_path=agent,
             allow_host_agent=allow_host_agent,
             seed=seed + index,
+            gateway_config=gateway_config,
         )
         for index in range(repeat)
     ]
@@ -99,6 +140,17 @@ def run_suite(
     agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
     runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".redharness/runs"),
     suites_root: Annotated[Path, typer.Option("--suites-root")] = Path(".redharness/suites"),
+    gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
+    gateway_policy: Annotated[
+        Path | None,
+        typer.Option("--gateway-policy", exists=True, dir_okay=False),
+    ] = None,
+    model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
+    model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
+        "REDHARNESS_MODEL_API_KEY"
+    ),
+    input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
+    output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
     allow_host_agent: Annotated[
         bool,
         typer.Option(
@@ -114,6 +166,14 @@ def run_suite(
         agent=load_agent(agent),
         agent_path=agent,
         allow_host_agent=allow_host_agent,
+        gateway_config=_gateway_config(
+            enabled=gateway_enabled,
+            policy=gateway_policy,
+            model_upstream=model_upstream,
+            model_api_key_env=model_api_key_env,
+            input_price=input_price,
+            output_price=output_price,
+        ),
     )
     typer.echo(json.dumps(summary, ensure_ascii=False, indent=2))
     if any(item["status"] == "error" for item in summary["runs"]):
