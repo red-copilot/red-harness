@@ -124,7 +124,7 @@ class TSecRunner:
                         adapter=adapter,
                         case=case,
                         agent=agent,
-                        budgets=budgets,
+                        budgets=effective_budgets,
                         seed=seed + index,
                         submission_extractor=_extract_submissions,
                         allow_host_agent=allow_host_agent,
