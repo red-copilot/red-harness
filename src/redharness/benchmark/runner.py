@@ -240,7 +240,9 @@ class BenchmarkRunner:
             raise RuntimeError("agent did not start")
 
         status = (
-            "timeout"
+            "objective_completed"
+            if progress.objective_completed
+            else "timeout"
             if agent_result.timed_out
             else "budget_exceeded"
             if agent_result.budget_exceeded
@@ -271,6 +273,9 @@ class BenchmarkRunner:
             },
             "agent_id": agent.id,
             "status": status,
+            "termination_reason": (
+                "objective-complete" if progress.objective_completed else None
+            ),
             "success": evaluation.success,
             "score": evaluation.score,
             "message": evaluation.message,
