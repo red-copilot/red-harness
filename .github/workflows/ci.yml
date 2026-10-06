@@ -16,6 +16,7 @@ jobs:
       - run: ruff check .
       - run: pytest -q
       - run: redharness validate benchmarks/examples/hello/task.yaml
+      - run: redharness validate benchmarks/examples/hello-docker-verifier/task.yaml
       - run: redharness validate-suite benchmarks/examples/smoke-suite.yaml
       - run: redharness gateway --help
       - run: redharness run benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml --allow-host-agent --seed 7
@@ -26,3 +27,16 @@ jobs:
           --gateway
           --gateway-policy examples/gateway-policy.yaml
           --seed 11
+      - run: docker build -t redharness-gateway-demo:ci agents/examples/docker-gateway
+      - run: docker build -t redharness-verifier:ci benchmarks/examples/hello-docker-verifier
+      - run: >-
+          redharness run benchmarks/examples/hello/task.yaml
+          --agent agents/examples/docker-gateway.yaml
+          --gateway
+          --gateway-policy examples/gateway-policy.yaml
+          --seed 12
+      - run: >-
+          redharness run benchmarks/examples/hello-docker-verifier/task.yaml
+          --agent agents/examples/demo.yaml
+          --allow-host-agent
+          --seed 13
