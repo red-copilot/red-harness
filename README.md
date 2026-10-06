@@ -4,7 +4,7 @@ Red Harness is a reproducible evaluation runtime for security agents. It separat
 
 ## Current capabilities
 
-Version 0.3 provides:
+Version 0.4 provides:
 
 - declarative task, agent, suite, and gateway-policy contracts
 - Docker Compose or no-op benchmark environments
@@ -15,11 +15,11 @@ Version 0.3 provides:
 - real-time wall-time, token, model-call, tool-call, and cost budgets
 - seed/repeat execution and weighted suites
 - policy-gated Tool Gateway
-- OpenAI-compatible non-streaming model proxy
+- OpenAI-compatible streaming and non-streaming model proxy
 - provider credential isolation
-- per-run Gateway lifecycle for CLI agents
+- per-run Gateway lifecycle for CLI and Docker agents
 - automatic `OPENAI_BASE_URL` / one-time token injection
-- GitHub Actions CI covering direct and Gateway-backed runs
+- Docker-sandboxed verifier option\n- GitHub Actions CI covering direct, Gateway-backed, Docker Agent, and Docker Verifier runs
 
 > [!WARNING]
 > The local CLI adapter and Python verifier execute host processes and are intended only for trusted development inputs. Use the Docker adapter for agent isolation. Per-run Gateway auto-injection currently supports CLI agents; Docker agents can use the standalone Gateway service until a network-sidecar mode is added.
@@ -104,7 +104,7 @@ model.usage
 
 Usage is extracted from the upstream response and converted into Harness token/cost metrics. Failed model requests still count toward `max_model_calls`.
 
-Streaming is intentionally rejected in v0.3 so accounting remains deterministic.
+Streaming is supported in v0.4. The proxy forces `stream_options.include_usage=true`, relays SSE chunks, and records final usage/cost when the upstream provides it. If an upstream omits usage, Harness records `model.usage_missing` rather than inventing token counts.
 
 ## Tool Gateway
 
@@ -153,6 +153,37 @@ Content-Type: application/json
   }
 }
 ```
+
+## Docker Agent Gateway
+
+Docker Agents can use the same per-run Gateway:
+
+```yaml
+apiVersion: redharness/v1
+id: docker-agent
+type: docker
+image: my-agent:latest
+network: environment
+```
+
+When `--gateway` is enabled, Harness binds the ephemeral Gateway on a Docker-reachable host address, injects `host.docker.internal:host-gateway`, and passes the same one-time token variables into the container. If no benchmark network exists, the Agent uses the normal Docker bridge; if a Compose target network exists, it remains attached to that network.
+
+`network: none` is never silently relaxed and causes the run to fail if Gateway access is requested.
+
+## Docker Verifier
+
+A task can move grading out of the host Python process:
+
+```yaml
+verification:
+  type: docker
+  image: my-verifier:latest
+  command: [python, /task/verifier.py]
+  network: none
+  timeout: 120
+```
+
+The verifier container receives the task and run bundle as read-only mounts, has a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, CPU/RAM/PID limits, and an isolated tmpfs. Set `network: environment` only when the verifier must inspect a live benchmark service.
 
 ## Standalone Gateway
 
