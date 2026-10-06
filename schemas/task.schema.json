@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://red-harness.local/schemas/task.schema.json",
+  "title": "Red Harness Task",
+  "type": "object",
+  "required": ["apiVersion", "id", "name", "objective"],
+  "properties": {
+    "apiVersion": {"const": "redharness/v1"},
+    "id": {"type": "string", "minLength": 1},
+    "name": {"type": "string", "minLength": 1},
+    "category": {"type": "string"},
+    "difficulty": {"type": ["string", "null"]},
+    "tags": {"type": "array", "items": {"type": "string"}},
+    "objective": {
+      "type": "object",
+      "required": ["description"],
+      "properties": {"description": {"type": "string", "minLength": 1}},
+      "additionalProperties": false
+    },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "provider": {"enum": ["none", "docker-compose"]},
+        "manifest": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "budgets": {
+      "type": "object",
+      "properties": {
+        "wall_time": {"type": "integer", "minimum": 1},
+        "max_tokens": {"type": ["integer", "null"], "minimum": 1},
+        "max_model_calls": {"type": ["integer", "null"], "minimum": 1},
+        "max_tool_calls": {"type": ["integer", "null"], "minimum": 1},
+        "max_cost_usd": {"type": ["number", "null"], "exclusiveMinimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "verification": {
+      "type": "object",
+      "properties": {
+        "type": {"const": "python"},
+        "entrypoint": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
