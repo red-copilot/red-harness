@@ -68,15 +68,16 @@ class Orchestrator:
         try:
             handle = environment.start()
             if gateway_config is not None:
-                if agent.type != "cli":
+                if agent.type == "docker" and agent.network == "none":
                     raise ValueError(
-                        "automatic per-run gateway currently supports CLI agents only"
+                        "Docker Agent network:none is incompatible with per-run Gateway"
                     )
                 gateway_runtime = GatewayRuntime(
                     config=gateway_config,
                     run_dir=run_dir,
                     task_dir=task_dir,
                     trace=trace,
+                    expose_to_docker=agent.type == "docker",
                 )
                 gateway_runtime.start()
 
@@ -171,6 +172,7 @@ class Orchestrator:
             "gateway": {
                 "enabled": gateway_config is not None,
                 "model_proxy": bool(gateway_config and gateway_config.model_upstream),
+                "docker_access": bool(gateway_config and agent.type == "docker"),
             },
             "metrics": metrics,
             "versions": {
