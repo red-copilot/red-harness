@@ -11,6 +11,7 @@ from . import __version__
 from .agent import build_agent_adapter
 from .budget import UsageMetrics
 from .environment import build_environment
+from .gateway_runtime import GatewayConfig, GatewayRuntime
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
 from .verifier import run_python_verifier
@@ -38,6 +39,7 @@ class Orchestrator:
         agent_path: Path,
         allow_host_agent: bool = False,
         seed: int = 0,
+        gateway_config: GatewayConfig | None = None,
     ) -> dict:
         run_id = _new_run_id()
         run_dir = (self.runs_root / run_id).resolve()
@@ -47,6 +49,7 @@ class Orchestrator:
         started = time.monotonic()
         status = "running"
         usage = UsageMetrics()
+        gateway_runtime: GatewayRuntime | None = None
         environment = build_environment(
             task.environment, task_dir=task_dir, run_id=run_id, trace=trace
         )
@@ -56,6 +59,7 @@ class Orchestrator:
             data={
                 "agent_id": agent.id,
                 "seed": seed,
+                "gateway_enabled": gateway_config is not None,
                 "task_sha256": _sha256(task_path),
                 "agent_sha256": _sha256(agent_path),
             },
@@ -63,6 +67,19 @@ class Orchestrator:
 
         try:
             handle = environment.start()
+            if gateway_config is not None:
+                if agent.type != "cli":
+                    raise ValueError(
+                        "automatic per-run gateway currently supports CLI agents only"
+                    )
+                gateway_runtime = GatewayRuntime(
+                    config=gateway_config,
+                    run_dir=run_dir,
+                    task_dir=task_dir,
+                    trace=trace,
+                )
+                gateway_runtime.start()
+
             adapter = build_agent_adapter(
                 agent,
                 allow_host_agent=allow_host_agent,
@@ -75,6 +92,8 @@ class Orchestrator:
                 environment_project=handle.project_name,
                 environment_network=handle.network_name,
                 seed=seed,
+                gateway_url=gateway_runtime.url if gateway_runtime else None,
+                gateway_token=gateway_runtime.token if gateway_runtime else None,
             )
             usage = agent_result.metrics
 
@@ -120,6 +139,14 @@ class Orchestrator:
                 data={"error_type": type(exc).__name__, "message": str(exc)},
             )
         finally:
+            if gateway_runtime is not None:
+                try:
+                    gateway_runtime.stop()
+                except Exception as exc:  # noqa: BLE001 - teardown must preserve run result.
+                    trace.emit(
+                        "gateway.error",
+                        data={"error_type": type(exc).__name__, "message": str(exc)},
+                    )
             try:
                 environment.stop()
             except Exception as exc:  # noqa: BLE001 - teardown must not hide the run result.
@@ -140,6 +167,10 @@ class Orchestrator:
             "score": float(verification["score"]),
             "message": verification.get("message"),
             "milestones": verification.get("milestones", {}),
+            "gateway": {
+                "enabled": gateway_config is not None,
+                "model_proxy": bool(gateway_config and gateway_config.model_upstream),
+            },
             "metrics": metrics,
             "versions": {
                 "harness": __version__,
