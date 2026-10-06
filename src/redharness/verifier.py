@@ -102,6 +102,11 @@ def build_docker_verifier_command(
         "/tmp:rw,nosuid,nodev,size=128m",
         "--network",
         network,
+    ]
+    if task.verification.runtime:
+        command.extend(["--runtime", task.verification.runtime])
+    command.extend(
+        [
         "-v",
         f"{task_dir.resolve()}:/task:ro",
         "-v",
@@ -119,7 +124,8 @@ def build_docker_verifier_command(
         "-e",
         f"REDHARNESS_SEED={seed}",
         str(task.verification.image),
-    ]
+        ]
+    )
     command.extend(task.verification.command)
     return command
 
@@ -167,6 +173,7 @@ def run_verifier(
         data={
             "type": task.verification.type,
             "network": task.verification.network,
+            "runtime": task.verification.runtime,
         },
     )
 
