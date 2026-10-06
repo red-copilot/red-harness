@@ -16,3 +16,5 @@ jobs:
       - run: ruff check .
       - run: pytest -q
       - run: redharness validate benchmarks/examples/hello/task.yaml
+      - run: redharness validate-suite benchmarks/examples/smoke-suite.yaml
+      - run: redharness run benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml --allow-host-agent --seed 7
