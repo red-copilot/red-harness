@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://red-harness.local/schemas/agent.schema.json",
+  "title": "Red Harness Agent",
+  "type": "object",
+  "required": ["apiVersion", "id", "type"],
+  "properties": {
+    "apiVersion": {"const": "redharness/v1"},
+    "id": {"type": "string", "minLength": 1},
+    "type": {"enum": ["cli", "docker"]},
+    "command": {"type": "array", "items": {"type": "string"}},
+    "cwd": {"type": ["string", "null"]},
+    "env": {"type": "object", "additionalProperties": {"type": "string"}},
+    "image": {"type": ["string", "null"]},
+    "network": {"enum": ["environment", "none"]}
+  },
+  "additionalProperties": false
+}
