@@ -199,18 +199,16 @@ class DockerAdapter:
         gateway_url: str | None = None,
         gateway_token: str | None = None,
     ) -> AgentResult:
-        if gateway_url or gateway_token:
-            raise AgentError(
-                "automatic per-run gateway injection currently supports CLI agents only; "
-                "use the standalone gateway service for Docker agents"
-            )
+        gateway_enabled = bool(gateway_url and gateway_token)
+        if gateway_enabled and self.spec.network == "none":
+            raise AgentError("Docker Agent network:none is incompatible with per-run Gateway")
 
         container_name = ("rh_agent_" + run_dir.name.lower()).replace("-", "_")[:63]
-        network = (
-            environment_network
-            if self.spec.network == "environment" and environment_network
-            else "none"
-        )
+        if self.spec.network == "environment":
+            network = environment_network or ("bridge" if gateway_enabled else "none")
+        else:
+            network = "none"
+
         command = [
             "docker",
             "run",
@@ -233,27 +231,48 @@ class DockerAdapter:
             "/tmp:rw,nosuid,nodev,size=256m",
             "--network",
             network,
-            "-v",
-            f"{task_dir.resolve()}:/task:ro",
-            "-v",
-            f"{run_dir.resolve()}:/run/redharness:rw",
-            "-w",
-            "/task",
-            "-e",
-            f"REDHARNESS_TASK_ID={task.id}",
-            "-e",
-            "REDHARNESS_TASK_DIR=/task",
-            "-e",
-            "REDHARNESS_RUN_DIR=/run/redharness",
-            "-e",
-            f"REDHARNESS_OBJECTIVE={task.objective.description}",
-            "-e",
-            f"REDHARNESS_ENV_PROJECT={environment_project or ''}",
-            "-e",
-            "REDHARNESS_EVENT_FILE=/run/redharness/events.jsonl",
-            "-e",
-            f"REDHARNESS_SEED={seed}",
         ]
+        if gateway_enabled:
+            command.extend(["--add-host", "host.docker.internal:host-gateway"])
+
+        command.extend(
+            [
+                "-v",
+                f"{task_dir.resolve()}:/task:ro",
+                "-v",
+                f"{run_dir.resolve()}:/run/redharness:rw",
+                "-w",
+                "/task",
+                "-e",
+                f"REDHARNESS_TASK_ID={task.id}",
+                "-e",
+                "REDHARNESS_TASK_DIR=/task",
+                "-e",
+                "REDHARNESS_RUN_DIR=/run/redharness",
+                "-e",
+                f"REDHARNESS_OBJECTIVE={task.objective.description}",
+                "-e",
+                f"REDHARNESS_ENV_PROJECT={environment_project or ''}",
+                "-e",
+                "REDHARNESS_EVENT_FILE=/run/redharness/events.jsonl",
+                "-e",
+                f"REDHARNESS_SEED={seed}",
+            ]
+        )
+        if gateway_enabled:
+            command.extend(
+                [
+                    "-e",
+                    f"REDHARNESS_GATEWAY_URL={gateway_url}",
+                    "-e",
+                    f"REDHARNESS_GATEWAY_TOKEN={gateway_token}",
+                    "-e",
+                    f"OPENAI_BASE_URL={gateway_url}/v1",
+                    "-e",
+                    f"OPENAI_API_KEY={gateway_token}",
+                ]
+            )
+
         for key, value in sorted(self.spec.env.items()):
             command.extend(["-e", f"{key}={value}"])
         command.append(str(self.spec.image))
@@ -267,6 +286,7 @@ class DockerAdapter:
                 "type": self.spec.type,
                 "image": self.spec.image,
                 "network": network,
+                "gateway_injected": gateway_enabled,
             },
         )
         try:
