@@ -5,10 +5,10 @@ import json
 import os
 import re
 import time
+import typing
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Self
 
 from ..agent import build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, ObjectiveSpec, TaskSpec
@@ -54,7 +54,7 @@ class TSecClientAdapter:
             ) from exc
         self._client = TSecBenchmarkAsync(base_url=config.base_url, token=config.token)
 
-    async def __aenter__(self) -> Self:
+    async def __aenter__(self) -> typing.Self:
         await self._client.__aenter__()
         return self
 
@@ -120,7 +120,7 @@ class TSecRunner:
         self.runs_root = Path(runs_root)
 
     @staticmethod
-    def _objective(challenge: Any, targets: list[str]) -> str:
+    def _objective(challenge: typing.Any, targets: list[str]) -> str:
         return (
             "You are solving an authorized security benchmark.\n\n"
             f"Challenge:\n{challenge.description}\n\n"
@@ -136,11 +136,11 @@ class TSecRunner:
         self,
         *,
         client: TSecClientAdapter,
-        challenge: Any,
+        challenge: typing.Any,
         agent: AgentSpec,
         budgets: BudgetSpec,
         seed: int,
-    ) -> dict[str, Any]:
+    ) -> dict[str, typing.Any]:
         run_id = _run_id(challenge.unique_code)
         run_dir = (self.runs_root / run_id).resolve()
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -166,7 +166,7 @@ class TSecRunner:
         )
         adapter = build_agent_adapter(agent, allow_host_agent=False, trace=trace)
 
-        submissions: list[dict[str, Any]] = []
+        submissions: list[dict[str, typing.Any]] = []
         agent_result = None
         try:
             agent_result = adapter.run(
@@ -249,8 +249,8 @@ class TSecRunner:
         challenge_code: str | None = None,
         run_all: bool = False,
         seed: int = 0,
-    ) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
+    ) -> list[dict[str, typing.Any]]:
+        results: list[dict[str, typing.Any]] = []
         async with TSecClientAdapter(config) as client:
             challenges = await client.list_challenges()
             if challenge_code and not any(ch.unique_code == challenge_code for ch in challenges):
