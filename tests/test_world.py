@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from redharness.world import (
     ActionRecord,
@@ -80,6 +83,8 @@ def test_world_store_replays_and_materializes_snapshot(tmp_path):
     snapshot = store.snapshot
     assert snapshot.revision == 6
     assert snapshot.observations["obs-1"].content["port"] == 443
+    assert snapshot.observations["obs-1"].provenance.actor == "agent"
+    assert snapshot.observations["obs-1"].provenance.event_id is not None
     assert snapshot.capabilities["cap-1"].scope == "target:443"
     assert snapshot.actions["action-1"].status == "succeeded"
     assert snapshot.constraints["constraint-1"].status == "active"
@@ -141,3 +146,45 @@ def test_world_inbox_validates_agent_submissions(tmp_path):
     ]
     assert len(persisted) == 1
     assert persisted[0]["actor"] == "agent:test"
+
+
+
+def test_world_temporal_metadata_and_provenance(tmp_path):
+    store = WorldStore(tmp_path / "world.events.jsonl")
+    now = datetime.now(UTC)
+    observation = Observation(
+        id="obs-temporal",
+        type="service.banner",
+        content={"value": "demo"},
+        observed_at=now,
+        valid_from=now,
+        expires_at=now + timedelta(minutes=5),
+        supersedes=["obs-old"],
+        provenance={"source": "scanner"},
+    )
+
+    store.upsert(
+        "observation",
+        observation,
+        actor="agent:recon",
+        source_event_id="tool-result-1",
+    )
+
+    restored = store.snapshot.observations["obs-temporal"]
+    assert restored.provenance.actor == "agent:recon"
+    assert restored.provenance.source == "scanner"
+    assert restored.provenance.source_event_id == "tool-result-1"
+    assert restored.provenance.event_id is not None
+    assert restored.supersedes == ["obs-old"]
+    assert restored.expires_at == now + timedelta(minutes=5)
+
+
+def test_world_temporal_window_rejects_invalid_range():
+    now = datetime.now(UTC)
+    with pytest.raises(ValueError, match="expires_at"):
+        Capability(
+            id="cap-invalid",
+            type="host.shell",
+            valid_from=now,
+            expires_at=now - timedelta(seconds=1),
+        )
