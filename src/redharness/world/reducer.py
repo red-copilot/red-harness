@@ -42,10 +42,10 @@ class WorldReducer:
         else:
             payload = dict(event.object)
             provenance = dict(payload.get("provenance") or {})
-            provenance.setdefault("actor", event.actor)
-            provenance.setdefault("event_id", event.id)
+            provenance["actor"] = event.actor
+            provenance["event_id"] = event.id
             if event.source_event_id is not None:
-                provenance.setdefault("source_event_id", event.source_event_id)
+                provenance["source_event_id"] = event.source_event_id
             payload["provenance"] = provenance
             collection[object_id] = model_type.model_validate(payload)
 
