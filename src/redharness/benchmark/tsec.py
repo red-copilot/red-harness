@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from ..agent import build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, ObjectiveSpec, TaskSpec
@@ -54,7 +54,7 @@ class TSecClientAdapter:
             ) from exc
         self._client = TSecBenchmarkAsync(base_url=config.base_url, token=config.token)
 
-    async def __aenter__(self) -> "TSecClientAdapter":
+    async def __aenter__(self) -> Self:
         await self._client.__aenter__()
         return self
 
