@@ -11,7 +11,7 @@ from ..agent import AgentResult, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..trace import TraceRecorder
 from ..world import Entity, FileWorldRepository, Goal, WorldContextBuilder, ingest_world_inbox
-from .base import BenchmarkAdapter, BenchmarkCase, BenchmarkSession, Submission
+from .base import BenchmarkAdapter, BenchmarkCase, Submission
 
 
 SubmissionExtractor = Callable[[AgentResult], list[Submission]]
@@ -38,11 +38,18 @@ class BenchmarkRunner:
         submission_extractor: SubmissionExtractor,
         allow_host_agent: bool = False,
     ) -> dict:
-        session = await adapter.provision(case)
-        run_id = f"{session.benchmark}_{session.case_id}_{uuid.uuid4().hex[:8]}"
+        run_id = f"{case.benchmark}_{case.id}_{uuid.uuid4().hex[:8]}"
         run_dir = (self.runs_root / run_id).resolve()
         run_dir.mkdir(parents=True, exist_ok=False)
-        trace = TraceRecorder(run_dir / "trace.jsonl", run_id, session.case_id)
+        trace = TraceRecorder(run_dir / "trace.jsonl", run_id, case.id)
+        try:
+            session = await adapter.provision(case)
+        except Exception as exc:
+            trace.emit(
+                "benchmark.provision.error",
+                data={"error_type": type(exc).__name__, "message": str(exc)},
+            )
+            raise
         world = FileWorldRepository(run_dir / "world.events.jsonl")
         context_builder = WorldContextBuilder()
         started = time.monotonic()
