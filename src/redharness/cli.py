@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -10,11 +11,12 @@ import typer
 import uvicorn
 from pydantic import ValidationError
 
+from .benchmark.tsec import TSecRunner, load_tsec_config
 from .control_plane import create_control_plane
 from .execution import ExecutionCapabilities
 from .gateway import ModelPricing, create_gateway_app
 from .gateway_runtime import GatewayConfig
-from .models import load_agent, load_suite, load_task
+from .models import BudgetSpec, load_agent, load_suite, load_task
 from .orchestrator import Orchestrator
 from .otel import export_otlp_json
 from .policy import load_policy
@@ -220,6 +222,46 @@ def run_suite(
     typer.echo(json.dumps(summary, ensure_ascii=False, indent=2))
     if any(item["status"] == "error" for item in summary["runs"]):
         raise typer.Exit(code=1)
+
+
+@app.command("tsec")
+def tsec(
+    agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
+    challenge: Annotated[str | None, typer.Option("--challenge")] = None,
+    run_all: Annotated[bool, typer.Option("--all")] = False,
+    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".redharness/tsec-runs"),
+    base_url_env: Annotated[str, typer.Option("--base-url-env")] = "BENCHMARK_BASE_URL",
+    token_env: Annotated[str, typer.Option("--benchmark-token-env")] = "BENCHMARK_TOKEN",
+    seed: Annotated[int, typer.Option("--seed", min=0)] = 0,
+    wall_time: Annotated[int, typer.Option("--wall-time", min=1)] = 3600,
+    max_tokens: Annotated[int | None, typer.Option("--max-tokens", min=1)] = None,
+    max_model_calls: Annotated[int | None, typer.Option("--max-model-calls", min=1)] = None,
+    max_tool_calls: Annotated[int | None, typer.Option("--max-tool-calls", min=1)] = None,
+    max_cost_usd: Annotated[float | None, typer.Option("--max-cost-usd", min=0)] = None,
+) -> None:
+    """Run TSec Benchmark challenges with a containerized Pi agent."""
+    spec = load_agent(agent)
+    if spec.type != "pi":
+        raise typer.BadParameter("TSec integration currently requires a type: pi agent")
+    config = load_tsec_config(base_url_env=base_url_env, token_env=token_env)
+    budgets = BudgetSpec(
+        wall_time=wall_time,
+        max_tokens=max_tokens,
+        max_model_calls=max_model_calls,
+        max_tool_calls=max_tool_calls,
+        max_cost_usd=max_cost_usd,
+    )
+    results = asyncio.run(
+        TSecRunner(runs_root=runs_root).run(
+            config=config,
+            agent=spec,
+            budgets=budgets,
+            challenge_code=challenge,
+            run_all=run_all,
+            seed=seed,
+        )
+    )
+    typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
 
 
 @app.command("serve")
