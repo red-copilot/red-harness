@@ -527,3 +527,20 @@ and always tears the external session down.
 TSecBench is implemented through this contract. Its SDK token stays in the Harness process and is
 never passed to the Agent. `REDHARNESS_FLAG=<flag>` remains a compatibility submission extractor;
 submission values are hashed in normalized traces.
+
+
+### Solver session runtime
+
+The benchmark runtime can now start Agents through a bidirectional `AgentSession` compatibility
+boundary while retaining the legacy `run()` API. Sessions expose normalized events, trusted
+observations, checkpoints, close requests, and the eventual `AgentResult`.
+
+Externally evaluated benchmarks may accept structured submissions through
+`REDHARNESS_SUBMISSION_INBOX` and write trusted evaluator feedback to
+`REDHARNESS_FEEDBACK_FILE`. TSec uses this path for online flag feedback while retaining
+`REDHARNESS_FLAG=<flag>` as a compatibility fallback.
+
+Each benchmark run also maintains `progress.json` (`redharness.progress/v1`) separately from
+World State. It tracks active solver progress, recent action status, no-progress/failure counters,
+submission outcomes, and objective completion. Containerized Pi sessions can be actively stopped
+when the evaluator reports objective completion.
