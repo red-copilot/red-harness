@@ -145,10 +145,11 @@ class ContainerPiAdapter(PiAdapter):
 
         for key, value in sorted(self.spec.env.items()):
             command.extend(["-e", f"{key}={value}"])
-        for key in self.pi.env_passthrough:
-            if key not in os.environ:
-                raise AgentError(f"requested Pi environment variable is missing: {key}")
-            command.extend(["-e", f"{key}={os.environ[key]}"])
+        if not (gateway_url and gateway_token):
+            for key in self.pi.env_passthrough:
+                if key not in os.environ:
+                    raise AgentError(f"requested Pi environment variable is missing: {key}")
+                command.extend(["-e", f"{key}={os.environ[key]}"])
 
         command.append(str(self.spec.image))
         command.extend(self._command(task, gateway_enabled=bool(gateway_url and gateway_token)))
