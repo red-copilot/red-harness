@@ -110,8 +110,10 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
         objective_parts = [
             "You are solving an authorized security benchmark.",
             f"Challenge:\n{challenge.description}",
-            f"Flag progress before this run: {initial_correct}/{total}. "
-            f"Find {remaining} remaining flag(s).",
+            (
+                f"Flag progress before this run: {initial_correct}/{total}. "
+                f"Find {remaining} remaining flag(s)."
+            ),
         ]
         if hint:
             objective_parts.append(
