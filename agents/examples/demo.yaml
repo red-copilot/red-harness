@@ -7,4 +7,7 @@ command:
   - |
     import os
     from pathlib import Path
+    from redharness.telemetry import model_usage, tool_call
+    tool_call(tool="file.write")
+    model_usage(input_tokens=7, output_tokens=5, cost_usd=0.01, model="demo")
     Path(os.environ["REDHARNESS_RUN_DIR"], "proof.txt").write_text("red-harness-ok\n")
