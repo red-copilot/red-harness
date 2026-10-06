@@ -5,7 +5,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 from .models import WorldSnapshot
 
@@ -23,7 +23,7 @@ class RetrievedRecord:
 class WorldRetriever:
     """Deterministic goal-aware retrieval over the symbolic WorldSnapshot."""
 
-    KIND_WEIGHTS = {
+    KIND_WEIGHTS: ClassVar[dict[str, float]] = {
         "goals": 5.0,
         "constraints": 4.0,
         "capabilities": 3.5,
@@ -36,7 +36,7 @@ class WorldRetriever:
         "relations": 1.0,
     }
 
-    DEFAULT_LIMITS = {
+    DEFAULT_LIMITS: ClassVar[dict[str, int]] = {
         "goals": 8,
         "constraints": 12,
         "capabilities": 16,
