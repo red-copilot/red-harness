@@ -24,7 +24,7 @@ class EnvironmentSpec(BaseModel):
     manifest: str | None = None
 
     @model_validator(mode="after")
-    def validate_manifest(self) -> "EnvironmentSpec":
+    def validate_manifest(self) -> EnvironmentSpec:
         if self.provider == "docker-compose" and not self.manifest:
             raise ValueError("docker-compose environments require manifest")
         return self
@@ -70,7 +70,7 @@ def _load_yaml(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle)
     if not isinstance(data, dict):
-        raise ValueError(f"{path} must contain a YAML object")
+        raise TypeError(f"{path} must contain a YAML object")
     return data
 
 
