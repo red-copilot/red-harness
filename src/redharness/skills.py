@@ -45,6 +45,16 @@ def load_skill(path: str | Path) -> SkillSpec:
     return SkillSpec.model_validate(data)
 
 
+def load_skills(root: str | Path) -> list[SkillSpec]:
+    skill_root = Path(root)
+    if not skill_root.exists():
+        return []
+    skills: list[SkillSpec] = []
+    for path in sorted(skill_root.rglob("*.yaml")):
+        skills.append(load_skill(path))
+    return skills
+
+
 def scan_skills(root: str | Path) -> list[dict]:
     skill_root = Path(root)
     results: list[dict] = []
