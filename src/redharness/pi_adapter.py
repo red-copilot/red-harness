@@ -28,6 +28,7 @@ class PiAdapter:
         self.spec = spec
         self.pi = spec.pi
         self.trace = trace
+        self._tool_started: dict[str, float] = {}
 
     @staticmethod
     def _append_event(path: Path, event_type: str, data: dict[str, Any]) -> None:
@@ -71,6 +72,9 @@ class PiAdapter:
             self._append_event(event_file, "pi.agent_settled", {})
             return
         if event_type == "tool_execution_start":
+            tool_call_id = str(event.get("toolCallId") or "")
+            if tool_call_id:
+                self._tool_started[tool_call_id] = time.monotonic()
             self._append_event(
                 event_file,
                 "tool.call",
@@ -82,6 +86,9 @@ class PiAdapter:
             )
             return
         if event_type == "tool_execution_end":
+            tool_call_id = str(event.get("toolCallId") or "")
+            started = self._tool_started.pop(tool_call_id, None) if tool_call_id else None
+            is_error = bool(event.get("isError", False))
             self._append_event(
                 event_file,
                 "tool.result",
@@ -89,7 +96,13 @@ class PiAdapter:
                     "tool": event.get("toolName", "unknown"),
                     "tool_call_id": event.get("toolCallId"),
                     "source": "pi",
-                    "is_error": bool(event.get("isError", False)),
+                    "is_error": is_error,
+                    "duration_ms": (
+                        int((time.monotonic() - started) * 1000)
+                        if started is not None
+                        else None
+                    ),
+                    "failure_class": "tool_error" if is_error else None,
                 },
             )
             return
