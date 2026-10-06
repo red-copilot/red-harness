@@ -119,8 +119,9 @@ class CLIAdapter:
         seed: int,
         gateway_url: str | None = None,
         gateway_token: str | None = None,
+        gateway_network: str | None = None,
     ) -> AgentResult:
-        del environment_network
+        del environment_network, gateway_network
         env = os.environ.copy()
         env.update(self.spec.env)
         env.update(
@@ -179,7 +180,7 @@ class CLIAdapter:
 
 
 class DockerAdapter:
-    """Containerized agent adapter with a restrictive default sandbox."""
+    """Containerized agent adapter with restrictive defaults and multi-network support."""
 
     def __init__(self, spec: AgentSpec, *, trace: TraceRecorder) -> None:
         if shutil.which("docker") is None:
@@ -187,31 +188,42 @@ class DockerAdapter:
         self.spec = spec
         self.trace = trace
 
-    def run(
+    @staticmethod
+    def _docker(
+        command: list[str],
+        *,
+        cwd: Path,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if check and result.returncode != 0:
+            raise AgentError(f"{' '.join(command[:3])} failed: {result.stderr.strip()}")
+        return result
+
+    def _create_command(
         self,
         task: TaskSpec,
         *,
         task_dir: Path,
         run_dir: Path,
+        container_name: str,
+        network: str,
         environment_project: str | None,
-        environment_network: str | None,
         seed: int,
-        gateway_url: str | None = None,
-        gateway_token: str | None = None,
-    ) -> AgentResult:
-        gateway_enabled = bool(gateway_url and gateway_token)
-        if gateway_enabled and self.spec.network == "none":
-            raise AgentError("Docker Agent network:none is incompatible with per-run Gateway")
-
-        container_name = ("rh_agent_" + run_dir.name.lower()).replace("-", "_")[:63]
-        if self.spec.network == "environment":
-            network = environment_network or ("bridge" if gateway_enabled else "none")
-        else:
-            network = "none"
-
+        gateway_url: str | None,
+        gateway_token: str | None,
+        host_gateway: bool,
+    ) -> list[str]:
         command = [
             "docker",
-            "run",
+            "create",
             "--rm",
             "--pull=never",
             "--name",
@@ -232,7 +244,9 @@ class DockerAdapter:
             "--network",
             network,
         ]
-        if gateway_enabled:
+        if self.spec.runtime:
+            command.extend(["--runtime", self.spec.runtime])
+        if host_gateway:
             command.extend(["--add-host", "host.docker.internal:host-gateway"])
 
         command.extend(
@@ -259,7 +273,7 @@ class DockerAdapter:
                 f"REDHARNESS_SEED={seed}",
             ]
         )
-        if gateway_enabled:
+        if gateway_url and gateway_token:
             command.extend(
                 [
                     "-e",
@@ -277,6 +291,48 @@ class DockerAdapter:
             command.extend(["-e", f"{key}={value}"])
         command.append(str(self.spec.image))
         command.extend(self.spec.command)
+        return command
+
+    def run(
+        self,
+        task: TaskSpec,
+        *,
+        task_dir: Path,
+        run_dir: Path,
+        environment_project: str | None,
+        environment_network: str | None,
+        seed: int,
+        gateway_url: str | None = None,
+        gateway_token: str | None = None,
+        gateway_network: str | None = None,
+    ) -> AgentResult:
+        gateway_enabled = bool(gateway_url and gateway_token)
+        if gateway_enabled and self.spec.network == "none":
+            raise AgentError("Docker Agent network:none is incompatible with per-run Gateway")
+
+        container_name = ("rh_agent_" + run_dir.name.lower()).replace("-", "_")[:63]
+        sidecar_gateway = gateway_enabled and gateway_network is not None
+        host_gateway = gateway_enabled and not sidecar_gateway
+
+        if sidecar_gateway:
+            primary_network = str(gateway_network)
+        elif self.spec.network == "environment":
+            primary_network = environment_network or ("bridge" if host_gateway else "none")
+        else:
+            primary_network = "none"
+
+        create_command = self._create_command(
+            task,
+            task_dir=task_dir,
+            run_dir=run_dir,
+            container_name=container_name,
+            network=primary_network,
+            environment_project=environment_project,
+            seed=seed,
+            gateway_url=gateway_url,
+            gateway_token=gateway_token,
+            host_gateway=host_gateway,
+        )
 
         self.trace.emit(
             "agent.started",
@@ -285,13 +341,34 @@ class DockerAdapter:
                 "agent_id": self.spec.id,
                 "type": self.spec.type,
                 "image": self.spec.image,
-                "network": network,
+                "network": primary_network,
+                "target_network": environment_network,
+                "runtime": self.spec.runtime,
                 "gateway_injected": gateway_enabled,
+                "gateway_network": gateway_network,
             },
         )
+
         try:
+            self._docker(create_command, cwd=task_dir)
+            if (
+                sidecar_gateway
+                and environment_network
+                and environment_network != gateway_network
+            ):
+                self._docker(
+                    [
+                        "docker",
+                        "network",
+                        "connect",
+                        environment_network,
+                        container_name,
+                    ],
+                    cwd=task_dir,
+                )
+
             result = _run_monitored(
-                command,
+                ["docker", "start", "-a", container_name],
                 cwd=task_dir,
                 env=os.environ.copy(),
                 run_dir=run_dir,
