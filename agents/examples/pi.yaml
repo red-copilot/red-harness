@@ -1,0 +1,21 @@
+apiVersion: redharness/v1
+id: pi-openai-sol
+type: pi
+env: {}
+pi:
+  provider: openai
+  model: gpt-5.6-sol
+  thinking: medium
+  tools:
+    - read
+    - bash
+    - edit
+    - write
+  approve_project: false
+  context_files: false
+  extensions: false
+  skills: false
+  prompt_templates: false
+  themes: false
+  mcp: false
+  offline: true
