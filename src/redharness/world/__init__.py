@@ -1,7 +1,9 @@
 from .context import WorldContextBuilder
 from .models import (
+    ActionRecord,
     Artifact,
     Capability,
+    Constraint,
     Entity,
     Failure,
     Goal,
@@ -16,8 +18,10 @@ from .reducer import WorldReducer
 from .store import WorldStore
 
 __all__ = [
+    "ActionRecord",
     "Artifact",
     "Capability",
+    "Constraint",
     "Entity",
     "Failure",
     "Goal",
