@@ -259,6 +259,8 @@ GET  /v1/capabilities
 
 GET  /v1/runs/{run_id}
 GET  /v1/runs/{run_id}/trace
+GET  /v1/runs/{run_id}/world
+GET  /v1/runs/{run_id}/world/events
 GET  /v1/runs/{run_id}/otel
 ```
 
@@ -430,6 +432,7 @@ trace.jsonl
 events.jsonl
 world.events.jsonl
 world.snapshot.json
+world.context.txt
 agent.stdout.log
 agent.stderr.log
 verifier.stdout.log
