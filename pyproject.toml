@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "red-harness"
-version = "0.7.0"
+version = "0.8.0"
 description = "Reproducible evaluation runtime for security agents"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,6 +19,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tsec = [
+  "tsec-benchmark",
+]
 dev = [
   "pytest>=8.2,<9",
   "ruff>=0.6,<1",
