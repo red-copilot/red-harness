@@ -58,7 +58,15 @@ class FakeSession:
             json.dumps({"type": "flag", "value": "flag{live}"}) + "\n",
             encoding="utf-8",
         )
-        yield AgentEvent(type="progress.updated", data={"step": 1})
+        yield AgentEvent(
+            type="progress.updated",
+            data={
+                "step": 1,
+                "expected_observation": "admin endpoint exists",
+                "actual_observation": "admin endpoint exists at /admin",
+                "made_progress": True,
+            },
+        )
 
     async def observe(self, observation):
         self.feedback.append(observation)
@@ -123,8 +131,15 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert benchmark.closed is True
     assert fake_agent.session is not None
     assert fake_agent.session.closed_reason == "objective-complete"
-    assert fake_agent.session.feedback[0].type == "benchmark.feedback"
-    assert fake_agent.session.feedback[0].data["accepted"] is True
-    assert fake_agent.session.feedback[0].data["completed"] is True
+    feedback_types = [item.type for item in fake_agent.session.feedback]
+    assert "solver.verification" in feedback_types
+    assert "benchmark.feedback" in feedback_types
+    benchmark_feedback = next(
+        item for item in fake_agent.session.feedback if item.type == "benchmark.feedback"
+    )
+    assert benchmark_feedback.data["accepted"] is True
+    assert benchmark_feedback.data["completed"] is True
+    assert result["progress"]["verified_actions"] == 1
+    assert result["progress"]["last_verification"]["status"] == "verified"
     assert result["progress"]["accepted_submissions"] == 1
     assert result["progress"]["objective_completed"] is True
