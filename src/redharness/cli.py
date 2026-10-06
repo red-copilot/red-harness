@@ -21,6 +21,7 @@ from .orchestrator import Orchestrator
 from .otel import export_otlp_json
 from .policy import load_policy
 from .queue import GatewayJobSpec, JobPayload
+from .skills import load_skill
 from .suite import SuiteRunner
 from .worker import Worker
 
@@ -84,6 +85,19 @@ def validate(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(f"valid: {spec.id} ({spec.api_version})")
+
+
+@app.command("validate-skill")
+def validate_skill(
+    skill: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+) -> None:
+    """Validate a skill metadata contract."""
+    try:
+        spec = load_skill(skill)
+    except (ValidationError, ValueError, TypeError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(f"valid skill: {spec.id} ({spec.domain})")
 
 
 @app.command("validate-suite")
