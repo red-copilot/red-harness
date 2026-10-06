@@ -35,7 +35,7 @@ class WorldStore:
                     continue
                 try:
                     events.append(WorldEvent.model_validate_json(line))
-                except Exception as exc:  # noqa: BLE001 - persisted state boundary.
+                except Exception as exc:
                     raise ValueError(
                         f"invalid world event at {self.event_path}:{number}: {exc}"
                     ) from exc
