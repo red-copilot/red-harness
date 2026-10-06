@@ -168,6 +168,38 @@ class CLIAdapter:
         self._finish_trace(result)
         return result
 
+
+    async def start_session(
+        self,
+        task: TaskSpec,
+        *,
+        task_dir: Path,
+        run_dir: Path,
+        environment_project: str | None,
+        environment_network: str | None,
+        seed: int,
+        gateway_url: str | None = None,
+        gateway_token: str | None = None,
+        gateway_network: str | None = None,
+    ):
+        from .session import OneShotAgentSession
+
+        return await OneShotAgentSession.start(
+            self,
+            run_dir=run_dir,
+            run_kwargs={
+                "task": task,
+                "task_dir": task_dir,
+                "run_dir": run_dir,
+                "environment_project": environment_project,
+                "environment_network": environment_network,
+                "seed": seed,
+                "gateway_url": gateway_url,
+                "gateway_token": gateway_token,
+                "gateway_network": gateway_network,
+            },
+        )
+
     def _finish_trace(self, result: AgentResult) -> None:
         self.trace.emit(
             "agent.finished",
@@ -404,6 +436,38 @@ class DockerAdapter:
             },
         )
         return result
+
+
+    async def start_session(
+        self,
+        task: TaskSpec,
+        *,
+        task_dir: Path,
+        run_dir: Path,
+        environment_project: str | None,
+        environment_network: str | None,
+        seed: int,
+        gateway_url: str | None = None,
+        gateway_token: str | None = None,
+        gateway_network: str | None = None,
+    ):
+        from .session import OneShotAgentSession
+
+        return await OneShotAgentSession.start(
+            self,
+            run_dir=run_dir,
+            run_kwargs={
+                "task": task,
+                "task_dir": task_dir,
+                "run_dir": run_dir,
+                "environment_project": environment_project,
+                "environment_network": environment_network,
+                "seed": seed,
+                "gateway_url": gateway_url,
+                "gateway_token": gateway_token,
+                "gateway_network": gateway_network,
+            },
+        )
 
 
 def build_agent_adapter(
