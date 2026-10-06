@@ -40,16 +40,37 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (run_dir / "world.events.jsonl").write_text(
-        json.dumps(
-            {
-                "schema_version": "redharness.world/v1",
-                "id": "wevt-1",
-                "ts": "2026-10-06T08:00:00+00:00",
-                "kind": "goal",
-                "op": "upsert",
-                "object": {"id": "goal-1", "description": "demo"},
-                "actor": "harness",
-            }
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "schema_version": "redharness.world/v1",
+                        "id": "wevt-1",
+                        "ts": "2026-10-06T08:00:00+00:00",
+                        "kind": "goal",
+                        "op": "upsert",
+                        "object": {"id": "goal-1", "description": "demo"},
+                        "actor": "harness",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "schema_version": "redharness.world/v1",
+                        "id": "wevt-2",
+                        "ts": "2026-10-06T08:00:01+00:00",
+                        "kind": "capability",
+                        "op": "upsert",
+                        "object": {
+                            "id": "cap-1",
+                            "type": "network.reachability",
+                            "subject": "agent",
+                            "scope": "target",
+                            "attributes": {},
+                        },
+                        "actor": "agent:test",
+                    }
+                ),
+            ]
         )
         + "\n",
         encoding="utf-8",
@@ -133,7 +154,7 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     assert trace[0]["type"] == "run.started"
 
     world = client.get("/v1/runs/run_test/world", headers=headers).json()
-    assert world["revision"] == 1
+    assert world["revision"] == 2
     world_events = client.get("/v1/runs/run_test/world/events", headers=headers).json()
     assert world_events[0]["kind"] == "goal"
 
