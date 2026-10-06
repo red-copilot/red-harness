@@ -143,7 +143,41 @@ class WorldContextBuilder:
         else:
             lines.append("- none")
 
-        lines.extend(["", "## Recent failures"])
+        lines.extend(["", "## Actions"])
+        actions = sorted(snapshot.actions.values(), key=lambda item: item.id)
+        if actions:
+            for action in actions:
+                lines.append(
+                    self._line(
+                        action.status,
+                        action.id,
+                        action.type,
+                        {"target": action.target, **action.attributes},
+                    )
+                )
+        else:
+            lines.append("- none")
+
+        lines.extend(["", "## Constraints"])
+        constraints = sorted(snapshot.constraints.values(), key=lambda item: item.id)
+        if constraints:
+            for constraint in constraints:
+                lines.append(
+                    self._line(
+                        constraint.status,
+                        constraint.id,
+                        constraint.type,
+                        {
+                            "description": constraint.description,
+                            "scope": constraint.scope,
+                            **constraint.attributes,
+                        },
+                    )
+                )
+        else:
+            lines.append("- none")
+
+        lines.extend(["", "## Failures"])
         failures = sorted(snapshot.failures.values(), key=lambda item: item.id)
         failures = failures[-self.max_failures :]
         if failures:
