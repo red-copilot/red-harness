@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .policy import GatewayPolicy
@@ -34,11 +35,13 @@ class GatewayEventWriter:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
 
     def emit(self, event_type: str, **data: Any) -> None:
         payload = {"type": event_type, "data": data}
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        with self._lock, self.path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
             handle.flush()
 
 
@@ -70,6 +73,59 @@ def _resolve_write_path(raw: str, *, workspace: Path) -> Path:
     return parent / candidate.name
 
 
+def _upstream_url(base: str, path: str) -> str:
+    normalized = base.rstrip("/")
+    if normalized.endswith("/v1"):
+        return normalized + path.removeprefix("/v1")
+    return normalized + path
+
+
+def _usage_values(usage: dict[str, Any]) -> tuple[int, int, int]:
+    input_tokens = int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0)
+    output_tokens = int(
+        usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
+    )
+    total_tokens = int(
+        usage.get("total_tokens", input_tokens + output_tokens)
+        or input_tokens + output_tokens
+    )
+    return input_tokens, output_tokens, total_tokens
+
+
+def _emit_usage(
+    writer: GatewayEventWriter,
+    pricing: ModelPricing,
+    *,
+    model: str,
+    usage: dict[str, Any],
+) -> None:
+    input_tokens, output_tokens, total_tokens = _usage_values(usage)
+    writer.emit(
+        "model.usage",
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cost_usd=pricing.cost(input_tokens, output_tokens),
+    )
+
+
+def _stream_usage(line: str) -> dict[str, Any] | None:
+    if not line.startswith("data:"):
+        return None
+    data = line[5:].strip()
+    if not data or data == "[DONE]":
+        return None
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    usage = payload.get("usage")
+    return usage if isinstance(usage, dict) else None
+
+
 def create_gateway_app(
     *,
     event_file: Path,
@@ -82,7 +138,7 @@ def create_gateway_app(
     model_pricing: ModelPricing | None = None,
     http_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="Red Harness Gateway", version="0.3.0")
+    app = FastAPI(title="Red Harness Gateway", version="0.4.0")
     writer = GatewayEventWriter(event_file)
     active_policy = policy or GatewayPolicy()
     pricing = model_pricing or ModelPricing()
@@ -136,55 +192,107 @@ def create_gateway_app(
         return {"ok": True, "result": result}
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request) -> JSONResponse:
+    async def chat_completions(request: Request) -> JSONResponse | StreamingResponse:
         _authorize(request, gateway_token)
         if model_upstream is None:
             raise HTTPException(status_code=503, detail="model upstream is not configured")
 
         payload = await request.json()
-        if bool(payload.get("stream")):
-            raise HTTPException(status_code=400, detail="streaming is not supported in v0.3")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="request body must be an object")
 
         model = str(payload.get("model", ""))
-        writer.emit("model.request", model=model, endpoint="/v1/chat/completions")
+        is_stream = bool(payload.get("stream"))
+        writer.emit(
+            "model.request",
+            model=model,
+            endpoint="/v1/chat/completions",
+            stream=is_stream,
+        )
         headers = {"content-type": "application/json"}
         if model_api_key:
             headers["authorization"] = f"Bearer {model_api_key}"
 
-        upstream_url = model_upstream.rstrip("/") + "/v1/chat/completions"
-        async with httpx.AsyncClient(transport=http_transport, timeout=120.0) as client:
-            response = await client.post(upstream_url, json=payload, headers=headers)
+        upstream_url = _upstream_url(model_upstream, "/v1/chat/completions")
 
-        try:
-            body = response.json()
-        except ValueError:
+        if not is_stream:
+            async with httpx.AsyncClient(transport=http_transport, timeout=120.0) as client:
+                response = await client.post(upstream_url, json=payload, headers=headers)
+
+            try:
+                body = response.json()
+            except ValueError:
+                writer.emit("model.response", model=model, status_code=response.status_code)
+                return JSONResponse(
+                    status_code=response.status_code,
+                    content={"error": {"message": "upstream returned non-JSON response"}},
+                )
+
             writer.emit("model.response", model=model, status_code=response.status_code)
-            return JSONResponse(
-                status_code=response.status_code,
-                content={"error": {"message": "upstream returned non-JSON response"}},
-            )
+            if response.is_success and isinstance(body, dict):
+                usage = body.get("usage")
+                if isinstance(usage, dict):
+                    _emit_usage(writer, pricing, model=model, usage=usage)
+                else:
+                    writer.emit("model.usage_missing", model=model, stream=False)
 
-        writer.emit("model.response", model=model, status_code=response.status_code)
-        if response.is_success and isinstance(body, dict):
-            usage = body.get("usage", {})
-            if isinstance(usage, dict):
-                input_tokens = int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0)
-                output_tokens = int(
-                    usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
-                )
-                total_tokens = int(
-                    usage.get("total_tokens", input_tokens + output_tokens)
-                    or input_tokens + output_tokens
-                )
-                writer.emit(
-                    "model.usage",
-                    model=model,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    total_tokens=total_tokens,
-                    cost_usd=pricing.cost(input_tokens, output_tokens),
-                )
+            return JSONResponse(status_code=response.status_code, content=body)
 
-        return JSONResponse(status_code=response.status_code, content=body)
+        stream_payload = dict(payload)
+        stream_options = stream_payload.get("stream_options")
+        if not isinstance(stream_options, dict):
+            stream_options = {}
+        stream_payload["stream_options"] = {**stream_options, "include_usage": True}
+
+        client = httpx.AsyncClient(transport=http_transport, timeout=120.0)
+        upstream_request = client.build_request(
+            "POST",
+            upstream_url,
+            json=stream_payload,
+            headers=headers,
+        )
+        response = await client.send(upstream_request, stream=True)
+
+        if not response.is_success:
+            body_bytes = await response.aread()
+            await response.aclose()
+            await client.aclose()
+            writer.emit("model.response", model=model, status_code=response.status_code)
+            try:
+                body = json.loads(body_bytes)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                body = {"error": {"message": "upstream returned non-JSON response"}}
+            return JSONResponse(status_code=response.status_code, content=body)
+
+        async def relay():
+            usage_seen = False
+            buffered = ""
+            try:
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+                    buffered += chunk.decode("utf-8", errors="ignore")
+                    while "\n" in buffered:
+                        line, buffered = buffered.split("\n", 1)
+                        usage = _stream_usage(line.rstrip("\r"))
+                        if usage is not None:
+                            _emit_usage(writer, pricing, model=model, usage=usage)
+                            usage_seen = True
+                if buffered:
+                    usage = _stream_usage(buffered.rstrip("\r"))
+                    if usage is not None:
+                        _emit_usage(writer, pricing, model=model, usage=usage)
+                        usage_seen = True
+            finally:
+                writer.emit("model.response", model=model, status_code=response.status_code)
+                if not usage_seen:
+                    writer.emit("model.usage_missing", model=model, stream=True)
+                await response.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            relay(),
+            status_code=response.status_code,
+            media_type="text/event-stream",
+        )
 
     return app
