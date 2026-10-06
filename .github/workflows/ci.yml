@@ -17,4 +17,12 @@ jobs:
       - run: pytest -q
       - run: redharness validate benchmarks/examples/hello/task.yaml
       - run: redharness validate-suite benchmarks/examples/smoke-suite.yaml
+      - run: redharness gateway --help
       - run: redharness run benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml --allow-host-agent --seed 7
+      - run: >-
+          redharness run benchmarks/examples/hello/task.yaml
+          --agent agents/examples/gateway-demo.yaml
+          --allow-host-agent
+          --gateway
+          --gateway-policy examples/gateway-policy.yaml
+          --seed 11
