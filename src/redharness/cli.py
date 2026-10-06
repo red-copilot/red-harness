@@ -263,11 +263,16 @@ def tsec(
     ] = False,
     start_retries: Annotated[int, typer.Option("--start-retries", min=0, max=10)] = 2,
     retry_delay: Annotated[float, typer.Option("--retry-delay", min=0)] = 2.0,
+    allow_host_agent: Annotated[
+        bool,
+        typer.Option(
+            "--allow-host-agent",
+            help="Allow a trusted CLI agent to execute on the host.",
+        ),
+    ] = False,
 ) -> None:
-    """Run TSec Benchmark challenges with a containerized Pi agent."""
+    """Run TSec Benchmark challenges through the generic benchmark runtime."""
     spec = load_agent(agent)
-    if spec.type != "pi":
-        raise typer.BadParameter("TSec integration currently requires a type: pi agent")
     config = load_tsec_config(base_url_env=base_url_env, token_env=token_env)
     budgets = BudgetSpec(
         wall_time=wall_time,
@@ -287,6 +292,7 @@ def tsec(
             use_hint=use_hint,
             start_retries=start_retries,
             retry_delay=retry_delay,
+            allow_host_agent=allow_host_agent,
         )
     )
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
