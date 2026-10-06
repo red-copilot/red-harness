@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import httpx
 
@@ -53,7 +53,7 @@ class _Heartbeat:
                 self.stop_event.set()
                 return
 
-    def __enter__(self) -> _Heartbeat:
+    def __enter__(self) -> Self:
         self.thread.start()
         return self
 
