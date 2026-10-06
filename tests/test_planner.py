@@ -141,6 +141,8 @@ def test_rolling_horizon_plan_uses_progress_and_expected_outputs() -> None:
     assert plan.world_revision == 7
     assert plan.horizon == 2
     assert plan.current_subgoal == "enumerate services"
+    assert plan.replan_required is True
+    assert "no_progress_threshold" in plan.replan_reasons
     assert len(plan.actions) == 2
     assert plan.actions[0].rank == 1
     assert plan.actions[0].expected_observations
@@ -163,3 +165,30 @@ def test_rolling_horizon_clamps_to_three_actions() -> None:
 
     assert plan.horizon == 3
     assert len(plan.actions) == 3
+
+
+
+def test_rolling_horizon_consumes_verifier_replan_state() -> None:
+    snapshot = WorldSnapshot()
+    progress = ProgressLedger(
+        replan_reasons=["expected_observation_missing"],
+        last_verification={
+            "status": "inconclusive",
+            "expected_observation": "admin endpoint exists",
+            "actual_observation": None,
+            "evidence": [],
+            "replan_required": True,
+            "replan_reasons": ["expected_observation_missing"],
+        },
+    )
+
+    plan = RollingHorizonPlanner().propose(
+        snapshot,
+        [],
+        progress=progress,
+        horizon=1,
+    )
+
+    assert plan.replan_required is True
+    assert plan.replan_reasons == ["expected_observation_missing"]
+    assert plan.previous_verification_status == "inconclusive"
