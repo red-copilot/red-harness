@@ -78,6 +78,8 @@ class PiSpec(BaseModel):
     themes: bool = False
     mcp: bool = False
     offline: bool = True
+    env_passthrough: list[str] = Field(default_factory=list)
+    cap_add: list[str] = Field(default_factory=lambda: ["NET_RAW"])
     extra_args: list[str] = Field(default_factory=list)
 
 
@@ -101,14 +103,15 @@ class AgentSpec(BaseModel):
             raise ValueError("cli agents require command")
         if self.type == "docker" and not self.image:
             raise ValueError("docker agents require image")
-        if self.type == "pi" and self.pi is None:
-            raise ValueError("pi agents require pi configuration")
-        if self.type != "docker" and self.runtime is not None:
-            raise ValueError("runtime is only valid for docker agents")
-        if self.type == "pi" and self.command:
-            raise ValueError("pi agents use pi.launcher_args instead of command")
-        if self.type == "pi" and self.image is not None:
-            raise ValueError("host pi adapter does not accept image")
+        if self.type == "pi":
+            if self.pi is None:
+                raise ValueError("pi agents require pi configuration")
+            if not self.image:
+                raise ValueError("pi agents require a container image")
+            if self.command:
+                raise ValueError("pi agents use pi.launcher_args instead of command")
+        if self.type not in {"docker", "pi"} and self.runtime is not None:
+            raise ValueError("runtime is only valid for container agents")
         return self
 
 
