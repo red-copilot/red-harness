@@ -34,6 +34,16 @@ class CompleteRequest(BaseModel):
 
 
 
+
+
+class PublishPlanRequest(BaseModel):
+    skill_id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    goal_id: str | None = None
+    priority: float = Field(default=0.5, ge=0.0, le=1.0)
+    metadata: dict = Field(default_factory=dict)
+
+
 class WorkClaimRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=300)
     agent_id: str = Field(min_length=1, max_length=200)
@@ -164,6 +174,35 @@ def create_control_plane(
         if not queue.fail(job_id, body.worker_id, body.error):
             raise HTTPException(status_code=409, detail="lease is not owned by worker")
         return {"ok": True}
+
+    @app.post("/v1/runs/{run_id}/plan/publish")
+    async def publish_plan_candidate(
+        request: Request,
+        run_id: str,
+        body: PublishPlanRequest,
+    ) -> dict:
+        _authorize(request, token)
+        _run_dir(run_root, run_id)
+        if skill_root is None:
+            raise HTTPException(status_code=409, detail="skill registry is not configured")
+        skills_by_id = {skill.id: skill for skill in load_skills(skill_root)}
+        skill = skills_by_id.get(body.skill_id)
+        if skill is None:
+            raise HTTPException(status_code=404, detail="skill not found")
+        return coordination.submit(
+            WorkItemSpec(
+                run_id=run_id,
+                goal_id=body.goal_id,
+                skill_id=skill.id,
+                description=body.description,
+                priority=body.priority,
+                metadata={
+                    "skill_domain": skill.domain,
+                    "skill_tags": skill.tags,
+                    **body.metadata,
+                },
+            )
+        )
 
     @app.post("/v1/work")
     async def submit_work(request: Request, body: WorkItemSpec) -> dict:
