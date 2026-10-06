@@ -117,4 +117,5 @@ def test_world_inbox_validates_agent_submissions(tmp_path):
         for line in (tmp_path / "world.events.jsonl").read_text().splitlines()
         if line
     ]
+    assert len(persisted) == 1
     assert persisted[0]["actor"] == "agent:test"
