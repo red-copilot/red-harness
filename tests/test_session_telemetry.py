@@ -10,7 +10,7 @@ from redharness.budget import UsageMetrics
 from redharness.failures import FailureClass, classify_failure
 from redharness.pi_container import ContainerPiSession
 from redharness.progress import ProgressLedger
-from redharness.session import AgentObservation, OneShotAgentSession
+from redharness.session import AgentEvent, AgentObservation, OneShotAgentSession
 from redharness.trace import TraceRecorder
 
 
@@ -104,11 +104,13 @@ def test_oneshot_agent_session_streams_events_and_feedback(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
-
 def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
     ledger = ProgressLedger(active_goal="goal:test")
     ledger.record_event(
-        type("Event", (), {"type": "tool.call", "data": {"tool": "bash", "tool_call_id": "1"}})()
+        AgentEvent(
+            type="tool.call",
+            data={"tool": "bash", "tool_call_id": "1"},
+        )
     )
     assert ledger.last_action == {
         "tool": "bash",
@@ -117,14 +119,10 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
     }
 
     ledger.record_event(
-        type(
-            "Event",
-            (),
-            {
-                "type": "tool.result",
-                "data": {"tool": "bash", "tool_call_id": "1", "is_error": True},
-            },
-        )()
+        AgentEvent(
+            type="tool.result",
+            data={"tool": "bash", "tool_call_id": "1", "is_error": True},
+        )
     )
     assert ledger.failure_count == 1
     assert ledger.no_progress_count == 1
@@ -149,10 +147,12 @@ def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path)
         return type("Result", (), {"returncode": 0})()
 
     monkeypatch.setattr("redharness.pi_container.subprocess.run", fake_run)
+    run_dir = tmp_path / "run_demo"
+    run_dir.mkdir()
     session = ContainerPiSession(
         object(),
         run_kwargs={},
-        run_dir=tmp_path / "run_demo",
+        run_dir=run_dir,
     )
     asyncio.run(session.close("objective-complete"))
 
