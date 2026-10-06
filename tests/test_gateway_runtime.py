@@ -28,6 +28,7 @@ def test_per_run_gateway_is_injected_and_accounted(tmp_path: Path) -> None:
         "enabled": True,
         "model_proxy": False,
         "docker_access": False,
+        "mode": "host",
     }
     assert result["metrics"]["tool_calls"] == 1
 
