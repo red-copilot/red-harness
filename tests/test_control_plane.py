@@ -14,6 +14,38 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
         json.dumps({"run_id": "run_test", "success": True, "score": 100}),
         encoding="utf-8",
     )
+    (run_dir / "world.snapshot.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "redharness.world/v1",
+                "revision": 1,
+                "entities": {},
+                "relations": {},
+                "observations": {},
+                "artifacts": {},
+                "capabilities": {},
+                "hypotheses": {},
+                "goals": {"goal-1": {"id": "goal-1", "description": "demo"}},
+                "failures": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "world.events.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "redharness.world/v1",
+                "id": "wevt-1",
+                "ts": "2026-10-06T08:00:00+00:00",
+                "kind": "goal",
+                "op": "upsert",
+                "object": {"id": "goal-1", "description": "demo"},
+                "actor": "harness",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     (run_dir / "trace.jsonl").write_text(
         json.dumps(
             {
@@ -86,6 +118,11 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     assert client.get("/v1/runs/run_test", headers=headers).json()["success"] is True
     trace = client.get("/v1/runs/run_test/trace", headers=headers).json()
     assert trace[0]["type"] == "run.started"
+
+    world = client.get("/v1/runs/run_test/world", headers=headers).json()
+    assert world["revision"] == 1
+    world_events = client.get("/v1/runs/run_test/world/events", headers=headers).json()
+    assert world_events[0]["kind"] == "goal"
 
     otel = client.get("/v1/runs/run_test/otel", headers=headers).json()
     spans = otel["resourceSpans"][0]["scopeSpans"][0]["spans"]
