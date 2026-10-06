@@ -188,3 +188,26 @@ def test_world_temporal_window_rejects_invalid_range():
             valid_from=now,
             expires_at=now - timedelta(seconds=1),
         )
+
+
+
+def test_event_provenance_overrides_agent_actor(tmp_path):
+    store = WorldStore(tmp_path / "world.events.jsonl")
+    store.upsert(
+        "capability",
+        {
+            "id": "cap-forged",
+            "type": "host.shell",
+            "provenance": {
+                "actor": "forged-agent",
+                "event_id": "forged-event",
+                "source": "agent-claimed-source",
+            },
+        },
+        actor="agent:trusted-id",
+    )
+
+    capability = store.snapshot.capabilities["cap-forged"]
+    assert capability.provenance.actor == "agent:trusted-id"
+    assert capability.provenance.event_id != "forged-event"
+    assert capability.provenance.source == "agent-claimed-source"
