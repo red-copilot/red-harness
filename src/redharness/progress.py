@@ -29,6 +29,10 @@ class ProgressLedger(BaseModel):
     expected_observation: str | None = None
     actual_observation: str | None = None
     replan_reasons: list[str] = Field(default_factory=list)
+    last_verification: dict[str, Any] | None = None
+    verified_actions: int = 0
+    contradicted_actions: int = 0
+    inconclusive_actions: int = 0
     last_action: dict[str, Any] | None = None
     failure_count: int = 0
     no_progress_count: int = 0
@@ -112,6 +116,28 @@ class ProgressLedger(BaseModel):
             self.no_progress_count = 0
         elif made_progress is False:
             self.no_progress_count += 1
+
+    def record_verification(self, verification: Any) -> None:
+        data = (
+            verification.model_dump(mode="json")
+            if hasattr(verification, "model_dump")
+            else dict(verification)
+        )
+        self.last_verification = data
+        status = data.get("status")
+        if status == "verified":
+            self.verified_actions += 1
+            self.no_progress_count = 0
+        elif status == "contradicted":
+            self.contradicted_actions += 1
+            self.failure_count += 1
+            self.no_progress_count += 1
+        else:
+            self.inconclusive_actions += 1
+
+        for reason in data.get("replan_reasons", []):
+            if reason not in self.replan_reasons:
+                self.replan_reasons.append(reason)
 
     def record_submission(self, *, accepted: bool, completed: bool) -> None:
         if accepted:
