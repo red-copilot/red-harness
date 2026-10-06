@@ -26,6 +26,7 @@ Version 0.8 provides:
 - benchmark registry scanning
 - persisted result/trace viewer API
 - event-sourced universal world-state runtime with materialized snapshots
+- domain-neutral skill metadata registry for future planners and domain extensions
 - leaderboard aggregation
 - OTLP/HTTP JSON-compatible trace export
 - Firecracker capability detection and machine-profile contract
@@ -254,6 +255,7 @@ POST /v1/jobs/{job_id}/complete
 POST /v1/jobs/{job_id}/fail
 
 GET  /v1/benchmarks
+GET  /v1/skills
 GET  /v1/leaderboard
 GET  /v1/capabilities
 
@@ -472,7 +474,7 @@ For Pi runs, `agent.stdout.log` is the raw Pi JSON event stream.
               Trace API / OTLP
 ```
 
-World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md). The core state schema is domain-neutral and does not require a DAG; graph and timeline representations are derived views over the event-sourced state.
+World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md). Reusable technique metadata uses `redharness/skill/v1`; skills describe state preconditions and possible outcomes but are not executable code. The core state schema is domain-neutral and does not require a DAG; graph and timeline representations are derived views over the event-sourced state.
 
 Core separation rule:
 
