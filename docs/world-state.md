@@ -26,6 +26,8 @@ The v1 state schema contains:
 - `Capability`: an ability acquired by an Agent within a scope.
 - `Hypothesis`: a testable belief with confidence and lifecycle status.
 - `Goal`: a persistent objective or sub-objective.
+- `ActionRecord`: a planned/running/completed offensive action with optional target.
+- `Constraint`: an active/satisfied/violated/expired execution or policy boundary.
 - `Failure`: a structured failed attempt or execution condition.
 
 The core does not define security-domain taxonomies. Extensions can use namespaced type strings,
