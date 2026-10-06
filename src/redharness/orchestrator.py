@@ -7,7 +7,9 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .agent import CLIAdapter
+from . import __version__
+from .agent import build_agent_adapter
+from .budget import UsageMetrics
 from .environment import build_environment
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
@@ -35,6 +37,7 @@ class Orchestrator:
         agent: AgentSpec,
         agent_path: Path,
         allow_host_agent: bool = False,
+        seed: int = 0,
     ) -> dict:
         run_id = _new_run_id()
         run_dir = (self.runs_root / run_id).resolve()
@@ -43,15 +46,16 @@ class Orchestrator:
         trace = TraceRecorder(run_dir / "trace.jsonl", run_id, task.id)
         started = time.monotonic()
         status = "running"
+        usage = UsageMetrics()
         environment = build_environment(
             task.environment, task_dir=task_dir, run_id=run_id, trace=trace
         )
-        handle = None
 
         trace.emit(
             "run.started",
             data={
                 "agent_id": agent.id,
+                "seed": seed,
                 "task_sha256": _sha256(task_path),
                 "agent_sha256": _sha256(agent_path),
             },
@@ -59,16 +63,20 @@ class Orchestrator:
 
         try:
             handle = environment.start()
-            adapter = CLIAdapter(agent, allow_host=allow_host_agent, trace=trace)
+            adapter = build_agent_adapter(
+                agent,
+                allow_host_agent=allow_host_agent,
+                trace=trace,
+            )
             agent_result = adapter.run(
                 task,
                 task_dir=task_dir,
                 run_dir=run_dir,
-                timeout=task.budgets.wall_time,
                 environment_project=handle.project_name,
+                environment_network=handle.network_name,
+                seed=seed,
             )
-            (run_dir / "agent.stdout.log").write_text(agent_result.stdout, encoding="utf-8")
-            (run_dir / "agent.stderr.log").write_text(agent_result.stderr, encoding="utf-8")
+            usage = agent_result.metrics
 
             if agent_result.timed_out:
                 status = "timeout"
@@ -78,7 +86,14 @@ class Orchestrator:
                     "message": "agent exceeded wall-time budget",
                     "milestones": {},
                 }
-                trace.emit("budget.exceeded", data={"budget": "wall_time"})
+            elif agent_result.budget_exceeded:
+                status = "budget_exceeded"
+                verification = {
+                    "success": False,
+                    "score": 0.0,
+                    "message": f"agent exceeded {agent_result.budget_exceeded}",
+                    "milestones": {},
+                }
             else:
                 verified, vout, verr = run_python_verifier(
                     task,
@@ -86,6 +101,7 @@ class Orchestrator:
                     run_dir=run_dir,
                     environment_project=handle.project_name,
                     trace=trace,
+                    seed=seed,
                 )
                 (run_dir / "verifier.stdout.log").write_text(vout, encoding="utf-8")
                 (run_dir / "verifier.stderr.log").write_text(verr, encoding="utf-8")
@@ -113,18 +129,20 @@ class Orchestrator:
                 )
 
         duration_ms = int((time.monotonic() - started) * 1000)
+        metrics = {"duration_ms": duration_ms, **usage.as_dict()}
         result = {
             "run_id": run_id,
             "task_id": task.id,
             "agent_id": agent.id,
+            "seed": seed,
             "status": status,
             "success": bool(verification["success"]),
             "score": float(verification["score"]),
             "message": verification.get("message"),
             "milestones": verification.get("milestones", {}),
-            "metrics": {"duration_ms": duration_ms},
+            "metrics": metrics,
             "versions": {
-                "harness": "0.1.0",
+                "harness": __version__,
                 "task_sha256": _sha256(task_path),
                 "agent_sha256": _sha256(agent_path),
             },
@@ -139,7 +157,7 @@ class Orchestrator:
                 "status": status,
                 "success": result["success"],
                 "score": result["score"],
-                "duration_ms": duration_ms,
+                "metrics": metrics,
             },
         )
         return result
