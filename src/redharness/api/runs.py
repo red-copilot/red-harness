@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..otel import trace_to_otlp_json
 from ..planner import HeuristicSkillPlanner
 from ..skills import load_skills
-from ..world import WorldSnapshot
+from ..world import FileWorldRepository, WorldRepository
 from .common import authorize, run_dir
 
 
@@ -17,6 +18,7 @@ def build_runs_router(
     run_root: Path,
     skill_root: Path | None,
     token: str | None,
+    world_repository_factory: Callable[[Path], WorldRepository] = FileWorldRepository,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -53,10 +55,10 @@ def build_runs_router(
     async def run_world(request: Request, run_id: str) -> dict:
         authorize(request, token)
         directory = run_dir(run_root, run_id)
-        world_path = directory / "world.snapshot.json"
-        if not world_path.is_file():
+        repository = world_repository_factory(directory / "world.events.jsonl")
+        if repository.snapshot.revision == 0:
             raise HTTPException(status_code=404, detail="world snapshot not found")
-        return json.loads(world_path.read_text(encoding="utf-8"))
+        return repository.snapshot.model_dump(mode="json")
 
     @router.get("/v1/runs/{run_id}/world/events")
     async def run_world_events(
@@ -66,17 +68,11 @@ def build_runs_router(
     ) -> list[dict]:
         authorize(request, token)
         directory = run_dir(run_root, run_id)
-        event_path = directory / "world.events.jsonl"
-        if not event_path.is_file():
+        repository = world_repository_factory(directory / "world.events.jsonl")
+        events = repository.events(limit=limit)
+        if not events:
             raise HTTPException(status_code=404, detail="world event log not found")
-        events: list[dict] = []
-        with event_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    events.append(json.loads(line))
-                    if len(events) >= limit:
-                        break
-        return events
+        return [event.model_dump(mode="json") for event in events]
 
     @router.get("/v1/runs/{run_id}/plan")
     async def run_plan(
@@ -86,12 +82,10 @@ def build_runs_router(
     ) -> dict:
         authorize(request, token)
         directory = run_dir(run_root, run_id)
-        world_path = directory / "world.snapshot.json"
-        if not world_path.is_file():
+        repository = world_repository_factory(directory / "world.events.jsonl")
+        snapshot = repository.snapshot
+        if snapshot.revision == 0:
             raise HTTPException(status_code=404, detail="world snapshot not found")
-        snapshot = WorldSnapshot.model_validate(
-            json.loads(world_path.read_text(encoding="utf-8"))
-        )
         skills = load_skills(skill_root) if skill_root is not None else []
         candidates = HeuristicSkillPlanner().propose(snapshot, skills, limit=limit)
         return {
