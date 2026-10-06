@@ -11,7 +11,7 @@ from . import __version__
 from .agent import build_agent_adapter
 from .budget import UsageMetrics
 from .environment import build_environment
-from .gateway_runtime import GatewayConfig, GatewayRuntime
+from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
 from .verifier import run_verifier
@@ -49,7 +49,7 @@ class Orchestrator:
         started = time.monotonic()
         status = "running"
         usage = UsageMetrics()
-        gateway_runtime: GatewayRuntime | None = None
+        gateway_runtime = None
         environment = build_environment(
             task.environment, task_dir=task_dir, run_id=run_id, trace=trace
         )
@@ -72,12 +72,13 @@ class Orchestrator:
                     raise ValueError(
                         "Docker Agent network:none is incompatible with per-run Gateway"
                     )
-                gateway_runtime = GatewayRuntime(
+                gateway_runtime = build_gateway_runtime(
                     config=gateway_config,
                     run_dir=run_dir,
                     task_dir=task_dir,
+                    run_id=run_id,
                     trace=trace,
-                    expose_to_docker=agent.type == "docker",
+                    agent_type=agent.type,
                 )
                 gateway_runtime.start()
 
@@ -95,6 +96,7 @@ class Orchestrator:
                 seed=seed,
                 gateway_url=gateway_runtime.url if gateway_runtime else None,
                 gateway_token=gateway_runtime.token if gateway_runtime else None,
+                gateway_network=gateway_runtime.network_name if gateway_runtime else None,
             )
             usage = agent_result.metrics
 
@@ -173,6 +175,7 @@ class Orchestrator:
                 "enabled": gateway_config is not None,
                 "model_proxy": bool(gateway_config and gateway_config.model_upstream),
                 "docker_access": bool(gateway_config and agent.type == "docker"),
+                "mode": gateway_config.mode if gateway_config else None,
             },
             "metrics": metrics,
             "versions": {
