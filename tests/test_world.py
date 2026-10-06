@@ -9,6 +9,9 @@ from redharness.world import (
     Observation,
     Relation,
     WorldStore,
+    WorldSubmission,
+    ingest_world_inbox,
+    write_submission,
 )
 
 
@@ -79,3 +82,39 @@ def test_world_store_supports_updates_and_removals(tmp_path):
 
     assert store.snapshot.revision == 3
     assert "goal-1" not in store.snapshot.goals
+
+
+
+def test_world_inbox_validates_agent_submissions(tmp_path):
+    store = WorldStore(tmp_path / "world.events.jsonl")
+    inbox = tmp_path / "world.inbox.jsonl"
+
+    write_submission(
+        inbox,
+        WorldSubmission(
+            kind="capability",
+            object={
+                "id": "cap-shell",
+                "type": "host.shell",
+                "subject": "agent",
+                "scope": "host-1",
+                "attributes": {},
+            },
+        ),
+    )
+    with inbox.open("a", encoding="utf-8") as handle:
+        handle.write('{"kind":"capability","object":{"type":"missing-id"}}\n')
+        handle.write('{"kind":"unknown","object":{"id":"bad"}}\n')
+
+    report = ingest_world_inbox(inbox, store, actor="agent:test")
+
+    assert report.accepted == 1
+    assert report.rejected == 2
+    assert store.snapshot.capabilities["cap-shell"].scope == "host-1"
+
+    persisted = [
+        json.loads(line)
+        for line in (tmp_path / "world.events.jsonl").read_text().splitlines()
+        if line
+    ]
+    assert persisted[0]["actor"] == "agent:test"
