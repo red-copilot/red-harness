@@ -1,0 +1,7 @@
+apiVersion: redharness/v1
+id: smoke-suite
+repeat: 2
+base_seed: 1000
+tasks:
+  - path: hello/task.yaml
+    weight: 1.0
