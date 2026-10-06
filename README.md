@@ -4,9 +4,13 @@ Red Harness is a reproducible evaluation runtime and control plane for security 
 
 ## Current capabilities
 
-Version 0.6 provides:
+Version 0.7 provides:
 
 - declarative task, agent, suite, policy, and distributed-job contracts
+- first-class [Pi](https://pi.dev/docs/latest) Agent Adapter using Pi JSON mode
+- Pi tool/model event normalization into Harness traces and budgets
+- isolated per-run Pi configuration and deterministic non-interactive defaults
+- optional Pi model routing through the Red Harness credential-isolating Gateway
 - Docker Compose or no-op benchmark environments
 - trusted CLI agents and restricted Docker agents
 - Python or Docker-sandboxed verifiers
@@ -24,10 +28,10 @@ Version 0.6 provides:
 - leaderboard aggregation
 - OTLP/HTTP JSON-compatible trace export
 - Firecracker capability detection and machine-profile contract
-- GitHub Actions coverage for Docker Agent, sidecar Gateway, Docker Verifier, and a real HTTP control-plane/worker flow
+- GitHub Actions coverage for Pi 1.0.4, Docker Agent, sidecar Gateway, Docker Verifier, and a real HTTP control-plane/worker flow
 
 > [!WARNING]
-> CLI agents and `verification.type: python` execute trusted host processes. For untrusted evaluation inputs, use Docker agents and Docker verifiers. `runtime: runsc` requires gVisor to be installed and registered with Docker. v0.6 defines and validates the Firecracker host/profile contract, but it does not yet launch microVMs; CI does not provide `/dev/kvm`.
+> CLI agents, the host Pi adapter, and `verification.type: python` execute trusted host processes. For untrusted evaluation inputs, use Docker agents and Docker verifiers. Pi project trust is not a sandbox. `runtime: runsc` requires gVisor to be installed and registered with Docker. v0.7 defines and validates the Firecracker host/profile contract, but it does not yet launch microVMs; CI does not provide `/dev/kvm`.
 
 ## Install
 
@@ -36,6 +40,15 @@ python -m pip install -e ".[dev]"
 ```
 
 Python 3.11+ is required. Docker is required for Docker agents, sidecar Gateway mode, Docker verifiers, and Docker Compose benchmark environments.
+
+For Pi support, install Pi separately. Red Harness CI pins Pi 1.0.4:
+
+```bash
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.0.4
+pi --version
+```
+
+Pi requires Node.js 22.19 or newer. See [`docs/pi.md`](docs/pi.md) for the full integration contract.
 
 ## Local run
 
@@ -80,6 +93,75 @@ pass@k = 1 - C(n-c, k) / C(n, k)
 
 Domain aggregation is based on each task's `category`.
 
+## Pi Agent Adapter
+
+Example `agents/examples/pi.yaml`:
+
+```yaml
+apiVersion: redharness/v1
+id: pi-openai-sol
+type: pi
+
+pi:
+  provider: openai
+  model: gpt-5.6-sol
+  thinking: medium
+  tools: [read, bash, edit, write]
+  approve_project: false
+  context_files: false
+  extensions: false
+  skills: false
+  prompt_templates: false
+  themes: false
+  mcp: false
+  offline: true
+```
+
+Direct-provider mode uses the provider's normal environment credential:
+
+```bash
+export OPENAI_API_KEY="..."
+
+redharness run benchmark/task.yaml \
+  --agent agents/examples/pi.yaml \
+  --allow-host-agent
+```
+
+The adapter runs Pi in one-shot JSON mode and normalizes its structured events:
+
+```text
+Pi session                    -> pi.session
+assistant message_start       -> model.request
+assistant message_end         -> model.response + model.usage
+tool_execution_start          -> tool.call
+tool_execution_end            -> tool.result
+agent_settled                 -> pi.agent_settled
+```
+
+Pi model usage contributes input/output/total tokens, cache usage, reasoning usage, and model cost to the existing Harness budget and result metrics. The raw Pi JSONL stream is retained in `agent.stdout.log`.
+
+By default, each run receives a fresh `PI_CODING_AGENT_DIR`; Pi sessions are ephemeral, install telemetry/update checks are disabled, project trust is denied, and project context/extensions/skills/MCP/templates/themes are not loaded unless explicitly enabled in the agent contract.
+
+### Pi through the Harness model Gateway
+
+Pi can be forced through the Harness OpenAI-compatible model proxy:
+
+```bash
+export REDHARNESS_MODEL_API_KEY="real-provider-key"
+
+redharness run benchmark/task.yaml \
+  --agent agents/examples/pi.yaml \
+  --allow-host-agent \
+  --gateway \
+  --model-upstream https://provider.example/v1 \
+  --input-price-per-million 2.0 \
+  --output-price-per-million 10.0
+```
+
+For that run Harness creates an isolated Pi `models.json` with a `redharness` provider whose API key is the one-time `REDHARNESS_GATEWAY_TOKEN`. The real upstream credential remains inside the Gateway process. Gateway model events are authoritative in this mode, so Pi's copy of model usage is not counted twice.
+
+The current first-class Pi adapter is a host-process adapter and therefore supports host Gateway mode. Docker-sidecar Gateway mode is reserved for Docker agents because its endpoint is reachable only on the private Docker network.
+
 ## Distributed control plane
 
 The reference control plane uses SQLite for durable job state and leases. Workers communicate only through HTTP, so they can run on different machines as long as each worker has the same benchmark/agent checkout or compatible workspace layout.
@@ -117,7 +199,7 @@ redharness worker \
   --workspace-root /srv/red-harness
 ```
 
-Host-process jobs are rejected by workers unless the worker is explicitly started with:
+Host-process jobs, including `type: pi`, are rejected by workers unless the worker is explicitly started with:
 
 ```bash
 --allow-host-jobs
@@ -203,13 +285,13 @@ redharness otel-export .redharness/runs/run_... \
   --output trace.otlp.json
 ```
 
-Each Red Harness event becomes a span carrying run/task/actor/event attributes plus serialized event data. This export is intentionally file/HTTP payload generation in v0.6; direct collector delivery can be added without modifying the trace recorder.
+Each Red Harness event becomes a span carrying run/task/actor/event attributes plus serialized event data. This export is intentionally file/HTTP payload generation in v0.7; direct collector delivery can be added without modifying the trace recorder.
 
 ## Gateway modes
 
 ### Host mode
 
-Useful for trusted local development:
+Useful for trusted local development and the first-class Pi adapter:
 
 ```bash
 redharness run benchmarks/examples/hello/task.yaml \
@@ -258,6 +340,8 @@ file.write
 
 The default policy prevents path traversal and constrains reads/writes to task/run roots. No host-side arbitrary shell tool is exposed.
 
+Pi built-in tools do not pass through this Tool Gateway in v0.7; they are observed through Pi's JSON event stream and run with the Pi process permissions. This is why the first-class Pi adapter is explicitly a trusted host adapter.
+
 ## Execution profiles
 
 Docker Agent:
@@ -296,13 +380,14 @@ docker
 gvisor_runsc
 firecracker
 kvm
+pi
 ```
 
 ### Firecracker contract
 
-v0.6 contains a `FirecrackerProfile` that validates kernel/rootfs images and generates the boot-source, root drive, and machine configuration expected by a future Firecracker backend. `FirecrackerBackend.validate_host()` requires both the `firecracker` binary and `/dev/kvm`.
+v0.7 contains a `FirecrackerProfile` that validates kernel/rootfs images and generates the boot-source, root drive, and machine configuration expected by a future Firecracker backend. `FirecrackerBackend.validate_host()` requires both the `firecracker` binary and `/dev/kvm`.
 
-This is deliberately not advertised as a runnable backend yet. VM lifecycle, jailer/network setup, snapshotting, and run-bundle mounts remain Phase 7 work.
+This is deliberately not advertised as a runnable backend yet. VM lifecycle, jailer/network setup, snapshotting, and run-bundle mounts remain future work.
 
 ## Budgets and result bundles
 
@@ -329,6 +414,8 @@ verifier.stdout.log
 verifier.stderr.log
 ```
 
+For Pi runs, `agent.stdout.log` is the raw Pi JSON event stream.
+
 ## Architecture
 
 ```text
@@ -349,7 +436,11 @@ verifier.stderr.log
           │            │              │
       Environment    Gateway       Verifier
                        │
-                   Agent / Model
+               ┌───────┴────────┐
+               │                │
+          Generic Agent      Pi Adapter
+                                │
+                          Pi JSON protocol
                        │
                 Trace + Result
                        │
@@ -370,4 +461,5 @@ Task != Environment != Agent != Model != Tool != Verifier
 4. **Done:** Docker Verifier sandbox and Docker Agent Gateway support.
 5. **Done:** isolated Gateway sidecar, Docker runtime profiles, parallel workers, pass@k, domain scoring.
 6. **Done:** authenticated control plane, leased distributed workers, benchmark registry, leaderboard, trace-viewer API, OTLP JSON export, Firecracker host/profile contract.
-7. PostgreSQL/Redis queue backend, KVM-enabled Firecracker lifecycle, snapshot pooling, OpenTelemetry collector delivery, browser trace UI, signed benchmark registry, and multi-tenant scheduling.
+7. **Done:** first-class Pi JSON adapter, Pi usage/tool normalization, isolated Pi config, Gateway model routing, Pi capability detection.
+8. PostgreSQL/Redis queue backend, containerized Pi adapter, KVM-enabled Firecracker lifecycle, snapshot pooling, OpenTelemetry collector delivery, browser trace UI, signed benchmark registry, and multi-tenant scheduling.
