@@ -2,22 +2,40 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
-class Entity(BaseModel):
+class WorldRecord(BaseModel):
+    source: str | None = None
+    observed_at: datetime | None = None
+    valid_from: datetime | None = None
+    expires_at: datetime | None = None
+    supersedes: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_temporal_window(self) -> Self:
+        if (
+            self.valid_from is not None
+            and self.expires_at is not None
+            and self.expires_at < self.valid_from
+        ):
+            raise ValueError("expires_at must be greater than or equal to valid_from")
+        return self
+
+
+class Entity(WorldRecord):
     id: str
     type: str = Field(min_length=1)
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-class Relation(BaseModel):
+class Relation(WorldRecord):
     id: str
     source: str
     target: str
@@ -25,22 +43,21 @@ class Relation(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-class Observation(BaseModel):
+class Observation(WorldRecord):
     id: str
     type: str = Field(min_length=1)
     content: dict[str, Any] = Field(default_factory=dict)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    source: str | None = None
 
 
-class Artifact(BaseModel):
+class Artifact(WorldRecord):
     id: str
     type: str = Field(min_length=1)
     uri: str | None = None
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-class Capability(BaseModel):
+class Capability(WorldRecord):
     id: str
     type: str = Field(min_length=1)
     subject: str | None = None
@@ -48,7 +65,7 @@ class Capability(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-class Hypothesis(BaseModel):
+class Hypothesis(WorldRecord):
     id: str
     statement: str = Field(min_length=1)
     confidence: float = Field(ge=0.0, le=1.0)
@@ -56,7 +73,7 @@ class Hypothesis(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-class Goal(BaseModel):
+class Goal(WorldRecord):
     id: str
     description: str = Field(min_length=1)
     status: Literal["pending", "active", "completed", "failed", "abandoned"] = "pending"
@@ -65,7 +82,7 @@ class Goal(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-class ActionRecord(BaseModel):
+class ActionRecord(WorldRecord):
     id: str
     type: str = Field(min_length=1)
     status: Literal["planned", "running", "succeeded", "failed", "unknown"] = "unknown"
@@ -73,7 +90,7 @@ class ActionRecord(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-class Constraint(BaseModel):
+class Constraint(WorldRecord):
     id: str
     type: str = Field(min_length=1)
     description: str = Field(min_length=1)
@@ -82,7 +99,7 @@ class Constraint(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-class Failure(BaseModel):
+class Failure(WorldRecord):
     id: str
     type: str = Field(min_length=1)
     message: str = Field(min_length=1)
