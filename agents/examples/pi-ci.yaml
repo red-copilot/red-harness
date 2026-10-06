@@ -1,0 +1,27 @@
+apiVersion: redharness/v1
+id: pi-kali-smoke
+type: pi
+image: redharness-pi-kali:ci
+network: environment
+pi:
+  binary: python3
+  launcher_args:
+    - /task/fake_pi.py
+  provider: fake
+  model: fake-model
+  thinking: medium
+  tools:
+    - read
+    - bash
+    - edit
+    - write
+  cap_add:
+    - NET_RAW
+  approve_project: false
+  context_files: false
+  extensions: false
+  skills: false
+  prompt_templates: false
+  themes: false
+  mcp: false
+  offline: true
