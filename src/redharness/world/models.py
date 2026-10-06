@@ -91,7 +91,19 @@ class Failure(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-WorldObject = (\n    Entity\n    | Relation\n    | Observation\n    | Artifact\n    | Capability\n    | Hypothesis\n    | Goal\n    | ActionRecord\n    | Constraint\n    | Failure\n)\nWorldObjectKind = Literal[
+WorldObject = (
+    Entity
+    | Relation
+    | Observation
+    | Artifact
+    | Capability
+    | Hypothesis
+    | Goal
+    | ActionRecord
+    | Constraint
+    | Failure
+)
+WorldObjectKind = Literal[
     "entity",
     "relation",
     "observation",
