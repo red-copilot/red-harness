@@ -11,8 +11,15 @@ def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
-class WorldRecord(BaseModel):
+class Provenance(BaseModel):
+    actor: str | None = None
     source: str | None = None
+    event_id: str | None = None
+    source_event_id: str | None = None
+
+
+class WorldRecord(BaseModel):
+    provenance: Provenance = Field(default_factory=Provenance)
     observed_at: datetime | None = None
     valid_from: datetime | None = None
     expires_at: datetime | None = None
@@ -48,6 +55,7 @@ class Observation(WorldRecord):
     type: str = Field(min_length=1)
     content: dict[str, Any] = Field(default_factory=dict)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    source: str | None = None
 
 
 class Artifact(WorldRecord):
