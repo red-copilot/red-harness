@@ -25,9 +25,9 @@ class FileWorldRepository:
     def snapshot(self) -> WorldSnapshot:
         return self._snapshot.model_copy(deep=True)
 
-    def replay(self) -> WorldSnapshot:
+    def events(self, *, limit: int | None = None) -> list[WorldEvent]:
         if not self.event_path.exists():
-            return WorldSnapshot()
+            return []
         events: list[WorldEvent] = []
         with self.event_path.open("r", encoding="utf-8") as handle:
             for number, line in enumerate(handle, start=1):
@@ -39,7 +39,12 @@ class FileWorldRepository:
                     raise ValueError(
                         f"invalid world event at {self.event_path}:{number}: {exc}"
                     ) from exc
-        return self._reducer.replay(events)
+                if limit is not None and len(events) >= limit:
+                    break
+        return events
+
+    def replay(self) -> WorldSnapshot:
+        return self._reducer.replay(self.events())
 
     def append(self, event: WorldEvent) -> WorldSnapshot:
         line = event.model_dump_json()
