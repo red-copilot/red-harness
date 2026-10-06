@@ -89,6 +89,9 @@ class TSecRunner:
         allow_host_agent: bool = False,
     ) -> list[dict]:
         results: list[dict] = []
+        effective_budgets = budgets.model_copy(
+            update={"wall_time": min(budgets.wall_time, 3600)}
+        )
         try:
             async with TSecClientAdapter(config) as client:
                 adapter = TSecBenchmarkAdapter(
