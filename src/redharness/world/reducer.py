@@ -40,7 +40,14 @@ class WorldReducer:
         if event.op == "remove":
             collection.pop(object_id, None)
         else:
-            collection[object_id] = model_type.model_validate(event.object)
+            payload = dict(event.object)
+            provenance = dict(payload.get("provenance") or {})
+            provenance.setdefault("actor", event.actor)
+            provenance.setdefault("event_id", event.id)
+            if event.source_event_id is not None:
+                provenance.setdefault("source_event_id", event.source_event_id)
+            payload["provenance"] = provenance
+            collection[object_id] = model_type.model_validate(payload)
 
         snapshot.revision += 1
         return snapshot
