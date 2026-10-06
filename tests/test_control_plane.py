@@ -141,6 +141,42 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     assert plan["planner"] == "heuristic-skill-v1"
     assert plan["candidates"][0]["skill_id"] == "network.service-discovery"
 
+    published = client.post(
+        "/v1/runs/run_test/plan/publish",
+        headers=headers,
+        json={
+            "skill_id": "network.service-discovery",
+            "description": "enumerate reachable services",
+            "goal_id": "goal-1",
+            "priority": 0.8,
+        },
+    )
+    assert published.status_code == 200
+    work_id = published.json()["id"]
+
+    claimed_work = client.post(
+        "/v1/work/claim",
+        headers=headers,
+        json={"run_id": "run_test", "agent_id": "agent-a", "lease_seconds": 60},
+    )
+    assert claimed_work.status_code == 200
+    assert claimed_work.json()["id"] == work_id
+    assert claimed_work.json()["skill_id"] == "network.service-discovery"
+
+    heartbeat_work = client.post(
+        f"/v1/work/{work_id}/heartbeat",
+        headers=headers,
+        json={"agent_id": "agent-a", "lease_seconds": 60},
+    )
+    assert heartbeat_work.status_code == 200
+
+    completed_work = client.post(
+        f"/v1/work/{work_id}/complete",
+        headers=headers,
+        json={"agent_id": "agent-a", "result": {"status": "done"}},
+    )
+    assert completed_work.status_code == 200
+
     otel = client.get("/v1/runs/run_test/otel", headers=headers).json()
     spans = otel["resourceSpans"][0]["scopeSpans"][0]["spans"]
     assert spans[0]["name"] == "run.started"
