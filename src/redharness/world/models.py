@@ -65,6 +65,23 @@ class Goal(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
+class ActionRecord(BaseModel):
+    id: str
+    type: str = Field(min_length=1)
+    status: Literal["planned", "running", "succeeded", "failed", "unknown"] = "unknown"
+    target: str | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
+class Constraint(BaseModel):
+    id: str
+    type: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    status: Literal["active", "satisfied", "violated", "expired"] = "active"
+    scope: str | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
 class Failure(BaseModel):
     id: str
     type: str = Field(min_length=1)
@@ -74,8 +91,7 @@ class Failure(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-WorldObject = Entity | Relation | Observation | Artifact | Capability | Hypothesis | Goal | Failure
-WorldObjectKind = Literal[
+WorldObject = (\n    Entity\n    | Relation\n    | Observation\n    | Artifact\n    | Capability\n    | Hypothesis\n    | Goal\n    | ActionRecord\n    | Constraint\n    | Failure\n)\nWorldObjectKind = Literal[
     "entity",
     "relation",
     "observation",
@@ -83,6 +99,8 @@ WorldObjectKind = Literal[
     "capability",
     "hypothesis",
     "goal",
+    "action",
+    "constraint",
     "failure",
 ]
 
@@ -108,4 +126,6 @@ class WorldSnapshot(BaseModel):
     capabilities: dict[str, Capability] = Field(default_factory=dict)
     hypotheses: dict[str, Hypothesis] = Field(default_factory=dict)
     goals: dict[str, Goal] = Field(default_factory=dict)
+    actions: dict[str, ActionRecord] = Field(default_factory=dict)
+    constraints: dict[str, Constraint] = Field(default_factory=dict)
     failures: dict[str, Failure] = Field(default_factory=dict)
