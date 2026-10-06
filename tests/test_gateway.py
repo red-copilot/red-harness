@@ -139,11 +139,11 @@ def test_streaming_proxy_relays_and_records_final_usage(tmp_path: Path) -> None:
         assert payload["stream"] is True
         assert payload["stream_options"]["include_usage"] is True
         content = (
-            'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
-            'data: {"choices":[],"usage":{"prompt_tokens":80,'
-            '"completion_tokens":20,"total_tokens":100}}\n\n'
-            "data: [DONE]\n\n"
-        ).encode()
+            b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+            b'data: {"choices":[],"usage":{"prompt_tokens":80,'
+            b'"completion_tokens":20,"total_tokens":100}}\n\n'
+            b"data: [DONE]\n\n"
+        )
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
