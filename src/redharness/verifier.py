@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from .models import TaskSpec, VerificationResult
 from .trace import TraceRecorder
 
@@ -21,6 +23,7 @@ def run_python_verifier(
     run_dir: Path,
     environment_project: str | None,
     trace: TraceRecorder,
+    seed: int,
     timeout: int = 120,
 ) -> tuple[VerificationResult, str, str]:
     entrypoint = (task_dir / task.verification.entrypoint).resolve()
@@ -34,6 +37,7 @@ def run_python_verifier(
             "REDHARNESS_TASK_DIR": str(task_dir),
             "REDHARNESS_RUN_DIR": str(run_dir),
             "REDHARNESS_ENV_PROJECT": environment_project or "",
+            "REDHARNESS_SEED": str(seed),
         }
     )
 
@@ -59,7 +63,7 @@ def run_python_verifier(
     try:
         payload = json.loads(lines[-1])
         result = VerificationResult.model_validate(payload)
-    except Exception as exc:
+    except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
         raise VerifierError(f"invalid verifier result: {exc}") from exc
 
     trace.emit(
