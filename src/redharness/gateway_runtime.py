@@ -248,9 +248,11 @@ class DockerGatewaySidecarRuntime:
         return command
 
     def start(self) -> None:
-        self._run(["docker", "network", "create", self.network_name])
+        self._run(["docker", "network", "create", "--internal", self.network_name])
         try:
             self._run(self._container_command())
+            if self.config.model_upstream:
+                self._run(["docker", "network", "connect", "bridge", self.container_name])
             deadline = time.monotonic() + 10
             health_command = [
                 "docker",
