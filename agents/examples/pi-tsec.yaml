@@ -1,0 +1,27 @@
+apiVersion: redharness/v1
+id: pi-kali-tsec
+type: pi
+image: redharness/pi-kali:local
+network: host
+env: {}
+pi:
+  provider: openai
+  model: gpt-5.6-sol
+  thinking: medium
+  tools:
+    - read
+    - bash
+    - edit
+    - write
+  env_passthrough:
+    - OPENAI_API_KEY
+  cap_add:
+    - NET_RAW
+  approve_project: false
+  context_files: false
+  extensions: false
+  skills: false
+  prompt_templates: false
+  themes: false
+  mcp: false
+  offline: true
