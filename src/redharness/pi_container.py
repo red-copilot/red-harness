@@ -116,6 +116,8 @@ class ContainerPiAdapter(PiAdapter):
                 "-e",
                 "REDHARNESS_WORLD_INBOX=/run/redharness/world.inbox.jsonl",
                 "-e",
+                "REDHARNESS_WORLD_CONTEXT=/run/redharness/world.context.txt",
+                "-e",
                 f"REDHARNESS_SEED={seed}",
                 "-e",
                 "PI_CODING_AGENT_DIR=/run/redharness/pi-agent",
