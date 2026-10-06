@@ -7,7 +7,10 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from .execution import ExecutionCapabilities
+from .otel import trace_to_otlp_json
 from .queue import JobPayload, SQLiteQueue
+from .registry import scan_benchmarks
 
 
 class ClaimRequest(BaseModel):
@@ -53,15 +56,29 @@ def create_control_plane(
     *,
     queue_db: Path,
     runs_root: Path,
+    benchmarks_root: Path | None = None,
     token: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Red Harness Control Plane", version="0.6.0")
     queue = SQLiteQueue(queue_db)
     run_root = runs_root.resolve()
+    benchmark_root = benchmarks_root.resolve() if benchmarks_root else None
 
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/v1/capabilities")
+    async def capabilities(request: Request) -> dict[str, bool]:
+        _authorize(request, token)
+        return ExecutionCapabilities.detect().as_dict()
+
+    @app.get("/v1/benchmarks")
+    async def benchmarks(request: Request) -> list[dict]:
+        _authorize(request, token)
+        if benchmark_root is None:
+            return []
+        return scan_benchmarks(benchmark_root)
 
     @app.post("/v1/jobs")
     async def submit_job(request: Request, payload: JobPayload) -> dict:
@@ -143,5 +160,14 @@ def create_control_plane(
                     if len(events) >= limit:
                         break
         return events
+
+    @app.get("/v1/runs/{run_id}/otel")
+    async def run_otel(request: Request, run_id: str) -> dict:
+        _authorize(request, token)
+        directory = _run_dir(run_root, run_id)
+        trace_path = directory / "trace.jsonl"
+        if not trace_path.is_file():
+            raise HTTPException(status_code=404, detail="trace not found")
+        return trace_to_otlp_json(trace_path)
 
     return app
