@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://red-harness.local/schemas/job.schema.json",
+  "title": "Red Harness Distributed Job",
+  "type": "object",
+  "required": ["task_path", "agent_path"],
+  "properties": {
+    "task_path": {"type": "string", "minLength": 1},
+    "agent_path": {"type": "string", "minLength": 1},
+    "runs_root": {"type": "string", "minLength": 1},
+    "allow_host_agent": {"type": "boolean"},
+    "seed": {"type": "integer", "minimum": 0},
+    "gateway": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "policy_path": {"type": ["string", "null"]},
+        "mode": {"enum": ["host", "sidecar"]},
+        "sidecar_image": {"type": ["string", "null"]},
+        "sidecar_runtime": {"type": ["string", "null"]},
+        "model_upstream": {"type": ["string", "null"]},
+        "model_api_key_env": {"type": "string", "minLength": 1},
+        "input_price_per_million_usd": {"type": "number", "minimum": 0},
+        "output_price_per_million_usd": {"type": "number", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
