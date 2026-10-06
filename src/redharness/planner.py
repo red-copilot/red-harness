@@ -5,6 +5,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from .progress import ProgressLedger
 from .skills import SkillSpec, StateSelector
 from .world import WorldSnapshot
 
@@ -16,6 +17,26 @@ class PlanCandidate(BaseModel):
     matched_requirements: int = Field(ge=0)
     expected_outputs: list[StateSelector] = Field(default_factory=list)
 
+
+
+
+class PlannedAction(BaseModel):
+    rank: int = Field(ge=1)
+    skill_id: str
+    description: str
+    score: float = Field(ge=0.0, le=1.0)
+    expected_observations: list[str] = Field(default_factory=list)
+    rationale: str
+    replan_triggers: list[str] = Field(default_factory=list)
+
+
+class RollingPlan(BaseModel):
+    planner: str = "rolling-horizon-skill-v1"
+    world_revision: int
+    horizon: int = Field(ge=1, le=3)
+    current_subgoal: str | None = None
+    no_progress_count: int = 0
+    actions: list[PlannedAction] = Field(default_factory=list)
 
 class Planner(Protocol):
     def propose(
@@ -93,3 +114,84 @@ class HeuristicSkillPlanner:
 
         candidates.sort(key=lambda item: (-item.score, item.skill_id))
         return candidates[:limit]
+
+
+
+class RollingHorizonPlanner:
+    """Build a short action horizon over the existing skill candidate ranker."""
+
+    def __init__(self, candidate_planner: HeuristicSkillPlanner | None = None) -> None:
+        self.candidate_planner = candidate_planner or HeuristicSkillPlanner()
+
+    @staticmethod
+    def _expected_observations(candidate: PlanCandidate) -> list[str]:
+        return [
+            (
+                f"{selector.kind}:{selector.type}"
+                + (f" scope={selector.scope}" if selector.scope else "")
+            )
+            for selector in candidate.expected_outputs
+        ]
+
+    def propose(
+        self,
+        snapshot: WorldSnapshot,
+        skills: list[SkillSpec],
+        *,
+        progress: ProgressLedger | None = None,
+        horizon: int = 3,
+    ) -> RollingPlan:
+        horizon = max(1, min(3, horizon))
+        progress = progress or ProgressLedger()
+        by_id = {skill.id: skill for skill in skills}
+        candidates = self.candidate_planner.propose(
+            snapshot,
+            skills,
+            limit=max(horizon * 3, horizon),
+        )
+
+        actions: list[PlannedAction] = []
+        for candidate in candidates[:horizon]:
+            skill = by_id[candidate.skill_id]
+            expected = self._expected_observations(candidate)
+            rationale_parts = [
+                f"novelty={candidate.novelty:.2f}",
+                f"score={candidate.score:.2f}",
+                f"matched_requirements={candidate.matched_requirements}",
+            ]
+            if progress.current_subgoal:
+                rationale_parts.append(f"subgoal={progress.current_subgoal}")
+            if progress.no_progress_count:
+                rationale_parts.append(
+                    f"no_progress_count={progress.no_progress_count}"
+                )
+
+            replan_triggers = [
+                "action_failed",
+                "expected_observation_missing",
+                "world_revision_changed",
+            ]
+            if progress.no_progress_count >= 2:
+                replan_triggers.append("no_progress_threshold")
+            if progress.hypotheses:
+                replan_triggers.append("hypothesis_contradicted")
+
+            actions.append(
+                PlannedAction(
+                    rank=len(actions) + 1,
+                    skill_id=skill.id,
+                    description=skill.description,
+                    score=candidate.score,
+                    expected_observations=expected,
+                    rationale="; ".join(rationale_parts),
+                    replan_triggers=replan_triggers,
+                )
+            )
+
+        return RollingPlan(
+            world_revision=snapshot.revision,
+            horizon=horizon,
+            current_subgoal=progress.current_subgoal,
+            no_progress_count=progress.no_progress_count,
+            actions=actions,
+        )
