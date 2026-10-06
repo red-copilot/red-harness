@@ -31,15 +31,25 @@ def _gateway_config(
     model_api_key_env: str,
     input_price: float,
     output_price: float,
+    mode: str,
+    sidecar_image: str | None,
+    sidecar_runtime: str | None,
 ) -> GatewayConfig | None:
     if not enabled:
         return None
+    if mode not in {"host", "sidecar"}:
+        raise typer.BadParameter("--gateway-mode must be host or sidecar")
+    if mode == "sidecar" and not sidecar_image:
+        raise typer.BadParameter("--gateway-image is required for sidecar mode")
     return GatewayConfig(
         policy_path=policy.resolve() if policy else None,
         model_upstream=model_upstream,
         model_api_key=os.environ.get(model_api_key_env),
         input_price_per_million_usd=input_price,
         output_price_per_million_usd=output_price,
+        mode=mode,
+        sidecar_image=sidecar_image,
+        sidecar_runtime=sidecar_runtime,
     )
 
 
@@ -81,6 +91,9 @@ def run(
         Path | None,
         typer.Option("--gateway-policy", exists=True, dir_okay=False),
     ] = None,
+    gateway_mode: Annotated[str, typer.Option("--gateway-mode")] = "host",
+    gateway_image: Annotated[str | None, typer.Option("--gateway-image")] = None,
+    gateway_runtime: Annotated[str | None, typer.Option("--gateway-runtime")] = None,
     model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
     model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
         "REDHARNESS_MODEL_API_KEY"
@@ -105,6 +118,9 @@ def run(
         model_api_key_env=model_api_key_env,
         input_price=input_price,
         output_price=output_price,
+        mode=gateway_mode,
+        sidecar_image=gateway_image,
+        sidecar_runtime=gateway_runtime,
     )
     orchestrator = Orchestrator(runs_root)
     results = [
@@ -140,11 +156,15 @@ def run_suite(
     agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
     runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".redharness/runs"),
     suites_root: Annotated[Path, typer.Option("--suites-root")] = Path(".redharness/suites"),
+    workers: Annotated[int | None, typer.Option("--workers", min=1, max=64)] = None,
     gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
     gateway_policy: Annotated[
         Path | None,
         typer.Option("--gateway-policy", exists=True, dir_okay=False),
     ] = None,
+    gateway_mode: Annotated[str, typer.Option("--gateway-mode")] = "host",
+    gateway_image: Annotated[str | None, typer.Option("--gateway-image")] = None,
+    gateway_runtime: Annotated[str | None, typer.Option("--gateway-runtime")] = None,
     model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
     model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
         "REDHARNESS_MODEL_API_KEY"
@@ -166,6 +186,7 @@ def run_suite(
         agent=load_agent(agent),
         agent_path=agent,
         allow_host_agent=allow_host_agent,
+        workers=workers,
         gateway_config=_gateway_config(
             enabled=gateway_enabled,
             policy=gateway_policy,
@@ -173,6 +194,9 @@ def run_suite(
             model_api_key_env=model_api_key_env,
             input_price=input_price,
             output_price=output_price,
+            mode=gateway_mode,
+            sidecar_image=gateway_image,
+            sidecar_runtime=gateway_runtime,
         ),
     )
     typer.echo(json.dumps(summary, ensure_ascii=False, indent=2))
