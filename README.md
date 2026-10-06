@@ -9,7 +9,8 @@ Version 0.8 provides:
 - declarative task, agent, suite, policy, and distributed-job contracts
 - first-class [Pi](https://pi.dev/docs/latest) Agent Adapter running inside Kali Rolling Docker
 - Pi tool/model event normalization into Harness traces and budgets
-- Kali Rolling + `kali-linux-core` Pi image with curated security tools\n- isolated per-run Pi configuration and deterministic non-interactive defaults\n- TSec Benchmark SDK lifecycle adapter (`list/start/submit/close`) with Harness-owned benchmark credentials
+- Kali Rolling + `kali-linux-core` Pi image with curated security tools\n- isolated per-run Pi configuration and deterministic non-interactive defaults\n- generic Benchmark Adapter contracts (`discover/provision/submit/evaluate/teardown`)
+- TSec Benchmark adapter over the official SDK (`list/start/submit/close`) with Harness-owned benchmark credentials
 - optional Pi model routing through the Red Harness credential-isolating Gateway
 - Docker Compose or no-op benchmark environments
 - trusted CLI agents and restricted Docker agents
@@ -503,3 +504,26 @@ Task != Environment != Agent != Model != Tool != Verifier
 6. **Done:** authenticated control plane, leased distributed workers, benchmark registry, leaderboard, trace-viewer API, OTLP JSON export, Firecracker host/profile contract.
 7. **Done:** first-class Pi JSON adapter, Pi usage/tool normalization, isolated Pi config, Gateway model routing, Pi capability detection.
 8. PostgreSQL/Redis queue backend, containerized Pi adapter, KVM-enabled Firecracker lifecycle, snapshot pooling, OpenTelemetry collector delivery, browser trace UI, signed benchmark registry, and multi-tenant scheduling.
+
+
+### Benchmark adapters
+
+External benchmark platforms use a common contract:
+
+```text
+discover -> BenchmarkCase
+provision -> BenchmarkSession
+Agent run
+submit -> SubmissionResult
+evaluate -> EvaluationResult
+teardown
+```
+
+A `BenchmarkSession` contains a normalized objective, targets, and benchmark metadata. The generic
+`BenchmarkRunner` seeds targets into the World Model, builds `world.context.txt`, runs the selected
+Agent adapter, ingests world-state submissions, sends benchmark submissions, records evaluation,
+and always tears the external session down.
+
+TSecBench is implemented through this contract. Its SDK token stays in the Harness process and is
+never passed to the Agent. `REDHARNESS_FLAG=<flag>` remains a compatibility submission extractor;
+submission values are hashed in normalized traces.
