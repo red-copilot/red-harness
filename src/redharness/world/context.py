@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from .models import WorldSnapshot
+from .retrieval import WorldRetriever
 
 
 class WorldContextBuilder:
@@ -15,10 +16,20 @@ class WorldContextBuilder:
         max_observations: int = 20,
         max_failures: int = 10,
         max_relations: int = 20,
+        max_chars: int = 16000,
+        retriever: WorldRetriever | None = None,
     ) -> None:
         self.max_observations = max_observations
         self.max_failures = max_failures
         self.max_relations = max_relations
+        self.max_chars = max_chars
+        self.retriever = retriever or WorldRetriever(
+            limits={
+                "observations": max_observations,
+                "failures": max_failures,
+                "relations": max_relations,
+            }
+        )
 
     @staticmethod
     def _valid_values(collection: dict) -> list[Any]:
@@ -43,7 +54,8 @@ class WorldContextBuilder:
         compact = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return f"- {prefix} {object_id} [{type_name}] {compact}"
 
-    def render(self, snapshot: WorldSnapshot) -> str:
+    def render(self, snapshot: WorldSnapshot, *, query: str | None = None) -> str:
+        selected = self.retriever.retrieve(snapshot, query=query)
         lines = [
             "# Red Harness World Context",
             f"revision: {snapshot.revision}",
@@ -52,7 +64,7 @@ class WorldContextBuilder:
         ]
 
         goals = sorted(
-            self._valid_values(snapshot.goals),
+            selected["goals"],
             key=lambda item: (-item.priority, item.id),
         )
         if goals:
@@ -75,7 +87,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Entities"])
-        entities = sorted(self._valid_values(snapshot.entities), key=lambda item: item.id)
+        entities = sorted(selected["entities"], key=lambda item: item.id)
         if entities:
             for entity in entities:
                 lines.append(
@@ -90,7 +102,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Capabilities"])
-        capabilities = sorted(self._valid_values(snapshot.capabilities), key=lambda item: item.id)
+        capabilities = sorted(selected["capabilities"], key=lambda item: item.id)
         if capabilities:
             for capability in capabilities:
                 lines.append(
@@ -110,7 +122,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Open hypotheses"])
-        hypotheses = sorted(self._valid_values(snapshot.hypotheses), key=lambda item: (-item.confidence, item.id))
+        hypotheses = sorted(selected["hypotheses"], key=lambda item: (-item.confidence, item.id))
         hypotheses = [item for item in hypotheses if item.status in {"open", "supported"}]
         if hypotheses:
             for hypothesis in hypotheses:
@@ -131,7 +143,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Artifacts"])
-        artifacts = sorted(self._valid_values(snapshot.artifacts), key=lambda item: item.id)
+        artifacts = sorted(selected["artifacts"], key=lambda item: item.id)
         if artifacts:
             for artifact in artifacts:
                 lines.append(
@@ -146,7 +158,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Observations"])
-        observations = sorted(self._valid_values(snapshot.observations), key=lambda item: item.id)
+        observations = sorted(selected["observations"], key=lambda item: item.id)
         observations = observations[-self.max_observations :]
         if observations:
             for observation in observations:
@@ -167,7 +179,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Actions"])
-        actions = sorted(self._valid_values(snapshot.actions), key=lambda item: item.id)
+        actions = sorted(selected["actions"], key=lambda item: item.id)
         if actions:
             for action in actions:
                 lines.append(
@@ -182,7 +194,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Constraints"])
-        constraints = sorted(self._valid_values(snapshot.constraints), key=lambda item: item.id)
+        constraints = sorted(selected["constraints"], key=lambda item: item.id)
         if constraints:
             for constraint in constraints:
                 lines.append(
@@ -202,7 +214,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Failures"])
-        failures = sorted(self._valid_values(snapshot.failures), key=lambda item: item.id)
+        failures = sorted(selected["failures"], key=lambda item: item.id)
         failures = failures[-self.max_failures :]
         if failures:
             for failure in failures:
@@ -224,7 +236,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Relations"])
-        relations = sorted(self._valid_values(snapshot.relations), key=lambda item: item.id)
+        relations = sorted(selected["relations"], key=lambda item: item.id)
         relations = relations[-self.max_relations :]
         if relations:
             for relation in relations:
@@ -253,4 +265,10 @@ class WorldContextBuilder:
                 ),
             ]
         )
-        return "\n".join(lines) + "\n"
+        rendered = "\n".join(lines) + "\n"
+        if len(rendered) <= self.max_chars:
+            return rendered
+
+        marker = "\n\n[context truncated to character budget]\n"
+        budget = max(0, self.max_chars - len(marker))
+        return rendered[:budget].rstrip() + marker
