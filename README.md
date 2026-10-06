@@ -25,6 +25,7 @@ Version 0.8 provides:
 - worker-local provider secrets and workspace path resolution
 - benchmark registry scanning
 - persisted result/trace viewer API
+- event-sourced universal world-state runtime with materialized snapshots
 - leaderboard aggregation
 - OTLP/HTTP JSON-compatible trace export
 - Firecracker capability detection and machine-profile contract
@@ -427,6 +428,8 @@ Each run is stored beneath `.redharness/runs/<run_id>/`:
 result.json
 trace.jsonl
 events.jsonl
+world.events.jsonl
+world.snapshot.json
 agent.stdout.log
 agent.stderr.log
 verifier.stdout.log
@@ -465,6 +468,8 @@ For Pi runs, `agent.stdout.log` is the raw Pi JSON event stream.
                        │
               Trace API / OTLP
 ```
+
+World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md). The core state schema is domain-neutral and does not require a DAG; graph and timeline representations are derived views over the event-sourced state.
 
 Core separation rule:
 
