@@ -39,8 +39,12 @@
     "verification": {
       "type": "object",
       "properties": {
-        "type": {"const": "python"},
-        "entrypoint": {"type": "string"}
+        "type": {"enum": ["python", "docker"]},
+        "entrypoint": {"type": "string"},
+        "image": {"type": ["string", "null"]},
+        "command": {"type": "array", "items": {"type": "string"}},
+        "network": {"enum": ["none", "environment"]},
+        "timeout": {"type": "integer", "minimum": 1, "maximum": 3600}
       },
       "additionalProperties": false
     }
