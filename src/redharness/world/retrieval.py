@@ -10,7 +10,7 @@ from typing import Any
 from .models import WorldSnapshot
 
 
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_.:/-]{3,}")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]{3,}")
 
 
 @dataclass(frozen=True)
