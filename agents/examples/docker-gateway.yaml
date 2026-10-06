@@ -1,0 +1,8 @@
+apiVersion: redharness/v1
+id: docker-gateway-demo
+type: docker
+image: redharness-gateway-demo:ci
+network: environment
+command:
+  - python
+  - /agent/run.py
