@@ -325,7 +325,7 @@ class TSecRunner:
                     "benchmark.challenge.closed",
                     data={"unique_code": challenge.unique_code, "closed": closed},
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - cleanup must not hide run outcome.
                 close_error = _error_data(exc)
                 trace.emit(
                     "benchmark.challenge.close_error",
