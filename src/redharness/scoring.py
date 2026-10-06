@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from math import comb
-from typing import Iterable
+from collections.abc import Iterable
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:
