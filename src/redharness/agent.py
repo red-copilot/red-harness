@@ -117,6 +117,8 @@ class CLIAdapter:
         environment_project: str | None,
         environment_network: str | None,
         seed: int,
+        gateway_url: str | None = None,
+        gateway_token: str | None = None,
     ) -> AgentResult:
         del environment_network
         env = os.environ.copy()
@@ -132,11 +134,25 @@ class CLIAdapter:
                 "REDHARNESS_SEED": str(seed),
             }
         )
+        if gateway_url and gateway_token:
+            env.update(
+                {
+                    "REDHARNESS_GATEWAY_URL": gateway_url,
+                    "REDHARNESS_GATEWAY_TOKEN": gateway_token,
+                    "OPENAI_BASE_URL": f"{gateway_url}/v1",
+                    "OPENAI_API_KEY": gateway_token,
+                }
+            )
+
         cwd = Path(self.spec.cwd).resolve() if self.spec.cwd else task_dir
         self.trace.emit(
             "agent.started",
             actor="agent",
-            data={"agent_id": self.spec.id, "type": self.spec.type},
+            data={
+                "agent_id": self.spec.id,
+                "type": self.spec.type,
+                "gateway_injected": gateway_url is not None,
+            },
         )
         result = _run_monitored(
             self.spec.command,
@@ -180,7 +196,15 @@ class DockerAdapter:
         environment_project: str | None,
         environment_network: str | None,
         seed: int,
+        gateway_url: str | None = None,
+        gateway_token: str | None = None,
     ) -> AgentResult:
+        if gateway_url or gateway_token:
+            raise AgentError(
+                "automatic per-run gateway injection currently supports CLI agents only; "
+                "use the standalone gateway service for Docker agents"
+            )
+
         container_name = ("rh_agent_" + run_dir.name.lower()).replace("-", "_")[:63]
         network = (
             environment_network
