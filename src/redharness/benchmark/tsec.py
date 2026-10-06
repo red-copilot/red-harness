@@ -121,17 +121,35 @@ class TSecRunner:
 
                 runner = BenchmarkRunner(runs_root=self.runs_root)
                 for index, case in enumerate(selected):
-                    results.append(
-                        await runner.run_case(
-                            adapter=adapter,
-                            case=case,
-                            agent=agent,
-                            budgets=budgets,
-                            seed=seed + index,
-                            submission_extractor=_extract_submissions,
-                            allow_host_agent=allow_host_agent,
-                        )
+                    result = await runner.run_case(
+                        adapter=adapter,
+                        case=case,
+                        agent=agent,
+                        budgets=budgets,
+                        seed=seed + index,
+                        submission_extractor=_extract_submissions,
+                        allow_host_agent=allow_host_agent,
                     )
+                    evaluation = result.get("evaluation", {})
+                    session_meta = result.get("benchmark", {}).get("session", {})
+                    result["benchmark"].update(
+                        {
+                            "challenge": case.id,
+                            "level": case.metadata.get("level"),
+                            "challenge_total_score": case.metadata.get("total_score", 0),
+                            "hint_used": bool(session_meta.get("hint_used")),
+                        }
+                    )
+                    result["flags"] = {
+                        "expected": int(evaluation.get("expected_flags", 0)),
+                        "initial_correct": int(evaluation.get("initial_correct", 0)),
+                        "remaining_at_start": int(evaluation.get("remaining_at_start", 0)),
+                        "correct": int(evaluation.get("correct", 0)),
+                    }
+                    result["platform_cumulative_score"] = evaluation.get(
+                        "platform_cumulative_score"
+                    )
+                    results.append(result)
         except Exception as exc:
             if _is_sdk_error(exc, "VpnCheckError"):
                 reason = getattr(exc, "detail", None)
