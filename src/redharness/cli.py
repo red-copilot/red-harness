@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Annotated
 
 import typer
+import uvicorn
 from pydantic import ValidationError
 
+from .gateway import ModelPricing, create_gateway_app
 from .models import load_agent, load_suite, load_task
 from .orchestrator import Orchestrator
+from .policy import load_policy
 from .suite import SuiteRunner
 
 app = typer.Typer(
@@ -114,6 +118,51 @@ def run_suite(
     typer.echo(json.dumps(summary, ensure_ascii=False, indent=2))
     if any(item["status"] == "error" for item in summary["runs"]):
         raise typer.Exit(code=1)
+
+
+@app.command("gateway")
+def gateway(
+    event_file: Annotated[Path, typer.Option("--event-file")] = Path(
+        ".redharness/gateway/events.jsonl"
+    ),
+    workspace: Annotated[Path, typer.Option("--workspace", file_okay=False)] = Path("."),
+    task_dir: Annotated[Path, typer.Option("--task-dir", file_okay=False)] = Path("."),
+    policy: Annotated[Path | None, typer.Option("--policy", dir_okay=False)] = None,
+    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8765,
+    model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
+    gateway_token_env: Annotated[str, typer.Option("--gateway-token-env")] = (
+        "REDHARNESS_GATEWAY_TOKEN"
+    ),
+    model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
+        "REDHARNESS_MODEL_API_KEY"
+    ),
+    input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
+    output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
+) -> None:
+    """Serve the policy-gated Tool Gateway and OpenAI-compatible model proxy."""
+    gateway_token = os.environ.get(gateway_token_env)
+    if not gateway_token:
+        typer.echo(
+            f"missing gateway token in environment variable {gateway_token_env}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    app_instance = create_gateway_app(
+        event_file=event_file.resolve(),
+        workspace=workspace.resolve(),
+        task_dir=task_dir.resolve(),
+        policy=load_policy(policy),
+        gateway_token=gateway_token,
+        model_upstream=model_upstream,
+        model_api_key=os.environ.get(model_api_key_env),
+        model_pricing=ModelPricing(
+            input_per_million_usd=input_price,
+            output_per_million_usd=output_price,
+        ),
+    )
+    uvicorn.run(app_instance, host=host, port=port, access_log=False)
 
 
 @app.command()
