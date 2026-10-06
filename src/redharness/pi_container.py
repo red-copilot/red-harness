@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -43,7 +44,17 @@ class ContainerPiAdapter(PiAdapter):
     """Run Pi inside a restricted Docker container while reusing Pi JSON parsing."""
 
     def __init__(self, spec: AgentSpec, *, allow_host: bool, trace: TraceRecorder) -> None:
-        super().__init__(spec, allow_host=allow_host, trace=trace)
+        del allow_host
+        if shutil.which("docker") is None:
+            raise AgentError("docker executable was not found")
+        if spec.pi is None:
+            raise AgentError("Pi agent requires a pi configuration block")
+        if not spec.image:
+            raise AgentError("Pi agent requires a container image")
+        self.spec = spec
+        self.pi = spec.pi
+        self.trace = trace
+        self._tool_started: dict[str, float] = {}
 
     @staticmethod
     def _docker(
