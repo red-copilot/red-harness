@@ -79,6 +79,7 @@ def test_model_proxy_replaces_credentials_and_records_usage(tmp_path: Path) -> N
 
     def upstream(request: httpx.Request) -> httpx.Response:
         assert request.headers["authorization"] == "Bearer provider-secret"
+        assert str(request.url) == "https://model.example/v1/chat/completions"
         payload = json.loads(request.content)
         assert payload["model"] == "test-model"
         return httpx.Response(
@@ -99,7 +100,7 @@ def test_model_proxy_replaces_credentials_and_records_usage(tmp_path: Path) -> N
         workspace=tmp_path,
         task_dir=tmp_path,
         gateway_token="gateway-secret",
-        model_upstream="https://model.example",
+        model_upstream="https://model.example/v1",
         model_api_key="provider-secret",
         model_pricing=ModelPricing(
             input_per_million_usd=1.0,
@@ -130,18 +131,81 @@ def test_model_proxy_replaces_credentials_and_records_usage(tmp_path: Path) -> N
     assert usage["cost_usd"] == 0.0002
 
 
-def test_streaming_is_explicitly_rejected(tmp_path: Path) -> None:
+def test_streaming_proxy_relays_and_records_final_usage(tmp_path: Path) -> None:
+    event_file = tmp_path / "events.jsonl"
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["stream"] is True
+        assert payload["stream_options"]["include_usage"] is True
+        content = (
+            'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+            'data: {"choices":[],"usage":{"prompt_tokens":80,'
+            '"completion_tokens":20,"total_tokens":100}}\n\n'
+            "data: [DONE]\n\n"
+        ).encode()
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=content,
+        )
+
     app = create_gateway_app(
-        event_file=tmp_path / "events.jsonl",
+        event_file=event_file,
         workspace=tmp_path,
         task_dir=tmp_path,
         gateway_token="secret",
-        model_upstream="https://model.example",
+        model_upstream="https://model.example/v1",
+        model_pricing=ModelPricing(
+            input_per_million_usd=1.0,
+            output_per_million_usd=2.0,
+        ),
+        http_transport=httpx.MockTransport(upstream),
     )
     client = TestClient(app)
+
     response = client.post(
         "/v1/chat/completions",
         headers={"Authorization": "Bearer secret"},
         json={"model": "m", "messages": [], "stream": True},
     )
-    assert response.status_code == 400
+    assert response.status_code == 200
+    assert "data: [DONE]" in response.text
+
+    events = _events(event_file)
+    event_types = [item["type"] for item in events]
+    assert event_types == ["model.request", "model.usage", "model.response"]
+    usage = events[1]["data"]
+    assert usage["total_tokens"] == 100
+    assert usage["cost_usd"] == 0.00012
+
+
+def test_streaming_proxy_marks_missing_usage(tmp_path: Path) -> None:
+    event_file = tmp_path / "events.jsonl"
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n',
+        )
+
+    app = create_gateway_app(
+        event_file=event_file,
+        workspace=tmp_path,
+        task_dir=tmp_path,
+        gateway_token="secret",
+        model_upstream="https://model.example",
+        http_transport=httpx.MockTransport(upstream),
+    )
+    response = TestClient(app).post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer secret"},
+        json={"model": "m", "messages": [], "stream": True},
+    )
+    assert response.status_code == 200
+    assert [item["type"] for item in _events(event_file)] == [
+        "model.request",
+        "model.response",
+        "model.usage_missing",
+    ]
