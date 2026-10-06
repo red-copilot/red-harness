@@ -6,8 +6,8 @@ from redharness.world import (
     Goal,
     Observation,
     WorldContextBuilder,
-    WorldSnapshot,
     WorldRetriever,
+    WorldSnapshot,
 )
 
 
