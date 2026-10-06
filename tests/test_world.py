@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 
 from redharness.world import (
+    ActionRecord,
     Capability,
+    Constraint,
     Goal,
     Hypothesis,
     Observation,
@@ -40,6 +42,24 @@ def test_world_store_replays_and_materializes_snapshot(tmp_path):
         ),
     )
     store.upsert(
+        "action",
+        ActionRecord(
+            id="action-1",
+            type="network.scan",
+            status="succeeded",
+            target="target",
+        ),
+    )
+    store.upsert(
+        "constraint",
+        Constraint(
+            id="constraint-1",
+            type="scope.network",
+            description="stay within target network",
+            scope="target",
+        ),
+    )
+    store.upsert(
         "hypothesis",
         Hypothesis(
             id="hyp-1",
@@ -58,16 +78,18 @@ def test_world_store_replays_and_materializes_snapshot(tmp_path):
     )
 
     snapshot = store.snapshot
-    assert snapshot.revision == 4
+    assert snapshot.revision == 6
     assert snapshot.observations["obs-1"].content["port"] == 443
     assert snapshot.capabilities["cap-1"].scope == "target:443"
+    assert snapshot.actions["action-1"].status == "succeeded"
+    assert snapshot.constraints["constraint-1"].status == "active"
     assert snapshot.relations["rel-1"].type == "supports"
 
     restored = WorldStore(event_path)
     assert restored.snapshot == snapshot
 
     materialized = json.loads((tmp_path / "world.snapshot.json").read_text())
-    assert materialized["revision"] == 4
+    assert materialized["revision"] == 6
     assert materialized["hypotheses"]["hyp-1"]["status"] == "open"
 
 
