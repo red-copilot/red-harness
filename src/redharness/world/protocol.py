@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from .models import WorldObjectKind
-from .store import WorldStore
+from .repository import WorldRepository
 
 
 class WorldSubmission(BaseModel):
@@ -32,7 +32,7 @@ class IngestReport(BaseModel):
 
 def ingest_world_inbox(
     path: Path,
-    store: WorldStore,
+    store: WorldRepository,
     *,
     actor: str = "agent",
 ) -> IngestReport:
