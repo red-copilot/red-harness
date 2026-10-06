@@ -329,7 +329,7 @@ def build_gateway_runtime(
             run_dir=run_dir,
             task_dir=task_dir,
             trace=trace,
-            expose_to_docker=agent_type == "docker",
+            expose_to_docker=agent_type in {"docker", "pi"},
         )
     if config.mode == "sidecar":
         if agent_type != "docker":
