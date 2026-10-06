@@ -229,7 +229,8 @@ class PiAdapter:
         args.extend(self.pi.extra_args)
         world_protocol = (
             "\n\nRed Harness world-state protocol:\n"
-            "When you discover durable, task-relevant state, append one JSON object per line to "
+            "Read $REDHARNESS_WORLD_CONTEXT before acting. When you discover durable, task-relevant "
+            "state, append one JSON object per line to "
             "$REDHARNESS_WORLD_INBOX. Use schema_version redharness.world.submit/v1 and one of "
             "entity, relation, observation, artifact, capability, hypothesis, goal, or failure. "
             "Prefer high-value state changes over verbose narration. Do not write to "
@@ -279,6 +280,8 @@ class PiAdapter:
                 "-e", "REDHARNESS_TASK_DIR=/task",
                 "-e", "REDHARNESS_RUN_DIR=/run/redharness",
                 "-e", "REDHARNESS_WORLD_INBOX=/run/redharness/world.inbox.jsonl",
+                "-e",
+                "REDHARNESS_WORLD_CONTEXT=/run/redharness/world.context.txt",
                 "-e", f"REDHARNESS_SEED={seed}",
                 "-e", "PI_CODING_AGENT_DIR=/run/redharness/pi-agent",
                 "-e", "PI_CODING_AGENT_SESSION_DIR=/run/redharness/pi-sessions",
