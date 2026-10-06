@@ -27,6 +27,10 @@ class WorldRecord(BaseModel):
 
     @model_validator(mode="after")
     def validate_temporal_window(self) -> Self:
+        for name in ("observed_at", "valid_from", "expires_at"):
+            value = getattr(self, name)
+            if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+                raise ValueError(f"{name} must be timezone-aware")
         if (
             self.valid_from is not None
             and self.expires_at is not None
@@ -34,6 +38,14 @@ class WorldRecord(BaseModel):
         ):
             raise ValueError("expires_at must be greater than or equal to valid_from")
         return self
+
+    def is_valid_at(self, at: datetime | None = None) -> bool:
+        moment = at or datetime.now(UTC)
+        if moment.tzinfo is None or moment.utcoffset() is None:
+            raise ValueError("validity check time must be timezone-aware")
+        if self.valid_from is not None and moment < self.valid_from:
+            return False
+        return self.expires_at is None or moment <= self.expires_at
 
 
 class Entity(WorldRecord):
