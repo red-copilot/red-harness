@@ -4,14 +4,13 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from .agent import AgentError, AgentResult, _terminate_process
 from .budget import BudgetMonitor
-from .models import AgentSpec, PiSpec, TaskSpec
+from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
 
 
@@ -38,8 +37,9 @@ class PiAdapter:
     @staticmethod
     def _append_event(path: Path, event_type: str, data: dict[str, Any]) -> None:
         payload = {"type": event_type, "data": data}
+        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.write(line + "\n")
             handle.flush()
 
     def _prepare_agent_dir(
@@ -74,7 +74,13 @@ class PiAdapter:
         *,
         gateway_enabled: bool,
     ) -> list[str]:
-        command = [self.pi.binary, *self.pi.launcher_args, "--mode", "json", "--no-session"]
+        command = [
+            self.pi.binary,
+            *self.pi.launcher_args,
+            "--mode",
+            "json",
+            "--no-session",
+        ]
         command.append("--approve" if self.pi.approve_project else "--no-approve")
         if not self.pi.context_files:
             command.append("--no-context-files")
