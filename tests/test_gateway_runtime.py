@@ -24,7 +24,11 @@ def test_per_run_gateway_is_injected_and_accounted(tmp_path: Path) -> None:
 
     assert result["status"] == "finished"
     assert result["success"] is True
-    assert result["gateway"] == {\n        "enabled": True,\n        "model_proxy": False,\n        "docker_access": False,\n    }
+    assert result["gateway"] == {
+        "enabled": True,
+        "model_proxy": False,
+        "docker_access": False,
+    }
     assert result["metrics"]["tool_calls"] == 1
 
     run_dir = next((tmp_path / "runs").iterdir())
