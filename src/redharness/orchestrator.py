@@ -17,7 +17,14 @@ from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
 from .verifier import run_verifier
-from .world import (\n    FileWorldRepository,\n    Goal,\n    WorldContextBuilder,\n    WorldRepository,\n    ingest_world_inbox,\n)\n
+from .world import (
+    FileWorldRepository,
+    Goal,
+    WorldContextBuilder,
+    WorldRepository,
+    ingest_world_inbox,
+)
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
