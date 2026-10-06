@@ -1,6 +1,8 @@
 apiVersion: redharness/v1
 id: pi-openai-sol
 type: pi
+image: redharness-pi-kali:latest
+network: environment
 env: {}
 pi:
   provider: openai
@@ -11,6 +13,10 @@ pi:
     - bash
     - edit
     - write
+  env_passthrough:
+    - OPENAI_API_KEY
+  cap_add:
+    - NET_RAW
   approve_project: false
   context_files: false
   extensions: false
