@@ -47,7 +47,7 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                 BenchmarkCase(
                     id=challenge.unique_code,
                     benchmark="tsec",
-                    domain=str(getattr(challenge, "category", None) or "general").lower(),
+                    domain=str(\n                        getattr(challenge, "domain", None)\n                        or getattr(challenge, "category", None)\n                        or "general"\n                    ).lower(),
                     difficulty=getattr(challenge, "difficulty", None),
                     metadata={
                         "level": getattr(challenge, "level", None),
@@ -82,19 +82,23 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
             raise KeyError(f"unknown TSec case: {case.id}")
 
         started = await self._start(case.id)
-        targets = [
-            BenchmarkTarget(
-                id=f"target-{index}",
-                address=str(address),
-                metadata={"source": "tsec.start_challenge"},
-            )
-            for index, address in enumerate(started.container_addr, start=1)
-        ]
+        try:
+            targets = [
+                BenchmarkTarget(
+                    id=f"target-{index}",
+                    address=str(address),
+                    metadata={"source": "tsec.start_challenge"},
+                )
+                for index, address in enumerate(started.container_addr, start=1)
+            ]
 
-        hint: str | None = None
-        if self.use_hint:
-            hint_result = await self.client.get_hint(case.id)
-            hint = getattr(hint_result, "hint", None)
+            hint: str | None = None
+            if self.use_hint:
+                hint_result = await self.client.get_hint(case.id)
+                hint = getattr(hint_result, "hint", None)
+        except Exception:
+            await self.client.close_challenge(case.id)
+            raise
 
         initial_correct = int(getattr(challenge, "correct_flag_count", 0))
         total = int(challenge.flag_count)
