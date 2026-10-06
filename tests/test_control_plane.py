@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from redharness.control_plane import create_control_plane
+from redharness.world import FileWorldRepository
 
 
 def test_control_plane_endpoints(tmp_path: Path) -> None:
@@ -210,3 +211,48 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
         "kvm",
         "pi",
     }
+
+
+
+def test_control_plane_uses_world_repository_factory(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "run_repo"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        json.dumps({"run_id": "run_repo", "success": False, "score": 0}),
+        encoding="utf-8",
+    )
+    (run_dir / "world.events.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "redharness.world/v1",
+                "id": "wevt-repo",
+                "ts": "2026-10-06T08:00:00+00:00",
+                "kind": "goal",
+                "op": "upsert",
+                "object": {"id": "goal-repo", "description": "repo test"},
+                "actor": "harness",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    seen_paths: list[Path] = []
+
+    def repository_factory(path: Path):
+        seen_paths.append(path)
+        return FileWorldRepository(path)
+
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=runs_root,
+        token=None,
+        world_repository_factory=repository_factory,
+    )
+    client = TestClient(app)
+
+    response = client.get("/v1/runs/run_repo/world")
+    assert response.status_code == 200
+    assert response.json()["goals"]["goal-repo"]["description"] == "repo test"
+    assert seen_paths == [run_dir / "world.events.jsonl"]
