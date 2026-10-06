@@ -312,10 +312,14 @@ class DockerAdapter:
 
         container_name = ("rh_agent_" + run_dir.name.lower()).replace("-", "_")[:63]
         sidecar_gateway = gateway_enabled and gateway_network is not None
-        host_gateway = gateway_enabled and not sidecar_gateway
+        host_gateway = gateway_enabled and not sidecar_gateway and self.spec.network != "host"
 
         if sidecar_gateway:
+            if self.spec.network == "host":
+                raise AgentError("Docker Agent network:host is incompatible with sidecar Gateway")
             primary_network = str(gateway_network)
+        elif self.spec.network == "host":
+            primary_network = "host"
         elif self.spec.network == "environment":
             primary_network = environment_network or ("bridge" if host_gateway else "none")
         else:
