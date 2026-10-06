@@ -63,18 +63,37 @@ class TaskSpec(BaseModel):
     verification: VerificationSpec = Field(default_factory=VerificationSpec)
 
 
+class PiSpec(BaseModel):
+    binary: str = Field(default="pi", min_length=1)
+    launcher_args: list[str] = Field(default_factory=list)
+    provider: str | None = None
+    model: str = Field(min_length=1)
+    thinking: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    tools: list[str] = Field(default_factory=lambda: ["read", "bash", "edit", "write"])
+    approve_project: bool = False
+    context_files: bool = False
+    extensions: bool = False
+    skills: bool = False
+    prompt_templates: bool = False
+    themes: bool = False
+    mcp: bool = False
+    offline: bool = True
+    extra_args: list[str] = Field(default_factory=list)
+
+
 class AgentSpec(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     api_version: Literal["redharness/v1"] = Field(default="redharness/v1", alias="apiVersion")
     id: str = Field(min_length=1)
-    type: Literal["cli", "docker"] = "cli"
+    type: Literal["cli", "docker", "pi"] = "cli"
     command: list[str] = Field(default_factory=list)
     cwd: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     image: str | None = None
     network: Literal["environment", "none"] = "environment"
     runtime: str | None = None
+    pi: PiSpec | None = None
 
     @model_validator(mode="after")
     def validate_adapter(self) -> AgentSpec:
@@ -82,8 +101,14 @@ class AgentSpec(BaseModel):
             raise ValueError("cli agents require command")
         if self.type == "docker" and not self.image:
             raise ValueError("docker agents require image")
-        if self.type == "cli" and self.runtime is not None:
+        if self.type == "pi" and self.pi is None:
+            raise ValueError("pi agents require pi configuration")
+        if self.type != "docker" and self.runtime is not None:
             raise ValueError("runtime is only valid for docker agents")
+        if self.type == "pi" and self.command:
+            raise ValueError("pi agents use pi.launcher_args instead of command")
+        if self.type == "pi" and self.image is not None:
+            raise ValueError("host pi adapter does not accept image")
         return self
 
 
