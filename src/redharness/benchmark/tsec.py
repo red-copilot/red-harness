@@ -245,41 +245,40 @@ class TSecRunner:
         )
 
         hint_text: str | None = None
-        if use_hint:
-            hint_result = await client.get_hint(challenge.unique_code)
-            hint_text = getattr(hint_result, "hint", None)
-            trace.emit(
-                "benchmark.hint.used",
-                data={
-                    "unique_code": challenge.unique_code,
-                    "has_hint": hint_text is not None,
-                    "score_penalty_expected": True,
-                },
-            )
-
-        task = TaskSpec(
-            apiVersion="redharness/v1",
-            id=challenge.unique_code,
-            name=challenge.unique_code,
-            category="tsec",
-            difficulty=getattr(challenge, "difficulty", None),
-            objective=ObjectiveSpec(
-                description=self._objective(
-                    challenge,
-                    targets,
-                    initial_correct=initial_correct,
-                    hint=hint_text,
-                )
-            ),
-            budgets=budgets,
-        )
-        adapter = build_agent_adapter(agent, allow_host_agent=False, trace=trace)
-
         submissions: list[dict[str, typing.Any]] = []
         agent_result = None
         closed = False
         close_error: dict[str, typing.Any] | None = None
         try:
+            if use_hint:
+                hint_result = await client.get_hint(challenge.unique_code)
+                hint_text = getattr(hint_result, "hint", None)
+                trace.emit(
+                    "benchmark.hint.used",
+                    data={
+                        "unique_code": challenge.unique_code,
+                        "has_hint": hint_text is not None,
+                        "score_penalty_expected": True,
+                    },
+                )
+
+            task = TaskSpec(
+                apiVersion="redharness/v1",
+                id=challenge.unique_code,
+                name=challenge.unique_code,
+                category="tsec",
+                difficulty=getattr(challenge, "difficulty", None),
+                objective=ObjectiveSpec(
+                    description=self._objective(
+                        challenge,
+                        targets,
+                        initial_correct=initial_correct,
+                        hint=hint_text,
+                    )
+                ),
+                budgets=budgets,
+            )
+            adapter = build_agent_adapter(agent, allow_host_agent=False, trace=trace)
             agent_result = adapter.run(
                 task,
                 task_dir=run_dir,
