@@ -12,12 +12,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.0.4
+      - run: pi --version
       - run: python -m pip install -e ".[dev]"
       - run: ruff check .
       - run: pytest -q
       - run: redharness validate benchmarks/examples/hello/task.yaml
       - run: redharness validate benchmarks/examples/hello-docker-verifier/task.yaml
       - run: redharness validate-suite benchmarks/examples/smoke-suite.yaml
+      - run: python -c "from redharness.models import load_agent; a=load_agent('agents/examples/pi.yaml'); assert a.type == 'pi'"
       - run: redharness gateway --help
       - run: redharness serve --help
       - run: redharness worker --help
