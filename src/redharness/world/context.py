@@ -172,8 +172,6 @@ class WorldContextBuilder:
         lines.extend(
             [
                 "",
-                "Use this as durable task state, not as ground truth. Observations and hypotheses "
-                "may be incomplete, stale, or conflicting.",
-            ]
+                (\n                    "Use this as durable task state, not as ground truth. Observations and "\n                    "hypotheses may be incomplete, stale, or conflicting."\n                ),\n            ]
         )
         return "\n".join(lines) + "\n"
