@@ -35,15 +35,18 @@ class GatewayRuntime:
         run_dir: Path,
         task_dir: Path,
         trace: TraceRecorder,
+        expose_to_docker: bool = False,
     ) -> None:
         self.config = config
         self.run_dir = run_dir
         self.task_dir = task_dir
         self.trace = trace
+        self.expose_to_docker = expose_to_docker
         self.token = secrets.token_urlsafe(32)
-        self.host = "127.0.0.1"
-        self.port = self._pick_port()
-        self.url = f"http://{self.host}:{self.port}"
+        self.listen_host = "0.0.0.0" if expose_to_docker else "127.0.0.1"
+        self.port = self._pick_port(self.listen_host)
+        client_host = "host.docker.internal" if expose_to_docker else "127.0.0.1"
+        self.url = f"http://{client_host}:{self.port}"
 
         app = create_gateway_app(
             event_file=run_dir / "events.jsonl",
@@ -60,7 +63,7 @@ class GatewayRuntime:
         )
         uvicorn_config = uvicorn.Config(
             app,
-            host=self.host,
+            host=self.listen_host,
             port=self.port,
             log_level="warning",
             access_log=False,
@@ -73,9 +76,9 @@ class GatewayRuntime:
         )
 
     @staticmethod
-    def _pick_port() -> int:
+    def _pick_port(host: str) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
+            sock.bind((host, 0))
             return int(sock.getsockname()[1])
 
     def start(self) -> None:
@@ -91,6 +94,8 @@ class GatewayRuntime:
             "gateway.started",
             data={
                 "url": self.url,
+                "listen_host": self.listen_host,
+                "docker_access": self.expose_to_docker,
                 "model_proxy": self.config.model_upstream is not None,
                 "policy": str(self.config.policy_path) if self.config.policy_path else "default",
             },
