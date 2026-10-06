@@ -126,3 +126,5 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert fake_agent.session.feedback[0].type == "benchmark.feedback"
     assert fake_agent.session.feedback[0].data["accepted"] is True
     assert fake_agent.session.feedback[0].data["completed"] is True
+    assert result["progress"]["accepted_submissions"] == 1
+    assert result["progress"]["objective_completed"] is True
