@@ -148,6 +148,8 @@ class ContainerPiAdapter(PiAdapter):
                 "-e",
                 "REDHARNESS_FEEDBACK_FILE=/run/redharness/agent.feedback.jsonl",
                 "-e",
+                "REDHARNESS_PROGRESS_FILE=/run/redharness/progress.json",
+                "-e",
                 f"REDHARNESS_SEED={seed}",
                 "-e",
                 "PI_CODING_AGENT_DIR=/run/redharness/pi-agent",
