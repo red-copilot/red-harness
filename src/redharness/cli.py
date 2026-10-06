@@ -238,6 +238,12 @@ def tsec(
     max_model_calls: Annotated[int | None, typer.Option("--max-model-calls", min=1)] = None,
     max_tool_calls: Annotated[int | None, typer.Option("--max-tool-calls", min=1)] = None,
     max_cost_usd: Annotated[float | None, typer.Option("--max-cost-usd", min=0)] = None,
+    use_hint: Annotated[
+        bool,
+        typer.Option("--hint", help="Request the platform hint; this may reduce flag score."),
+    ] = False,
+    start_retries: Annotated[int, typer.Option("--start-retries", min=0, max=10)] = 2,
+    retry_delay: Annotated[float, typer.Option("--retry-delay", min=0)] = 2.0,
 ) -> None:
     """Run TSec Benchmark challenges with a containerized Pi agent."""
     spec = load_agent(agent)
@@ -259,6 +265,9 @@ def tsec(
             challenge_code=challenge,
             run_all=run_all,
             seed=seed,
+            use_hint=use_hint,
+            start_retries=start_retries,
+            retry_delay=retry_delay,
         )
     )
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
