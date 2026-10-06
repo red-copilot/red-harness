@@ -34,6 +34,16 @@
         "themes": {"type": "boolean"},
         "mcp": {"type": "boolean"},
         "offline": {"type": "boolean"},
+        "env_passthrough": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "cap_add": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
         "extra_args": {"type": "array", "items": {"type": "string"}}
       },
       "required": ["model"],
