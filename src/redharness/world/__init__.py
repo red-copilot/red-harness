@@ -1,3 +1,4 @@
+from .context import WorldContextBuilder
 from .models import (
     Artifact,
     Capability,
@@ -24,6 +25,7 @@ __all__ = [
     "IngestReport",
     "Observation",
     "Relation",
+    "WorldContextBuilder",
     "WorldEvent",
     "WorldReducer",
     "WorldSubmission",
