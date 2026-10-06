@@ -9,9 +9,11 @@ from pydantic import BaseModel, Field
 
 from .execution import ExecutionCapabilities
 from .otel import trace_to_otlp_json
+from .planner import HeuristicSkillPlanner
 from .queue import JobPayload, SQLiteQueue
 from .registry import scan_benchmarks
-from .skills import scan_skills
+from .skills import load_skills, scan_skills
+from .world import WorldSnapshot
 
 
 class ClaimRequest(BaseModel):
@@ -199,6 +201,28 @@ def create_control_plane(
                     if len(events) >= limit:
                         break
         return events
+
+    @app.get("/v1/runs/{run_id}/plan")
+    async def run_plan(
+        request: Request,
+        run_id: str,
+        limit: int = Query(default=5, ge=1, le=50),
+    ) -> dict:
+        _authorize(request, token)
+        directory = _run_dir(run_root, run_id)
+        world_path = directory / "world.snapshot.json"
+        if not world_path.is_file():
+            raise HTTPException(status_code=404, detail="world snapshot not found")
+        snapshot = WorldSnapshot.model_validate(
+            json.loads(world_path.read_text(encoding="utf-8"))
+        )
+        skills = load_skills(skill_root) if skill_root is not None else []
+        candidates = HeuristicSkillPlanner().propose(snapshot, skills, limit=limit)
+        return {
+            "planner": "heuristic-skill-v1",
+            "world_revision": snapshot.revision,
+            "candidates": [candidate.model_dump() for candidate in candidates],
+        }
 
     @app.get("/v1/runs/{run_id}/otel")
     async def run_otel(request: Request, run_id: str) -> dict:
