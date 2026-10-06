@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
-from redharness.planner import HeuristicSkillPlanner
+from redharness.planner import HeuristicSkillPlanner, RollingHorizonPlanner
+from redharness.progress import ProgressLedger
 from redharness.skills import SkillSpec
 from redharness.world import Capability, Observation, WorldSnapshot
 
@@ -87,3 +88,78 @@ def test_planner_ignores_expired_capabilities() -> None:
     )
 
     assert HeuristicSkillPlanner().propose(snapshot, [skill]) == []
+
+
+
+def test_rolling_horizon_plan_uses_progress_and_expected_outputs() -> None:
+    snapshot = WorldSnapshot(
+        revision=7,
+        capabilities={
+            "cap-1": Capability(
+                id="cap-1",
+                type="network.reachability",
+                subject="agent",
+                scope="target",
+            )
+        },
+    )
+    skills = [
+        SkillSpec(
+            id="service-discovery",
+            description="Enumerate reachable services",
+            requires=[{"kind": "capability", "type": "network.reachability"}],
+            produces=[
+                {"kind": "observation", "type": "network.service"},
+                {"kind": "entity", "type": "network.service"},
+            ],
+            cost=0.2,
+            risk=0.1,
+            noise=0.2,
+        ),
+        SkillSpec(
+            id="banner-grab",
+            description="Collect service banners",
+            requires=[{"kind": "capability", "type": "network.reachability"}],
+            produces=[{"kind": "observation", "type": "network.banner"}],
+            cost=0.3,
+            risk=0.1,
+            noise=0.2,
+        ),
+    ]
+    progress = ProgressLedger(
+        current_subgoal="enumerate services",
+        no_progress_count=2,
+    )
+
+    plan = RollingHorizonPlanner().propose(
+        snapshot,
+        skills,
+        progress=progress,
+        horizon=2,
+    )
+
+    assert plan.world_revision == 7
+    assert plan.horizon == 2
+    assert plan.current_subgoal == "enumerate services"
+    assert len(plan.actions) == 2
+    assert plan.actions[0].rank == 1
+    assert plan.actions[0].expected_observations
+    assert "no_progress_threshold" in plan.actions[0].replan_triggers
+    assert "subgoal=enumerate services" in plan.actions[0].rationale
+
+
+def test_rolling_horizon_clamps_to_three_actions() -> None:
+    snapshot = WorldSnapshot()
+    skills = [
+        SkillSpec(
+            id=f"skill-{index}",
+            description=f"Skill {index}",
+            produces=[{"kind": "observation", "type": f"obs.{index}"}],
+        )
+        for index in range(5)
+    ]
+
+    plan = RollingHorizonPlanner().propose(snapshot, skills, horizon=20)
+
+    assert plan.horizon == 3
+    assert len(plan.actions) == 3
