@@ -85,4 +85,22 @@ in simply by detecting `REDHARNESS_WORLD_INBOX`.
 
 ## Planned evolution
 
-1. **Done:** validated Agent-facing state-event ingestion protocol.\n2. Context builder over relevant world state.\n3. Resume from world state using a fresh Agent session.\n4. Domain extension packages and skill metadata.\n5. Optional rolling-horizon planner.\n6. Shared blackboard for multi-agent execution.\n7. Derived graph/timeline views and transition-model research.\n
+1. **Done:** validated Agent-facing state-event ingestion protocol.\n2. **Done:** compact context builder over persisted world state.\n3. **Done:** resume from a prior world event log using a fresh Agent session.\n4. Domain extension packages and skill metadata.\n5. Optional rolling-horizon planner.\n6. Shared blackboard for multi-agent execution.\n7. Derived graph/timeline views and transition-model research.\n
+
+## Context and resume
+
+Each run materializes `world.context.txt` from the current snapshot and exposes its path as
+`REDHARNESS_WORLD_CONTEXT`. The projection prioritizes goals, capabilities, open hypotheses,
+artifacts, bounded observations, recent failures, and relations.
+
+A new run may continue from a previous authoritative event log:
+
+```bash
+redharness run benchmarks/examples/hello/task.yaml \
+  --agent agents/examples/pi.yaml \
+  --resume-world .redharness/runs/<run-id>/world.events.jsonl
+```
+
+The new run copies and replays the prior world event log, re-activates the root task goal, builds a
+fresh context projection, and starts a new Agent session. It does not replay or depend on the old
+provider transcript.
