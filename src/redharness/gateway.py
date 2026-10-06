@@ -42,6 +42,14 @@ class GatewayEventWriter:
             handle.flush()
 
 
+def _authorize(request: Request, token: str | None) -> None:
+    if token is None:
+        return
+    auth = request.headers.get("authorization", "")
+    if auth != f"Bearer {token}":
+        raise HTTPException(status_code=401, detail="invalid gateway token")
+
+
 def _resolve_read_path(raw: str, *, workspace: Path, task_dir: Path) -> Path:
     path = Path(raw)
     candidate = path if path.is_absolute() else workspace / path
@@ -68,6 +76,7 @@ def create_gateway_app(
     workspace: Path,
     task_dir: Path,
     policy: GatewayPolicy | None = None,
+    gateway_token: str | None = None,
     model_upstream: str | None = None,
     model_api_key: str | None = None,
     model_pricing: ModelPricing | None = None,
@@ -83,7 +92,8 @@ def create_gateway_app(
         return {"status": "ok"}
 
     @app.post("/v1/tools/call")
-    async def call_tool(call: ToolCallRequest) -> dict[str, Any]:
+    async def call_tool(request: Request, call: ToolCallRequest) -> dict[str, Any]:
+        _authorize(request, gateway_token)
         if not active_policy.allows(call.name):
             writer.emit("tool.denied", tool=call.name)
             raise HTTPException(status_code=403, detail=f"tool denied: {call.name}")
@@ -127,6 +137,7 @@ def create_gateway_app(
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> JSONResponse:
+        _authorize(request, gateway_token)
         if model_upstream is None:
             raise HTTPException(status_code=503, detail="model upstream is not configured")
 
