@@ -17,6 +17,7 @@ class EnvironmentError(RuntimeError):
 class EnvironmentHandle:
     provider: str
     project_name: str | None = None
+    network_name: str | None = None
 
 
 class EnvironmentProvider:
@@ -40,7 +41,13 @@ class NoneEnvironment(EnvironmentProvider):
 
 
 class DockerComposeEnvironment(EnvironmentProvider):
-    def __init__(self, spec: EnvironmentSpec, task_dir: Path, run_id: str, trace: TraceRecorder) -> None:
+    def __init__(
+        self,
+        spec: EnvironmentSpec,
+        task_dir: Path,
+        run_id: str,
+        trace: TraceRecorder,
+    ) -> None:
         if shutil.which("docker") is None:
             raise EnvironmentError("docker executable was not found")
         self.spec = spec
@@ -51,8 +58,13 @@ class DockerComposeEnvironment(EnvironmentProvider):
 
     def _compose(self, *args: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:
         command = [
-            "docker", "compose", "-p", self.project_name,
-            "-f", str(self.manifest), *args,
+            "docker",
+            "compose",
+            "-p",
+            self.project_name,
+            "-f",
+            str(self.manifest),
+            *args,
         ]
         result = subprocess.run(
             command,
@@ -76,7 +88,11 @@ class DockerComposeEnvironment(EnvironmentProvider):
             data={"provider": "docker-compose", "manifest": str(self.manifest)},
         )
         self._compose("up", "-d", "--build")
-        return EnvironmentHandle(provider="docker-compose", project_name=self.project_name)
+        return EnvironmentHandle(
+            provider="docker-compose",
+            project_name=self.project_name,
+            network_name=f"{self.project_name}_default",
+        )
 
     def stop(self) -> None:
         try:
