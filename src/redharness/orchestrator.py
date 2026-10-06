@@ -15,7 +15,7 @@ from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
 from .verifier import run_verifier
-from .world import Goal, WorldStore
+from .world import Goal, WorldStore, ingest_world_inbox
 
 
 def _sha256(path: Path) -> str:
@@ -168,6 +168,16 @@ class Orchestrator:
                     "environment.error",
                     data={"error_type": type(exc).__name__, "message": str(exc)},
                 )
+
+        ingest_report = ingest_world_inbox(run_dir / "world.inbox.jsonl", world, actor="agent")
+        trace.emit(
+            "world.ingested",
+            data={
+                "accepted": ingest_report.accepted,
+                "rejected": ingest_report.rejected,
+                "errors": [error.model_dump() for error in ingest_report.errors[:10]],
+            },
+        )
 
         duration_ms = int((time.monotonic() - started) * 1000)
         metrics = {"duration_ms": duration_ms, **usage.as_dict()}
