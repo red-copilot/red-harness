@@ -54,6 +54,21 @@ class WorldContextBuilder:
         else:
             lines.append("- none")
 
+        lines.extend(["", "## Entities"])
+        entities = sorted(snapshot.entities.values(), key=lambda item: item.id)
+        if entities:
+            for entity in entities:
+                lines.append(
+                    self._line(
+                        "entity",
+                        entity.id,
+                        entity.type,
+                        entity.attributes,
+                    )
+                )
+        else:
+            lines.append("- none")
+
         lines.extend(["", "## Capabilities"])
         capabilities = sorted(snapshot.capabilities.values(), key=lambda item: item.id)
         if capabilities:
