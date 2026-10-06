@@ -21,7 +21,7 @@ class ExecutionCapabilities:
             gvisor_runsc=shutil.which("runsc") is not None,
             firecracker=shutil.which("firecracker") is not None,
             kvm=Path("/dev/kvm").exists(),
-            pi=shutil.which("pi") is not None,
+            pi=shutil.which("docker") is not None,
         )
 
     def as_dict(self) -> dict[str, bool]:
