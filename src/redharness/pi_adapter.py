@@ -273,13 +273,16 @@ class PiAdapter:
             args.extend(["--thinking", self.pi.thinking])
         args.extend(self.pi.extra_args)
         world_protocol = (
-            "\n\nRed Harness world-state protocol:\n"
-            "Read $REDHARNESS_WORLD_CONTEXT before acting. When you discover durable, task-relevant "
-            "state, append one JSON object per line to "
+            "\n\nRed Harness state protocol:\n"
+            "Read $REDHARNESS_WORLD_CONTEXT and $REDHARNESS_PROGRESS_FILE before acting. "
+            "When you discover durable, task-relevant state, append one JSON object per line to "
             "$REDHARNESS_WORLD_INBOX. Use schema_version redharness.world.submit/v1 and one of "
-            "entity, relation, observation, artifact, capability, hypothesis, goal, action, constraint, or failure. "
-            "Prefer high-value state changes over verbose narration. Do not write to "
-            "world.events.jsonl or world.snapshot.json directly."
+            "entity, relation, observation, artifact, capability, hypothesis, goal, action, "
+            "constraint, or failure. Prefer high-value state changes over verbose narration. "
+            "When your current subgoal, hypothesis, expected observation, actual observation, "
+            "or replan reason changes, append a compact progress.updated JSON event to "
+            "$REDHARNESS_EVENT_FILE with those fields under data. Do not write to "
+            "world.events.jsonl, world.snapshot.json, or progress.json directly."
         )
         args.append(task.objective.description + world_protocol)
         return args
