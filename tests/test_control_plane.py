@@ -92,4 +92,10 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     assert spans[0]["name"] == "run.started"
 
     capabilities = client.get("/v1/capabilities", headers=headers)
-    assert set(capabilities.json()) == {"docker", "gvisor_runsc", "firecracker", "kvm"}
+    assert set(capabilities.json()) == {
+        "docker",
+        "gvisor_runsc",
+        "firecracker",
+        "kvm",
+        "pi",
+    }
