@@ -21,6 +21,10 @@ class WorldContextBuilder:
         self.max_relations = max_relations
 
     @staticmethod
+    def _valid_values(collection: dict) -> list[Any]:
+        return [item for item in collection.values() if item.is_valid_at()]
+
+    @staticmethod
     def _state_meta(item: Any) -> dict:
         return item.model_dump(
             mode="json",
@@ -48,7 +52,7 @@ class WorldContextBuilder:
         ]
 
         goals = sorted(
-            snapshot.goals.values(),
+            self._valid_values(snapshot.goals),
             key=lambda item: (-item.priority, item.id),
         )
         if goals:
@@ -71,7 +75,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Entities"])
-        entities = sorted(snapshot.entities.values(), key=lambda item: item.id)
+        entities = sorted(self._valid_values(snapshot.entities), key=lambda item: item.id)
         if entities:
             for entity in entities:
                 lines.append(
@@ -86,7 +90,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Capabilities"])
-        capabilities = sorted(snapshot.capabilities.values(), key=lambda item: item.id)
+        capabilities = sorted(self._valid_values(snapshot.capabilities), key=lambda item: item.id)
         if capabilities:
             for capability in capabilities:
                 lines.append(
@@ -106,7 +110,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Open hypotheses"])
-        hypotheses = sorted(snapshot.hypotheses.values(), key=lambda item: (-item.confidence, item.id))
+        hypotheses = sorted(self._valid_values(snapshot.hypotheses), key=lambda item: (-item.confidence, item.id))
         hypotheses = [item for item in hypotheses if item.status in {"open", "supported"}]
         if hypotheses:
             for hypothesis in hypotheses:
@@ -127,7 +131,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Artifacts"])
-        artifacts = sorted(snapshot.artifacts.values(), key=lambda item: item.id)
+        artifacts = sorted(self._valid_values(snapshot.artifacts), key=lambda item: item.id)
         if artifacts:
             for artifact in artifacts:
                 lines.append(
@@ -142,7 +146,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Observations"])
-        observations = sorted(snapshot.observations.values(), key=lambda item: item.id)
+        observations = sorted(self._valid_values(snapshot.observations), key=lambda item: item.id)
         observations = observations[-self.max_observations :]
         if observations:
             for observation in observations:
@@ -163,7 +167,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Actions"])
-        actions = sorted(snapshot.actions.values(), key=lambda item: item.id)
+        actions = sorted(self._valid_values(snapshot.actions), key=lambda item: item.id)
         if actions:
             for action in actions:
                 lines.append(
@@ -178,7 +182,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Constraints"])
-        constraints = sorted(snapshot.constraints.values(), key=lambda item: item.id)
+        constraints = sorted(self._valid_values(snapshot.constraints), key=lambda item: item.id)
         if constraints:
             for constraint in constraints:
                 lines.append(
@@ -198,7 +202,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Failures"])
-        failures = sorted(snapshot.failures.values(), key=lambda item: item.id)
+        failures = sorted(self._valid_values(snapshot.failures), key=lambda item: item.id)
         failures = failures[-self.max_failures :]
         if failures:
             for failure in failures:
@@ -220,7 +224,7 @@ class WorldContextBuilder:
             lines.append("- none")
 
         lines.extend(["", "## Relations"])
-        relations = sorted(snapshot.relations.values(), key=lambda item: item.id)
+        relations = sorted(self._valid_values(snapshot.relations), key=lambda item: item.id)
         relations = relations[-self.max_relations :]
         if relations:
             for relation in relations:
