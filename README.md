@@ -544,3 +544,20 @@ Each benchmark run also maintains `progress.json` (`redharness.progress/v1`) sep
 World State. It tracks active solver progress, recent action status, no-progress/failure counters,
 submission outcomes, and objective completion. Containerized Pi sessions can be actively stopped
 when the evaluator reports objective completion.
+
+
+### Rolling-horizon planning
+
+The Harness exposes an optional short-horizon planner at:
+
+```text
+GET /v1/runs/{run_id}/plan/rolling?horizon=1..3
+```
+
+It combines the current World Snapshot, Skill Registry, and `progress.json` to return at most three
+`PlannedAction` records. Each action includes a skill, expected observations, a compact rationale,
+and explicit replan triggers such as action failure, missing expected observations, changed world
+revision, repeated no-progress, or contradicted hypotheses.
+
+This endpoint is advisory. Planner output is never executed automatically. Work still enters the
+Coordination Plane only through an explicit publish step.
