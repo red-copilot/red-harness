@@ -6,8 +6,8 @@ import shutil
 import time
 import uuid
 from datetime import UTC, datetime
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from . import __version__
 from .agent import build_agent_adapter
