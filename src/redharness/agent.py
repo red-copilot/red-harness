@@ -401,9 +401,13 @@ def build_agent_adapter(
     *,
     allow_host_agent: bool,
     trace: TraceRecorder,
-) -> CLIAdapter | DockerAdapter:
+):
     if spec.type == "cli":
         return CLIAdapter(spec, allow_host=allow_host_agent, trace=trace)
     if spec.type == "docker":
         return DockerAdapter(spec, trace=trace)
+    if spec.type == "pi":
+        from .pi_adapter import PiAdapter
+
+        return PiAdapter(spec, allow_host=allow_host_agent, trace=trace)
     raise AgentError(f"unsupported agent adapter: {spec.type}")
