@@ -28,9 +28,9 @@ __all__ = [
     "WorldContextBuilder",
     "WorldEvent",
     "WorldReducer",
-    "WorldSubmission",
     "WorldSnapshot",
     "WorldStore",
+    "WorldSubmission",
     "ingest_world_inbox",
     "write_submission",
 ]
