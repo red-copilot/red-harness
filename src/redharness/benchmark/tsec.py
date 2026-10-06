@@ -9,12 +9,7 @@ from ..models import AgentSpec, BudgetSpec
 from .base import Submission
 from .runner import BenchmarkRunner
 from .tsec_adapter import TSecBenchmarkAdapter
-from .tsec_client import (
-    TSecAdapterError,
-    TSecClientAdapter,
-    TSecConfig,
-    load_tsec_config,
-)
+from .tsec_client import TSecAdapterError, TSecClientAdapter, TSecConfig, load_tsec_config
 
 
 _FLAG_RE = re.compile(r"REDHARNESS_FLAG=([^\s]+)")
