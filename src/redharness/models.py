@@ -37,11 +37,14 @@ class VerificationSpec(BaseModel):
     command: list[str] = Field(default_factory=list)
     network: Literal["none", "environment"] = "none"
     timeout: int = Field(default=120, ge=1, le=3600)
+    runtime: str | None = None
 
     @model_validator(mode="after")
     def validate_verifier(self) -> VerificationSpec:
         if self.type == "docker" and not self.image:
             raise ValueError("docker verifier requires image")
+        if self.type == "python" and self.runtime is not None:
+            raise ValueError("runtime is only valid for docker verifier")
         return self
 
 
@@ -71,6 +74,7 @@ class AgentSpec(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     image: str | None = None
     network: Literal["environment", "none"] = "environment"
+    runtime: str | None = None
 
     @model_validator(mode="after")
     def validate_adapter(self) -> AgentSpec:
@@ -78,6 +82,8 @@ class AgentSpec(BaseModel):
             raise ValueError("cli agents require command")
         if self.type == "docker" and not self.image:
             raise ValueError("docker agents require image")
+        if self.type == "cli" and self.runtime is not None:
+            raise ValueError("runtime is only valid for docker agents")
         return self
 
 
@@ -93,7 +99,20 @@ class SuiteSpec(BaseModel):
     id: str = Field(min_length=1)
     repeat: int = Field(default=1, ge=1)
     base_seed: int = Field(default=0, ge=0)
+    workers: int = Field(default=1, ge=1, le=64)
+    pass_k: list[int] = Field(default_factory=lambda: [1])
     tasks: list[SuiteTaskSpec] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_pass_k(self) -> SuiteSpec:
+        if not self.pass_k:
+            raise ValueError("pass_k must contain at least one k")
+        if len(set(self.pass_k)) != len(self.pass_k):
+            raise ValueError("pass_k values must be unique")
+        if any(k < 1 or k > self.repeat for k in self.pass_k):
+            raise ValueError("each pass_k value must be between 1 and repeat")
+        self.pass_k.sort()
+        return self
 
 
 class VerificationResult(BaseModel):
