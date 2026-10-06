@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import time
 import uuid
 from datetime import UTC, datetime
@@ -15,7 +16,7 @@ from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
 from .verifier import run_verifier
-from .world import Goal, WorldStore, ingest_world_inbox
+from .world import Goal, WorldContextBuilder, WorldStore, ingest_world_inbox
 
 
 def _sha256(path: Path) -> str:
@@ -41,13 +42,20 @@ class Orchestrator:
         allow_host_agent: bool = False,
         seed: int = 0,
         gateway_config: GatewayConfig | None = None,
+        resume_world_events: Path | None = None,
     ) -> dict:
         run_id = _new_run_id()
         run_dir = (self.runs_root / run_id).resolve()
         run_dir.mkdir(parents=True, exist_ok=False)
         task_dir = task_path.resolve().parent
         trace = TraceRecorder(run_dir / "trace.jsonl", run_id, task.id)
-        world = WorldStore(run_dir / "world.events.jsonl")
+        world_event_path = run_dir / "world.events.jsonl"
+        if resume_world_events is not None:
+            source = resume_world_events.resolve()
+            if not source.is_file():
+                raise FileNotFoundError(f"resume world event log not found: {source}")
+            shutil.copyfile(source, world_event_path)
+        world = WorldStore(world_event_path)
         root_goal = Goal(
             id=f"goal:{task.id}:objective",
             description=task.objective.description,
@@ -56,6 +64,11 @@ class Orchestrator:
             attributes={"task_id": task.id, "category": task.category},
         )
         world.upsert("goal", root_goal)
+        context_builder = WorldContextBuilder()
+        (run_dir / "world.context.txt").write_text(
+            context_builder.render(world.snapshot),
+            encoding="utf-8",
+        )
         started = time.monotonic()
         status = "running"
         usage = UsageMetrics()
@@ -72,6 +85,7 @@ class Orchestrator:
                 "gateway_enabled": gateway_config is not None,
                 "task_sha256": _sha256(task_path),
                 "agent_sha256": _sha256(agent_path),
+                "resumed_world": resume_world_events is not None,
             },
         )
 
@@ -209,6 +223,14 @@ class Orchestrator:
             {"run_status": status, "score": result["score"], "success": result["success"]}
         )
         world.upsert("goal", root_goal)
+        (run_dir / "world.context.txt").write_text(
+            context_builder.render(world.snapshot),
+            encoding="utf-8",
+        )
+        result["world"] = {
+            "revision": world.snapshot.revision,
+            "resumed": resume_world_events is not None,
+        }
         (run_dir / "result.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
