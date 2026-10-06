@@ -1,0 +1,6 @@
+allowed_tools:
+  - file.read
+  - file.write
+denied_tools: []
+max_tool_output_bytes: 65536
+max_file_write_bytes: 1048576
