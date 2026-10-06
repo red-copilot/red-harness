@@ -407,7 +407,7 @@ def build_agent_adapter(
     if spec.type == "docker":
         return DockerAdapter(spec, trace=trace)
     if spec.type == "pi":
-        from .pi_adapter import PiAdapter
+        from .pi_container import ContainerPiAdapter
 
-        return PiAdapter(spec, allow_host=allow_host_agent, trace=trace)
+        return ContainerPiAdapter(spec, allow_host=allow_host_agent, trace=trace)
     raise AgentError(f"unsupported agent adapter: {spec.type}")
