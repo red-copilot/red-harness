@@ -15,107 +15,26 @@ from .trace import TraceRecorder
 
 
 class PiAdapter:
-    """First-class adapter for the Pi coding agent JSON event protocol."""
+    """Run Pi inside a constrained Docker/Kali container and consume Pi JSONL."""
 
     def __init__(self, spec: AgentSpec, *, allow_host: bool, trace: TraceRecorder) -> None:
-        if not allow_host:
-            raise AgentError(
-                "Pi executes as a host process; pass --allow-host-agent only for trusted runs"
-            )
+        del allow_host
         if spec.pi is None:
             raise AgentError("Pi agent requires a pi configuration block")
+        if not spec.image:
+            raise AgentError("Pi agent requires a container image")
+        if shutil.which("docker") is None:
+            raise AgentError("docker executable was not found")
         self.spec = spec
         self.pi = spec.pi
         self.trace = trace
-        executable = self.pi.binary
-        if Path(executable).is_absolute():
-            if not Path(executable).is_file():
-                raise AgentError(f"Pi executable was not found: {executable}")
-        elif shutil.which(executable) is None:
-            raise AgentError(f"Pi executable was not found: {executable}")
 
     @staticmethod
     def _append_event(path: Path, event_type: str, data: dict[str, Any]) -> None:
         payload = {"type": event_type, "data": data}
-        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+            handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
             handle.flush()
-
-    def _prepare_agent_dir(
-        self,
-        *,
-        run_dir: Path,
-        gateway_url: str | None,
-        gateway_token: str | None,
-    ) -> Path:
-        agent_dir = run_dir / "pi-agent"
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        if gateway_url and gateway_token:
-            models = {
-                "providers": {
-                    "redharness": {
-                        "baseUrl": f"{gateway_url}/v1",
-                        "api": "openai-completions",
-                        "apiKey": "$REDHARNESS_GATEWAY_TOKEN",
-                        "models": [{"id": self.pi.model}],
-                    }
-                }
-            }
-            (agent_dir / "models.json").write_text(
-                json.dumps(models, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-        return agent_dir
-
-    def _command(
-        self,
-        task: TaskSpec,
-        *,
-        gateway_enabled: bool,
-    ) -> list[str]:
-        command = [
-            self.pi.binary,
-            *self.pi.launcher_args,
-            "--mode",
-            "json",
-            "--no-session",
-        ]
-        command.append("--approve" if self.pi.approve_project else "--no-approve")
-        if not self.pi.context_files:
-            command.append("--no-context-files")
-        if not self.pi.extensions:
-            command.append("--no-extensions")
-        if not self.pi.skills:
-            command.append("--no-skills")
-        if not self.pi.prompt_templates:
-            command.append("--no-prompt-templates")
-        if not self.pi.themes:
-            command.append("--no-themes")
-        if not self.pi.mcp:
-            command.append("--no-mcp")
-        if self.pi.offline:
-            command.append("--offline")
-        if self.pi.tools:
-            command.extend(["--tools", ",".join(self.pi.tools)])
-        else:
-            command.append("--no-tools")
-
-        if gateway_enabled:
-            command.extend(["--provider", "redharness", "--model", self.pi.model])
-        else:
-            if self.pi.provider:
-                command.extend(["--provider", self.pi.provider])
-            command.extend(["--model", self.pi.model])
-        if self.pi.thinking:
-            command.extend(["--thinking", self.pi.thinking])
-        command.extend(self.pi.extra_args)
-        command.append(
-            "You are running inside Red Harness. Complete the benchmark objective, "
-            "and make the required changes in REDHARNESS_RUN_DIR. Do not merely report "
-            f"success. Objective: {task.objective.description}"
-        )
-        return command
 
     def _translate_line(
         self,
@@ -234,15 +153,12 @@ class PiAdapter:
         event_file: Path,
         account_model: bool,
     ) -> tuple[int, str]:
-        if not raw_path.exists():
-            return offset, remainder
         with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
             handle.seek(offset)
             chunk = handle.read()
             offset = handle.tell()
         if not chunk:
             return offset, remainder
-
         text = remainder + chunk
         lines = text.splitlines(keepends=True)
         remainder = ""
@@ -257,6 +173,130 @@ class PiAdapter:
             )
         return offset, remainder
 
+    def _prepare_agent_dir(
+        self,
+        *,
+        run_dir: Path,
+        gateway_url: str | None,
+        gateway_token: str | None,
+    ) -> Path:
+        agent_dir = run_dir / "pi-agent"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        if gateway_url and gateway_token:
+            models = {
+                "providers": {
+                    "redharness": {
+                        "baseUrl": f"{gateway_url}/v1",
+                        "api": "openai-completions",
+                        "apiKey": "$REDHARNESS_GATEWAY_TOKEN",
+                        "models": [{"id": self.pi.model}],
+                    }
+                }
+            }
+            (agent_dir / "models.json").write_text(
+                json.dumps(models, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        return agent_dir
+
+    def _pi_args(self, task: TaskSpec, *, gateway_enabled: bool) -> list[str]:
+        args = [*self.pi.launcher_args, "--mode", "json", "--no-session"]
+        args.append("--approve" if self.pi.approve_project else "--no-approve")
+        for enabled, flag in (
+            (self.pi.context_files, "--no-context-files"),
+            (self.pi.extensions, "--no-extensions"),
+            (self.pi.skills, "--no-skills"),
+            (self.pi.prompt_templates, "--no-prompt-templates"),
+            (self.pi.themes, "--no-themes"),
+            (self.pi.mcp, "--no-mcp"),
+        ):
+            if not enabled:
+                args.append(flag)
+        if self.pi.offline:
+            args.append("--offline")
+        if self.pi.tools:
+            args.extend(["--tools", ",".join(self.pi.tools)])
+        else:
+            args.append("--no-tools")
+        if gateway_enabled:
+            args.extend(["--provider", "redharness", "--model", self.pi.model])
+        else:
+            if self.pi.provider:
+                args.extend(["--provider", self.pi.provider])
+            args.extend(["--model", self.pi.model])
+        if self.pi.thinking:
+            args.extend(["--thinking", self.pi.thinking])
+        args.extend(self.pi.extra_args)
+        args.append(task.objective.description)
+        return args
+
+    def _create_command(
+        self,
+        task: TaskSpec,
+        *,
+        task_dir: Path,
+        run_dir: Path,
+        container_name: str,
+        network: str,
+        seed: int,
+        gateway_url: str | None,
+        gateway_token: str | None,
+        host_gateway: bool,
+    ) -> list[str]:
+        command = [
+            "docker", "create", "--rm", "--pull=never",
+            "--name", container_name,
+            "--read-only",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--pids-limit", "1024",
+            "--memory", "8g",
+            "--cpus", "4",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g",
+            "--tmpfs", "/home/agent:rw,nosuid,nodev,size=512m,uid=1000,gid=1000",
+            "--network", network,
+        ]
+        if self.spec.runtime:
+            command.extend(["--runtime", self.spec.runtime])
+        for capability in self.pi.cap_add:
+            command.extend(["--cap-add", capability])
+        if host_gateway:
+            command.extend(["--add-host", "host.docker.internal:host-gateway"])
+        command.extend(
+            [
+                "-v", f"{task_dir.resolve()}:/task:ro",
+                "-v", f"{run_dir.resolve()}:/run/redharness:rw",
+                "-w", "/run/redharness",
+                "-e", f"REDHARNESS_TASK_ID={task.id}",
+                "-e", "REDHARNESS_TASK_DIR=/task",
+                "-e", "REDHARNESS_RUN_DIR=/run/redharness",
+                "-e", f"REDHARNESS_SEED={seed}",
+                "-e", "PI_CODING_AGENT_DIR=/run/redharness/pi-agent",
+                "-e", "PI_CODING_AGENT_SESSION_DIR=/run/redharness/pi-sessions",
+                "-e", "PI_TELEMETRY=0",
+                "-e", "PI_SKIP_VERSION_CHECK=1",
+            ]
+        )
+        if self.pi.offline:
+            command.extend(["-e", "PI_OFFLINE=1"])
+        for name in self.pi.env_passthrough:
+            value = os.environ.get(name)
+            if value is not None:
+                command.extend(["-e", f"{name}={value}"])
+        for key, value in sorted(self.spec.env.items()):
+            command.extend(["-e", f"{key}={value}"])
+        if gateway_url and gateway_token:
+            command.extend(
+                [
+                    "-e", f"REDHARNESS_GATEWAY_URL={gateway_url}",
+                    "-e", f"REDHARNESS_GATEWAY_TOKEN={gateway_token}",
+                    "-e", f"OPENAI_BASE_URL={gateway_url}/v1",
+                    "-e", f"OPENAI_API_KEY={gateway_token}",
+                ]
+            )
+        command.extend([str(self.spec.image), self.pi.binary, *self._pi_args(task, gateway_enabled=bool(gateway_url and gateway_token))])
+        return command
+
     def run(
         self,
         task: TaskSpec,
@@ -270,131 +310,140 @@ class PiAdapter:
         gateway_token: str | None = None,
         gateway_network: str | None = None,
     ) -> AgentResult:
-        del environment_network
-        if gateway_network is not None:
-            raise AgentError("host Pi adapter cannot access Docker sidecar Gateway mode")
+        del environment_project
         gateway_enabled = bool(gateway_url and gateway_token)
+        sidecar_gateway = gateway_enabled and gateway_network is not None
+        if self.spec.network == "none" and gateway_enabled:
+            raise AgentError("Pi network:none is incompatible with Gateway access")
+        if sidecar_gateway and self.spec.network == "host":
+            raise AgentError("Pi network:host is incompatible with sidecar Gateway mode")
+
+        if sidecar_gateway:
+            primary_network = str(gateway_network)
+        elif self.spec.network == "host":
+            primary_network = "host"
+        elif self.spec.network == "environment":
+            primary_network = environment_network or ("bridge" if gateway_enabled else "bridge")
+        else:
+            primary_network = "none"
+
         event_file = run_dir / "events.jsonl"
         event_file.write_text("", encoding="utf-8")
         raw_path = run_dir / "agent.stdout.log"
         stderr_path = run_dir / "agent.stderr.log"
         raw_path.write_text("", encoding="utf-8")
-        agent_dir = self._prepare_agent_dir(
+        (run_dir / "pi-sessions").mkdir(parents=True, exist_ok=True)
+        self._prepare_agent_dir(
             run_dir=run_dir,
             gateway_url=gateway_url,
             gateway_token=gateway_token,
         )
-        session_dir = run_dir / "pi-sessions"
-        session_dir.mkdir(parents=True, exist_ok=True)
 
-        env = os.environ.copy()
-        env.update(self.spec.env)
-        env.update(
-            {
-                "REDHARNESS_TASK_ID": task.id,
-                "REDHARNESS_TASK_DIR": str(task_dir),
-                "REDHARNESS_RUN_DIR": str(run_dir),
-                "REDHARNESS_OBJECTIVE": task.objective.description,
-                "REDHARNESS_ENV_PROJECT": environment_project or "",
-                "REDHARNESS_EVENT_FILE": str(event_file),
-                "REDHARNESS_SEED": str(seed),
-                "PI_CODING_AGENT_DIR": str(agent_dir),
-                "PI_CODING_AGENT_SESSION_DIR": str(session_dir),
-                "PI_TELEMETRY": "0",
-                "PI_SKIP_VERSION_CHECK": "1",
-            }
+        container_name = ("rh_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
+        command = self._create_command(
+            task,
+            task_dir=task_dir,
+            run_dir=run_dir,
+            container_name=container_name,
+            network=primary_network,
+            seed=seed,
+            gateway_url=gateway_url,
+            gateway_token=gateway_token,
+            host_gateway=gateway_enabled and not sidecar_gateway and primary_network != "host",
         )
-        if self.pi.offline:
-            env["PI_OFFLINE"] = "1"
-        if gateway_enabled:
-            env.update(
-                {
-                    "REDHARNESS_GATEWAY_URL": str(gateway_url),
-                    "REDHARNESS_GATEWAY_TOKEN": str(gateway_token),
-                    "OPENAI_BASE_URL": f"{gateway_url}/v1",
-                    "OPENAI_API_KEY": str(gateway_token),
-                }
-            )
-
-        command = self._command(task, gateway_enabled=gateway_enabled)
         self.trace.emit(
             "agent.started",
             actor="agent",
             data={
                 "agent_id": self.spec.id,
                 "type": "pi",
+                "image": self.spec.image,
+                "network": primary_network,
+                "runtime": self.spec.runtime,
                 "model": self.pi.model,
                 "provider": "redharness" if gateway_enabled else self.pi.provider,
-                "thinking": self.pi.thinking,
                 "tools": self.pi.tools,
-                "gateway_injected": gateway_enabled,
             },
         )
 
-        monitor = BudgetMonitor(event_file, task.budgets, self.trace)
-        timed_out = False
-        started = time.monotonic()
-        offset = 0
-        remainder = ""
-        with raw_path.open("ab") as stdout_handle, stderr_path.open("wb") as stderr_handle:
-            proc = subprocess.Popen(
-                command,
-                cwd=run_dir,
-                env=env,
-                stdout=stdout_handle,
-                stderr=stderr_handle,
-                start_new_session=True,
-            )
-            while proc.poll() is None:
-                offset, remainder = self._poll_output(
-                    raw_path,
-                    offset=offset,
-                    remainder=remainder,
-                    event_file=event_file,
-                    account_model=not gateway_enabled,
+        create = subprocess.run(command, capture_output=True, text=True, check=False)
+        if create.returncode != 0:
+            raise AgentError(f"docker create Pi failed: {create.stderr.strip()}")
+        try:
+            if sidecar_gateway and environment_network and environment_network != gateway_network:
+                connected = subprocess.run(
+                    ["docker", "network", "connect", environment_network, container_name],
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
-                exceeded = monitor.poll()
-                if exceeded:
-                    _terminate_process(proc)
-                    break
-                if time.monotonic() - started > task.budgets.wall_time:
-                    timed_out = True
-                    self.trace.emit(
-                        "budget.exceeded",
-                        data={
-                            "budget": "wall_time",
-                            "limit": task.budgets.wall_time,
-                            "value": time.monotonic() - started,
-                        },
-                    )
-                    _terminate_process(proc)
-                    break
-                time.sleep(0.05)
-            returncode = proc.wait()
+                if connected.returncode != 0:
+                    raise AgentError(f"docker network connect failed: {connected.stderr.strip()}")
 
-        offset, remainder = self._poll_output(
-            raw_path,
-            offset=offset,
-            remainder=remainder,
-            event_file=event_file,
-            account_model=not gateway_enabled,
-        )
-        del offset
-        if remainder.strip():
-            self._translate_line(
-                remainder.strip(),
+            monitor = BudgetMonitor(event_file, task.budgets, self.trace)
+            timed_out = False
+            started = time.monotonic()
+            offset = 0
+            remainder = ""
+            with raw_path.open("ab") as stdout_handle, stderr_path.open("wb") as stderr_handle:
+                proc = subprocess.Popen(
+                    ["docker", "start", "-a", container_name],
+                    stdout=stdout_handle,
+                    stderr=stderr_handle,
+                    start_new_session=True,
+                )
+                while proc.poll() is None:
+                    offset, remainder = self._poll_output(
+                        raw_path,
+                        offset=offset,
+                        remainder=remainder,
+                        event_file=event_file,
+                        account_model=not gateway_enabled,
+                    )
+                    if monitor.poll():
+                        _terminate_process(proc)
+                        subprocess.run(["docker", "kill", container_name], capture_output=True)
+                        break
+                    if time.monotonic() - started > task.budgets.wall_time:
+                        timed_out = True
+                        self.trace.emit("budget.exceeded", data={"budget": "wall_time"})
+                        _terminate_process(proc)
+                        subprocess.run(["docker", "kill", container_name], capture_output=True)
+                        break
+                    time.sleep(0.05)
+                returncode = proc.wait()
+
+            offset, remainder = self._poll_output(
+                raw_path,
+                offset=offset,
+                remainder=remainder,
                 event_file=event_file,
                 account_model=not gateway_enabled,
             )
-        monitor.finish()
-        result = AgentResult(
-            returncode=returncode,
-            timed_out=timed_out,
-            budget_exceeded=monitor.exceeded,
-            stdout=raw_path.read_text(encoding="utf-8", errors="replace"),
-            stderr=stderr_path.read_text(encoding="utf-8", errors="replace"),
-            metrics=monitor.metrics,
-        )
+            del offset
+            if remainder.strip():
+                self._translate_line(
+                    remainder.strip(),
+                    event_file=event_file,
+                    account_model=not gateway_enabled,
+                )
+            monitor.finish()
+            result = AgentResult(
+                returncode=returncode,
+                timed_out=timed_out,
+                budget_exceeded=monitor.exceeded,
+                stdout=raw_path.read_text(encoding="utf-8", errors="replace"),
+                stderr=stderr_path.read_text(encoding="utf-8", errors="replace"),
+                metrics=monitor.metrics,
+            )
+        finally:
+            subprocess.run(
+                ["docker", "rm", "-f", container_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+
         self.trace.emit(
             "agent.finished",
             actor="agent",
@@ -404,6 +453,7 @@ class PiAdapter:
                 "budget_exceeded": result.budget_exceeded,
                 "metrics": result.metrics.as_dict(),
                 "pi_protocol": "json",
+                "containerized": True,
             },
         )
         return result
