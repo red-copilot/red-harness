@@ -66,16 +66,23 @@ world.snapshot.json
 The task objective is seeded as the root Goal when the run starts and updated with the final
 success, score, and run status when execution finishes.
 
-This initial integration deliberately does not extract cognitive state from model prose or tool
-output. A later layer can ingest explicit Agent events or domain adapters without changing the
-world-state storage contract.
+Agents receive a `REDHARNESS_WORLD_INBOX` path. They may append untrusted JSONL submissions
+using the `redharness.world.submit/v1` envelope. The Harness validates each submission and copies
+accepted mutations into the authoritative world event log with the actor forced to `agent`.
+
+Example:
+
+```json
+{"schema_version":"redharness.world.submit/v1","kind":"capability","op":"upsert","object":{"id":"cap-shell","type":"host.shell","subject":"agent","scope":"host-1","attributes":{}}}
+```
+
+Agents never write `world.events.jsonl` or `world.snapshot.json` directly. Invalid inbox lines are
+rejected and summarized in the Harness trace. This keeps the world log replayable even when an
+Agent emits malformed or adversarial state.
+
+Pi receives a concise protocol instruction in its task prompt. Generic CLI/Docker agents can opt
+in simply by detecting `REDHARNESS_WORLD_INBOX`.
 
 ## Planned evolution
 
-1. Agent-facing state-event ingestion protocol.
-2. Context builder over relevant world state.
-3. Resume from world state using a fresh Agent session.
-4. Domain extension packages and skill metadata.
-5. Optional rolling-horizon planner.
-6. Shared blackboard for multi-agent execution.
-7. Derived graph/timeline views and transition-model research.
+1. **Done:** validated Agent-facing state-event ingestion protocol.\n2. Context builder over relevant world state.\n3. Resume from world state using a fresh Agent session.\n4. Domain extension packages and skill metadata.\n5. Optional rolling-horizon planner.\n6. Shared blackboard for multi-agent execution.\n7. Derived graph/timeline views and transition-model research.\n
