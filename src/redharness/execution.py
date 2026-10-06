@@ -12,6 +12,7 @@ class ExecutionCapabilities:
     gvisor_runsc: bool
     firecracker: bool
     kvm: bool
+    pi: bool
 
     @classmethod
     def detect(cls) -> ExecutionCapabilities:
@@ -20,6 +21,7 @@ class ExecutionCapabilities:
             gvisor_runsc=shutil.which("runsc") is not None,
             firecracker=shutil.which("firecracker") is not None,
             kvm=Path("/dev/kvm").exists(),
+            pi=shutil.which("pi") is not None,
         )
 
     def as_dict(self) -> dict[str, bool]:
@@ -28,6 +30,7 @@ class ExecutionCapabilities:
             "gvisor_runsc": self.gvisor_runsc,
             "firecracker": self.firecracker,
             "kvm": self.kvm,
+            "pi": self.pi,
         }
 
 
@@ -75,7 +78,7 @@ class FirecrackerProfile:
 class FirecrackerBackend:
     """Firecracker host contract.
 
-    v0.6 intentionally exposes capability/config validation without pretending CI has
+    v0.7 intentionally exposes capability/config validation without pretending CI has
     KVM. VM lifecycle wiring will use this contract once a KVM-enabled worker exists.
     """
 
