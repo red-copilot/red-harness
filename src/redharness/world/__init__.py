@@ -15,7 +15,8 @@ from .models import (
 )
 from .protocol import IngestReport, WorldSubmission, ingest_world_inbox, write_submission
 from .reducer import WorldReducer
-from .store import WorldStore
+from .repository import WorldRepository
+from .store import FileWorldRepository, WorldStore
 
 __all__ = [
     "ActionRecord",
@@ -24,6 +25,7 @@ __all__ = [
     "Constraint",
     "Entity",
     "Failure",
+    "FileWorldRepository",
     "Goal",
     "Hypothesis",
     "IngestReport",
@@ -32,6 +34,7 @@ __all__ = [
     "WorldContextBuilder",
     "WorldEvent",
     "WorldReducer",
+    "WorldRepository",
     "WorldSnapshot",
     "WorldStore",
     "WorldSubmission",
