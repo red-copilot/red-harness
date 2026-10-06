@@ -147,3 +147,25 @@ a DAG.
 
 These fields are intentionally generic: credentials, sessions, cloud permissions, service
 observations, exploit capabilities, and other domain extensions may all become stale over time.
+
+
+## Retrieval and context compaction
+
+`WorldContextBuilder` no longer treats the full snapshot as the prompt contract. It uses a
+deterministic `WorldRetriever` to rank currently valid records against the active objective.
+
+The first implementation intentionally avoids embeddings. Ranking combines:
+
+- record-kind priority;
+- lexical overlap with the current objective;
+- hypothesis/observation confidence when available;
+- current status;
+- recency among timestamped records.
+
+Each record kind has a bounded Top-K limit, and the final context has a character budget. Truncation
+happens on complete record boundaries rather than in the middle of serialized state. This keeps the
+retrieval policy reproducible while leaving the retrieval interface replaceable by semantic or
+learned retrieval later.
+
+World State remains durable memory. `progress.json` is separate solver working state and should not
+be treated as ground truth about the target.
