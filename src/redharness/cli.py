@@ -120,6 +120,10 @@ def run(
     ),
     input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
     output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
+    resume_world: Annotated[
+        Path | None,
+        typer.Option("--resume-world", exists=True, dir_okay=False),
+    ] = None,
     allow_host_agent: Annotated[
         bool,
         typer.Option(
@@ -152,6 +156,7 @@ def run(
             allow_host_agent=allow_host_agent,
             seed=seed + index,
             gateway_config=gateway_config,
+            resume_world_events=resume_world,
         )
         for index in range(repeat)
     ]
