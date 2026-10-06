@@ -23,7 +23,7 @@ class UsageMetrics:
 
 
 class BudgetMonitor:
-    """Tail agent telemetry and enforce declared run budgets."""
+    """Tail agent/gateway telemetry and enforce declared run budgets."""
 
     def __init__(
         self,
@@ -92,16 +92,18 @@ class BudgetMonitor:
         self._check()
 
     def _account(self, event_type: str, data: dict[str, Any]) -> None:
-        if event_type == "model.usage":
+        if event_type == "model.request":
+            self.metrics.model_calls += int(data.get("count", 1))
+        elif event_type == "model.usage":
             input_tokens = int(data.get("input_tokens", 0))
             output_tokens = int(data.get("output_tokens", 0))
             total_tokens = int(data.get("total_tokens", input_tokens + output_tokens))
             self.metrics.input_tokens += input_tokens
             self.metrics.output_tokens += output_tokens
             self.metrics.total_tokens += total_tokens
-            self.metrics.model_calls += int(data.get("model_calls", 1))
+            self.metrics.model_calls += int(data.get("model_calls", 0))
             self.metrics.cost_usd += float(data.get("cost_usd", 0.0))
-        elif event_type == "tool.call":
+        elif event_type in {"tool.call", "tool.denied"}:
             self.metrics.tool_calls += int(data.get("count", 1))
 
     def _check(self) -> None:
