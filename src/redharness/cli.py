@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from pydantic import ValidationError
@@ -17,11 +18,13 @@ app = typer.Typer(
 
 
 @app.command()
-def validate(task: Path = typer.Argument(..., exists=True, dir_okay=False)) -> None:
+def validate(
+    task: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+) -> None:
     """Validate a task contract."""
     try:
         spec = load_task(task)
-    except (ValidationError, ValueError) as exc:
+    except (ValidationError, ValueError, TypeError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(f"valid: {spec.id} ({spec.api_version})")
@@ -29,14 +32,16 @@ def validate(task: Path = typer.Argument(..., exists=True, dir_okay=False)) -> N
 
 @app.command()
 def run(
-    task: Path = typer.Argument(..., exists=True, dir_okay=False),
-    agent: Path = typer.Option(..., "--agent", exists=True, dir_okay=False),
-    runs_root: Path = typer.Option(Path(".redharness/runs"), "--runs-root"),
-    allow_host_agent: bool = typer.Option(
-        False,
-        "--allow-host-agent",
-        help="Allow trusted CLI agent command to execute on the host.",
-    ),
+    task: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
+    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".redharness/runs"),
+    allow_host_agent: Annotated[
+        bool,
+        typer.Option(
+            "--allow-host-agent",
+            help="Allow trusted CLI agent command to execute on the host.",
+        ),
+    ] = False,
 ) -> None:
     """Run one task with one agent."""
     task_spec = load_task(task)
@@ -54,7 +59,9 @@ def run(
 
 
 @app.command()
-def report(run_dir: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
+def report(
+    run_dir: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
+) -> None:
     """Print a saved result bundle."""
     result_path = run_dir / "result.json"
     if not result_path.is_file():
