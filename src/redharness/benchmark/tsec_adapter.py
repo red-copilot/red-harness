@@ -47,7 +47,11 @@ class TSecBenchmarkAdapter(BenchmarkAdapter):
                 BenchmarkCase(
                     id=challenge.unique_code,
                     benchmark="tsec",
-                    domain=str(\n                        getattr(challenge, "domain", None)\n                        or getattr(challenge, "category", None)\n                        or "general"\n                    ).lower(),
+                    domain=str(
+                        getattr(challenge, "domain", None)
+                        or getattr(challenge, "category", None)
+                        or "general"
+                    ).lower(),
                     difficulty=getattr(challenge, "difficulty", None),
                     metadata={
                         "level": getattr(challenge, "level", None),
