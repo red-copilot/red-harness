@@ -71,11 +71,13 @@ class Worker:
         worker_id: str | None = None,
         lease_seconds: int = 60,
         allow_host_jobs: bool = False,
+        workspace_root: str | Path = ".",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
         self.lease_seconds = lease_seconds
         self.allow_host_jobs = allow_host_jobs
+        self.workspace_root = Path(workspace_root).resolve()
         headers = {"authorization": f"Bearer {token}"} if token else {}
         self.client = httpx.Client(
             base_url=control_url.rstrip("/"),
@@ -95,14 +97,17 @@ class Worker:
         response.raise_for_status()
         return response.json()
 
-    @staticmethod
-    def _gateway_config(payload: JobPayload) -> GatewayConfig | None:
+    def _path(self, raw: str) -> Path:
+        path = Path(raw)
+        return path.resolve() if path.is_absolute() else (self.workspace_root / path).resolve()
+
+    def _gateway_config(self, payload: JobPayload) -> GatewayConfig | None:
         spec = payload.gateway
         if not spec.enabled:
             return None
         model_key = os.environ.get(spec.model_api_key_env)
         return GatewayConfig(
-            policy_path=Path(spec.policy_path).resolve() if spec.policy_path else None,
+            policy_path=self._path(spec.policy_path) if spec.policy_path else None,
             model_upstream=spec.model_upstream,
             model_api_key=model_key,
             input_price_per_million_usd=spec.input_price_per_million_usd,
@@ -115,9 +120,10 @@ class Worker:
     def _execute(self, payload: JobPayload) -> dict[str, Any]:
         if payload.allow_host_agent and not self.allow_host_jobs:
             raise WorkerError("job requested host agent execution but worker disallows host jobs")
-        task_path = Path(payload.task_path).resolve()
-        agent_path = Path(payload.agent_path).resolve()
-        return Orchestrator(payload.runs_root).run(
+        task_path = self._path(payload.task_path)
+        agent_path = self._path(payload.agent_path)
+        runs_root = self._path(payload.runs_root)
+        return Orchestrator(runs_root).run(
             task=load_task(task_path),
             task_path=task_path,
             agent=load_agent(agent_path),
