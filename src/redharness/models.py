@@ -31,8 +31,18 @@ class EnvironmentSpec(BaseModel):
 
 
 class VerificationSpec(BaseModel):
-    type: Literal["python"] = "python"
+    type: Literal["python", "docker"] = "python"
     entrypoint: str = "verifier.py"
+    image: str | None = None
+    command: list[str] = Field(default_factory=list)
+    network: Literal["none", "environment"] = "none"
+    timeout: int = Field(default=120, ge=1, le=3600)
+
+    @model_validator(mode="after")
+    def validate_verifier(self) -> VerificationSpec:
+        if self.type == "docker" and not self.image:
+            raise ValueError("docker verifier requires image")
+        return self
 
 
 class TaskSpec(BaseModel):
