@@ -44,10 +44,12 @@ class WorldStore:
     def append(self, event: WorldEvent) -> WorldSnapshot:
         line = event.model_dump_json()
         with self._lock:
+            candidate = self._snapshot.model_copy(deep=True)
+            self._reducer.apply(candidate, event)
             with self.event_path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
                 handle.flush()
-            self._reducer.apply(self._snapshot, event)
+            self._snapshot = candidate
             self._write_snapshot()
             return self.snapshot
 
