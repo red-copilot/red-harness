@@ -1,38 +1,39 @@
 # Pi integration
 
-Red Harness v0.7 includes a first-class adapter for [Pi](https://pi.dev/docs/latest).
+Red Harness v0.8 runs Pi inside a dedicated Kali Rolling Docker image and consumes Pi's JSON protocol for model/tool telemetry.
 
-Pi is executed in JSON mode so Harness can consume its structured session, model, and tool events. The adapter currently uses the Pi CLI process boundary rather than the TypeScript SDK or long-lived RPC mode.
-
-## Install Pi
-
-Pi 1.0.4 is the version pinned by the Red Harness CI workflow.
+## Build the Pi/Kali image
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.0.4
-pi --version
+docker build -t redharness/pi-kali:local docker/pi-kali
 ```
 
-Pi requires Node.js 22.19 or newer.
+The image contains:
 
-## Direct provider mode
+- `kalilinux/kali-rolling`
+- `kali-linux-core`
+- common network, web, credential, packet, and binary-analysis tools
+- Python 3
+- Node.js
+- Pi 1.0.4
 
-Example `agents/pi.yaml`:
+## Agent contract
 
 ```yaml
 apiVersion: redharness/v1
 id: pi-openai-sol
 type: pi
-
-env: {}
+image: redharness/pi-kali:local
+network: environment
 
 pi:
   provider: openai
   model: gpt-5.6-sol
   thinking: medium
   tools: [read, bash, edit, write]
+  env_passthrough: [OPENAI_API_KEY]
+  cap_add: [NET_RAW]
 
-  # Deterministic evaluation defaults.
   approve_project: false
   context_files: false
   extensions: false
@@ -43,56 +44,37 @@ pi:
   offline: true
 ```
 
-Provide the provider credential through the environment, for example:
+For VPN-backed benchmark targets on Linux workers, `network: host` is supported. It lets the Pi/Kali container share the worker's VPN routes. `network: none` disables networking.
+
+## Direct-provider mode
 
 ```bash
 export OPENAI_API_KEY="..."
 
 redharness run benchmark/task.yaml \
-  --agent agents/pi.yaml \
-  --allow-host-agent
+  --agent agents/examples/pi.yaml
 ```
 
-The Pi adapter intentionally uses a per-run `PI_CODING_AGENT_DIR` and an ephemeral session. Stored credentials from the user's normal Pi directory are not imported into the evaluation by default.
+Only environment variables explicitly named by `pi.env_passthrough` are copied into the container.
 
-## Harness model Gateway mode
+## Harness model Gateway
 
-Pi can also be forced through the Red Harness model proxy:
+Pi can also use the Red Harness model proxy. In host-Gateway mode the container receives a one-time Gateway token. In sidecar mode the Pi container joins the private Gateway Docker network.
 
 ```bash
 export REDHARNESS_MODEL_API_KEY="real-provider-key"
 
 redharness run benchmark/task.yaml \
-  --agent agents/pi.yaml \
-  --allow-host-agent \
+  --agent agents/examples/pi.yaml \
   --gateway \
-  --model-upstream https://provider.example/v1 \
-  --input-price-per-million 2.0 \
-  --output-price-per-million 10.0
+  --model-upstream https://provider.example/v1
 ```
 
-For each run Harness writes an isolated Pi `models.json` containing a `redharness` provider:
+For each run Harness writes a private `models.json` under the run directory. The upstream provider credential remains in Harness/Gateway and is not copied into the Pi container.
 
-```json
-{
-  "providers": {
-    "redharness": {
-      "baseUrl": "http://127.0.0.1:<port>/v1",
-      "api": "openai-completions",
-      "apiKey": "$REDHARNESS_GATEWAY_TOKEN",
-      "models": [{"id": "gpt-5.6-sol"}]
-    }
-  }
-}
-```
-
-The Pi process sees only the one-time `REDHARNESS_GATEWAY_TOKEN`. The upstream provider credential remains inside the Harness Gateway process.
-
-The host Pi adapter supports the host Gateway mode. Docker sidecar Gateway mode is intentionally rejected for `type: pi` because the host Pi process is not attached to the sidecar's private Docker network.
+`network: host` and sidecar Gateway mode are intentionally incompatible because sidecar mode requires the Agent to join the Gateway's private Docker network.
 
 ## Event normalization
-
-Pi JSON events are normalized into the existing Harness trace and budget protocol.
 
 | Pi JSON event | Red Harness event |
 | --- | --- |
@@ -103,15 +85,25 @@ Pi JSON events are normalized into the existing Harness trace and budget protoco
 | `session` | `pi.session` |
 | `agent_settled` | `pi.agent_settled` |
 
-Pi usage fields are preserved where possible, including input/output/total tokens, cache read/write tokens, reasoning tokens, and total model cost.
+Pi usage contributes input/output/total tokens and model cost to the normal Harness budgets. When the Harness model Gateway is enabled, Gateway model usage is authoritative so model usage is not double-counted.
 
-When the Harness model Gateway is enabled, model usage comes from the Gateway rather than being counted again from Pi's JSON stream. Pi tool events are still normalized because Pi's built-in tools execute inside the Pi process.
+Raw Pi JSONL is retained in `agent.stdout.log`.
 
-The raw Pi JSONL stream remains available as `agent.stdout.log` in the run bundle.
+## Container security defaults
 
-## Evaluation safety defaults
+Harness creates the Pi container with:
 
-The first-class adapter starts Pi with non-interactive evaluation defaults equivalent to:
+- read-only root filesystem
+- all Linux capabilities dropped, then only `pi.cap_add` restored
+- `no-new-privileges`
+- CPU, RAM, PID, and tmpfs limits
+- task mounted read-only
+- run directory mounted read/write
+- no Docker socket
+- explicit network selection
+- per-run Pi config/session directories
+
+Pi is also started with deterministic non-interactive defaults:
 
 ```text
 --mode json
@@ -126,25 +118,6 @@ The first-class adapter starts Pi with non-interactive evaluation defaults equiv
 --offline
 ```
 
-The selected built-in tools are supplied explicitly with `--tools`.
+## TSec Benchmark
 
-These defaults prevent benchmark directories from silently loading project Pi extensions, skills, MCP configuration, prompt templates, or context files. Individual fields can be enabled explicitly in the agent contract when a benchmark intentionally depends on them.
-
-## Security boundary
-
-Pi's own project trust is not a sandbox. Its built-in tools run with the permissions of the Pi process. For that reason `type: pi` currently requires `--allow-host-agent`, just like the generic trusted CLI adapter.
-
-For hostile or public benchmark workloads, use a containerized agent boundary. A dedicated containerized Pi adapter is a later hardening step; using the host Pi adapter is intended for trusted development and controlled evaluation workers.
-
-## Why JSON mode instead of RPC
-
-JSON mode is currently the best fit for one Harness attempt:
-
-- one process per attempt
-- deterministic completion after `agent_settled`
-- strict JSONL framing
-- structured model usage and cost
-- structured tool lifecycle
-- no long-lived session state to leak across benchmark attempts
-
-RPC remains a good future option for warm Pi worker pools where process startup becomes material.
+For TSec Benchmark integration use `agents/examples/pi-tsec.yaml` and see `docs/tsec.md`. The TSec token stays in Harness; it is never copied into the Pi container.
