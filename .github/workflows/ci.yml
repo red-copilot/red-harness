@@ -21,6 +21,11 @@ jobs:
       - run: redharness gateway --help
       - run: redharness run benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml --allow-host-agent --seed 7
       - run: >-
+          redharness suite benchmarks/examples/smoke-suite.yaml
+          --agent agents/examples/demo.yaml
+          --allow-host-agent
+          --workers 2
+      - run: >-
           redharness run benchmarks/examples/hello/task.yaml
           --agent agents/examples/gateway-demo.yaml
           --allow-host-agent
@@ -29,12 +34,21 @@ jobs:
           --seed 11
       - run: docker build -t redharness-gateway-demo:ci agents/examples/docker-gateway
       - run: docker build -t redharness-verifier:ci benchmarks/examples/hello-docker-verifier
+      - run: docker build -f docker/gateway/Dockerfile -t redharness-gateway:ci .
       - run: >-
           redharness run benchmarks/examples/hello/task.yaml
           --agent agents/examples/docker-gateway.yaml
           --gateway
           --gateway-policy examples/gateway-policy.yaml
           --seed 12
+      - run: >-
+          redharness run benchmarks/examples/hello/task.yaml
+          --agent agents/examples/docker-gateway.yaml
+          --gateway
+          --gateway-mode sidecar
+          --gateway-image redharness-gateway:ci
+          --gateway-policy examples/gateway-policy.yaml
+          --seed 14
       - run: >-
           redharness run benchmarks/examples/hello-docker-verifier/task.yaml
           --agent agents/examples/demo.yaml
