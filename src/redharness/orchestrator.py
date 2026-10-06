@@ -7,6 +7,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Callable
 
 from . import __version__
 from .agent import build_agent_adapter
@@ -16,8 +17,7 @@ from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
 from .verifier import run_verifier
-from .world import Goal, WorldContextBuilder, WorldStore, ingest_world_inbox
-
+from .world import (\n    FileWorldRepository,\n    Goal,\n    WorldContextBuilder,\n    WorldRepository,\n    ingest_world_inbox,\n)\n
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -29,8 +29,14 @@ def _new_run_id() -> str:
 
 
 class Orchestrator:
-    def __init__(self, runs_root: str | Path = ".redharness/runs") -> None:
+    def __init__(
+        self,
+        runs_root: str | Path = ".redharness/runs",
+        *,
+        world_repository_factory: Callable[[Path], WorldRepository] = FileWorldRepository,
+    ) -> None:
         self.runs_root = Path(runs_root)
+        self.world_repository_factory = world_repository_factory
 
     def run(
         self,
@@ -55,7 +61,7 @@ class Orchestrator:
             if not source.is_file():
                 raise FileNotFoundError(f"resume world event log not found: {source}")
             shutil.copyfile(source, world_event_path)
-        world = WorldStore(world_event_path)
+        world = self.world_repository_factory(world_event_path)
         root_goal = Goal(
             id=f"goal:{task.id}:objective",
             description=task.objective.description,
