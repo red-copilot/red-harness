@@ -297,6 +297,7 @@ def serve(
     queue_db: Annotated[Path, typer.Option("--queue-db")] = Path(".redharness/control.db"),
     runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".redharness/runs"),
     benchmarks_root: Annotated[Path, typer.Option("--benchmarks-root")] = Path("benchmarks"),
+    skills_root: Annotated[Path, typer.Option("--skills-root")] = Path("skills"),
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8780,
     token_env: Annotated[str, typer.Option("--token-env")] = "REDHARNESS_CONTROL_TOKEN",
@@ -307,6 +308,7 @@ def serve(
         queue_db=queue_db.resolve(),
         runs_root=runs_root.resolve(),
         benchmarks_root=benchmarks_root.resolve(),
+        skills_root=skills_root.resolve(),
         token=token,
     )
     uvicorn.run(api, host=host, port=port, access_log=False)
