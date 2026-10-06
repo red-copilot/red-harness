@@ -232,7 +232,7 @@ class PiAdapter:
             "Read $REDHARNESS_WORLD_CONTEXT before acting. When you discover durable, task-relevant "
             "state, append one JSON object per line to "
             "$REDHARNESS_WORLD_INBOX. Use schema_version redharness.world.submit/v1 and one of "
-            "entity, relation, observation, artifact, capability, hypothesis, goal, or failure. "
+            "entity, relation, observation, artifact, capability, hypothesis, goal, action, constraint, or failure. "
             "Prefer high-value state changes over verbose narration. Do not write to "
             "world.events.jsonl or world.snapshot.json directly."
         )
