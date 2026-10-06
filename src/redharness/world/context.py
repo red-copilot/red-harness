@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from .models import WorldSnapshot
 
@@ -18,6 +19,20 @@ class WorldContextBuilder:
         self.max_observations = max_observations
         self.max_failures = max_failures
         self.max_relations = max_relations
+
+    @staticmethod
+    def _state_meta(item: Any) -> dict:
+        return item.model_dump(
+            mode="json",
+            include={
+                "provenance",
+                "observed_at",
+                "valid_from",
+                "expires_at",
+                "supersedes",
+            },
+            exclude_none=True,
+        )
 
     @staticmethod
     def _line(prefix: str, object_id: str, type_name: str, payload: dict) -> str:
@@ -48,6 +63,7 @@ class WorldContextBuilder:
                             "priority": goal.priority,
                             "parent_id": goal.parent_id,
                             **goal.attributes,
+                            **self._state_meta(goal),
                         },
                     )
                 )
@@ -63,7 +79,7 @@ class WorldContextBuilder:
                         "entity",
                         entity.id,
                         entity.type,
-                        entity.attributes,
+                        {**entity.attributes, **self._state_meta(entity)},
                     )
                 )
         else:
@@ -82,6 +98,7 @@ class WorldContextBuilder:
                             "subject": capability.subject,
                             "scope": capability.scope,
                             **capability.attributes,
+                            **self._state_meta(capability),
                         },
                     )
                 )
@@ -102,6 +119,7 @@ class WorldContextBuilder:
                             "statement": hypothesis.statement,
                             "confidence": hypothesis.confidence,
                             **hypothesis.attributes,
+                            **self._state_meta(hypothesis),
                         },
                     )
                 )
@@ -117,7 +135,7 @@ class WorldContextBuilder:
                         "artifact",
                         artifact.id,
                         artifact.type,
-                        {"uri": artifact.uri, **artifact.attributes},
+                        {"uri": artifact.uri, **artifact.attributes, **self._state_meta(artifact)},
                     )
                 )
         else:
@@ -137,6 +155,7 @@ class WorldContextBuilder:
                             "confidence": observation.confidence,
                             "source": observation.source,
                             **observation.content,
+                            **self._state_meta(observation),
                         },
                     )
                 )
@@ -152,7 +171,7 @@ class WorldContextBuilder:
                         action.status,
                         action.id,
                         action.type,
-                        {"target": action.target, **action.attributes},
+                        {"target": action.target, **action.attributes, **self._state_meta(action)},
                     )
                 )
         else:
@@ -171,6 +190,7 @@ class WorldContextBuilder:
                             "description": constraint.description,
                             "scope": constraint.scope,
                             **constraint.attributes,
+                            **self._state_meta(constraint),
                         },
                     )
                 )
@@ -192,6 +212,7 @@ class WorldContextBuilder:
                             "action_id": failure.action_id,
                             "recoverable": failure.recoverable,
                             **failure.attributes,
+                            **self._state_meta(failure),
                         },
                     )
                 )
@@ -212,6 +233,7 @@ class WorldContextBuilder:
                             "source": relation.source,
                             "target": relation.target,
                             **relation.attributes,
+                            **self._state_meta(relation),
                         },
                     )
                 )
