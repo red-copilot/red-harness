@@ -11,6 +11,7 @@ from .execution import ExecutionCapabilities
 from .otel import trace_to_otlp_json
 from .queue import JobPayload, SQLiteQueue
 from .registry import scan_benchmarks
+from .skills import scan_skills
 
 
 class ClaimRequest(BaseModel):
@@ -57,12 +58,14 @@ def create_control_plane(
     queue_db: Path,
     runs_root: Path,
     benchmarks_root: Path | None = None,
+    skills_root: Path | None = None,
     token: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Red Harness Control Plane", version="0.6.0")
     queue = SQLiteQueue(queue_db)
     run_root = runs_root.resolve()
     benchmark_root = benchmarks_root.resolve() if benchmarks_root else None
+    skill_root = skills_root.resolve() if skills_root else None
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -79,6 +82,13 @@ def create_control_plane(
         if benchmark_root is None:
             return []
         return scan_benchmarks(benchmark_root)
+
+    @app.get("/v1/skills")
+    async def skills(request: Request) -> list[dict]:
+        _authorize(request, token)
+        if skill_root is None:
+            return []
+        return scan_skills(skill_root)
 
     @app.post("/v1/jobs")
     async def submit_job(request: Request, payload: JobPayload) -> dict:
