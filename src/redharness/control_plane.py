@@ -1,93 +1,15 @@
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from fastapi import FastAPI
 
-from .coordination import CoordinationStore, WorkItemSpec
-from .execution import ExecutionCapabilities
-from .otel import trace_to_otlp_json
-from .planner import HeuristicSkillPlanner
-from .queue import JobPayload, SQLiteQueue
-from .registry import scan_benchmarks
-from .skills import load_skills, scan_skills
-from .world import WorldSnapshot
-
-
-class ClaimRequest(BaseModel):
-    worker_id: str = Field(min_length=1, max_length=200)
-    lease_seconds: int = Field(default=60, ge=10, le=3600)
-
-
-class LeaseRequest(BaseModel):
-    worker_id: str = Field(min_length=1, max_length=200)
-    lease_seconds: int = Field(default=60, ge=10, le=3600)
-
-
-class CompleteRequest(BaseModel):
-    worker_id: str = Field(min_length=1, max_length=200)
-    result: dict
-
-
-
-
-
-
-class PublishPlanRequest(BaseModel):
-    skill_id: str = Field(min_length=1)
-    description: str = Field(min_length=1)
-    goal_id: str | None = None
-    priority: float = Field(default=0.5, ge=0.0, le=1.0)
-    metadata: dict = Field(default_factory=dict)
-
-
-class WorkClaimRequest(BaseModel):
-    run_id: str = Field(min_length=1, max_length=300)
-    agent_id: str = Field(min_length=1, max_length=200)
-    lease_seconds: int = Field(default=60, ge=10, le=3600)
-
-
-class WorkLeaseRequest(BaseModel):
-    agent_id: str = Field(min_length=1, max_length=200)
-    lease_seconds: int = Field(default=60, ge=10, le=3600)
-
-
-class WorkCompleteRequest(BaseModel):
-    agent_id: str = Field(min_length=1, max_length=200)
-    result: dict = Field(default_factory=dict)
-
-
-class WorkFailRequest(BaseModel):
-    agent_id: str = Field(min_length=1, max_length=200)
-    error: str = Field(min_length=1, max_length=4000)
-    requeue: bool = False
-
-
-class FailRequest(BaseModel):
-    worker_id: str = Field(min_length=1, max_length=200)
-    error: str = Field(min_length=1, max_length=4000)
-
-
-def _authorize(request: Request, token: str | None) -> None:
-    if token is None:
-        return
-    if request.headers.get("authorization") != f"Bearer {token}":
-        raise HTTPException(status_code=401, detail="invalid control-plane token")
-
-
-def _run_dir(runs_root: Path, run_id: str) -> Path:
-    if not re.fullmatch(r"run_[A-Za-z0-9_\-]+", run_id):
-        raise HTTPException(status_code=400, detail="invalid run id")
-    candidate = (runs_root / run_id).resolve()
-    root = runs_root.resolve()
-    if candidate.parent != root:
-        raise HTTPException(status_code=400, detail="invalid run id")
-    if not candidate.is_dir():
-        raise HTTPException(status_code=404, detail="run not found")
-    return candidate
+from .api.coordination import build_coordination_router
+from .api.jobs import build_jobs_router
+from .api.registry import build_registry_router
+from .api.runs import build_runs_router
+from .coordination import CoordinationStore
+from .queue import SQLiteQueue
 
 
 def create_control_plane(
@@ -99,6 +21,7 @@ def create_control_plane(
     token: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Red Harness Control Plane", version="0.6.0")
+
     queue = SQLiteQueue(queue_db)
     coordination = CoordinationStore(queue_db.with_name("coordination.db"))
     run_root = runs_root.resolve()
@@ -109,272 +32,27 @@ def create_control_plane(
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/v1/capabilities")
-    async def capabilities(request: Request) -> dict[str, bool]:
-        _authorize(request, token)
-        return ExecutionCapabilities.detect().as_dict()
-
-    @app.get("/v1/benchmarks")
-    async def benchmarks(request: Request) -> list[dict]:
-        _authorize(request, token)
-        if benchmark_root is None:
-            return []
-        return scan_benchmarks(benchmark_root)
-
-    @app.get("/v1/skills")
-    async def skills(request: Request) -> list[dict]:
-        _authorize(request, token)
-        if skill_root is None:
-            return []
-        return scan_skills(skill_root)
-
-    @app.post("/v1/jobs")
-    async def submit_job(request: Request, payload: JobPayload) -> dict:
-        _authorize(request, token)
-        return queue.submit(payload)
-
-    @app.get("/v1/jobs")
-    async def list_jobs(
-        request: Request,
-        limit: int = Query(default=100, ge=1, le=1000),
-    ) -> list[dict]:
-        _authorize(request, token)
-        return queue.list(limit=limit)
-
-    @app.get("/v1/jobs/{job_id}")
-    async def get_job(request: Request, job_id: str) -> dict:
-        _authorize(request, token)
-        job = queue.get(job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="job not found")
-        return job
-
-    @app.post("/v1/jobs/claim")
-    async def claim_job(request: Request, body: ClaimRequest) -> dict | None:
-        _authorize(request, token)
-        return queue.claim(body.worker_id, lease_seconds=body.lease_seconds)
-
-    @app.post("/v1/jobs/{job_id}/heartbeat")
-    async def heartbeat(request: Request, job_id: str, body: LeaseRequest) -> dict[str, bool]:
-        _authorize(request, token)
-        if not queue.heartbeat(job_id, body.worker_id, lease_seconds=body.lease_seconds):
-            raise HTTPException(status_code=409, detail="lease is not owned by worker")
-        return {"ok": True}
-
-    @app.post("/v1/jobs/{job_id}/complete")
-    async def complete(request: Request, job_id: str, body: CompleteRequest) -> dict[str, bool]:
-        _authorize(request, token)
-        if not queue.complete(job_id, body.worker_id, body.result):
-            raise HTTPException(status_code=409, detail="lease is not owned by worker")
-        return {"ok": True}
-
-    @app.post("/v1/jobs/{job_id}/fail")
-    async def fail(request: Request, job_id: str, body: FailRequest) -> dict[str, bool]:
-        _authorize(request, token)
-        if not queue.fail(job_id, body.worker_id, body.error):
-            raise HTTPException(status_code=409, detail="lease is not owned by worker")
-        return {"ok": True}
-
-    @app.post("/v1/runs/{run_id}/plan/publish")
-    async def publish_plan_candidate(
-        request: Request,
-        run_id: str,
-        body: PublishPlanRequest,
-    ) -> dict:
-        _authorize(request, token)
-        _run_dir(run_root, run_id)
-        if skill_root is None:
-            raise HTTPException(status_code=409, detail="skill registry is not configured")
-        skills_by_id = {skill.id: skill for skill in load_skills(skill_root)}
-        skill = skills_by_id.get(body.skill_id)
-        if skill is None:
-            raise HTTPException(status_code=404, detail="skill not found")
-        return coordination.submit(
-            WorkItemSpec(
-                run_id=run_id,
-                goal_id=body.goal_id,
-                skill_id=skill.id,
-                description=body.description,
-                priority=body.priority,
-                metadata={
-                    "skill_domain": skill.domain,
-                    "skill_tags": skill.tags,
-                    **body.metadata,
-                },
-            )
+    app.include_router(build_jobs_router(queue, token))
+    app.include_router(
+        build_registry_router(
+            benchmark_root=benchmark_root,
+            skill_root=skill_root,
+            token=token,
         )
-
-    @app.post("/v1/work")
-    async def submit_work(request: Request, body: WorkItemSpec) -> dict:
-        _authorize(request, token)
-        return coordination.submit(body)
-
-    @app.get("/v1/work")
-    async def list_work(
-        request: Request,
-        run_id: str | None = None,
-        state: str | None = None,
-        limit: int = Query(default=100, ge=1, le=1000),
-    ) -> list[dict]:
-        _authorize(request, token)
-        if state not in {None, "queued", "running", "completed", "failed"}:
-            raise HTTPException(status_code=400, detail="invalid work state")
-        return coordination.list(run_id=run_id, state=state, limit=limit)
-
-    @app.post("/v1/work/claim")
-    async def claim_work(request: Request, body: WorkClaimRequest) -> dict | None:
-        _authorize(request, token)
-        return coordination.claim(
-            body.run_id,
-            body.agent_id,
-            lease_seconds=body.lease_seconds,
+    )
+    app.include_router(
+        build_runs_router(
+            run_root=run_root,
+            skill_root=skill_root,
+            token=token,
         )
-
-    @app.post("/v1/work/{work_id}/heartbeat")
-    async def heartbeat_work(
-        request: Request,
-        work_id: str,
-        body: WorkLeaseRequest,
-    ) -> dict[str, bool]:
-        _authorize(request, token)
-        if not coordination.heartbeat(
-            work_id,
-            body.agent_id,
-            lease_seconds=body.lease_seconds,
-        ):
-            raise HTTPException(status_code=409, detail="work lease is not owned by agent")
-        return {"ok": True}
-
-    @app.post("/v1/work/{work_id}/complete")
-    async def complete_work(
-        request: Request,
-        work_id: str,
-        body: WorkCompleteRequest,
-    ) -> dict[str, bool]:
-        _authorize(request, token)
-        if not coordination.complete(work_id, body.agent_id, body.result):
-            raise HTTPException(status_code=409, detail="work lease is not owned by agent")
-        return {"ok": True}
-
-    @app.post("/v1/work/{work_id}/fail")
-    async def fail_work(
-        request: Request,
-        work_id: str,
-        body: WorkFailRequest,
-    ) -> dict[str, bool]:
-        _authorize(request, token)
-        if not coordination.fail(
-            work_id,
-            body.agent_id,
-            body.error,
-            requeue=body.requeue,
-        ):
-            raise HTTPException(status_code=409, detail="work lease is not owned by agent")
-        return {"ok": True}
-
-    @app.post("/v1/work/{work_id}/release")
-    async def release_work(
-        request: Request,
-        work_id: str,
-        body: WorkLeaseRequest,
-    ) -> dict[str, bool]:
-        _authorize(request, token)
-        if not coordination.release(work_id, body.agent_id):
-            raise HTTPException(status_code=409, detail="work lease is not owned by agent")
-        return {"ok": True}
-
-    @app.get("/v1/leaderboard")
-    async def leaderboard(request: Request) -> list[dict]:
-        _authorize(request, token)
-        return queue.leaderboard()
-
-    @app.get("/v1/runs/{run_id}")
-    async def run_result(request: Request, run_id: str) -> dict:
-        _authorize(request, token)
-        directory = _run_dir(run_root, run_id)
-        result_path = directory / "result.json"
-        if not result_path.is_file():
-            raise HTTPException(status_code=404, detail="result not found")
-        return json.loads(result_path.read_text(encoding="utf-8"))
-
-    @app.get("/v1/runs/{run_id}/trace")
-    async def run_trace(
-        request: Request,
-        run_id: str,
-        limit: int = Query(default=1000, ge=1, le=5000),
-    ) -> list[dict]:
-        _authorize(request, token)
-        directory = _run_dir(run_root, run_id)
-        trace_path = directory / "trace.jsonl"
-        if not trace_path.is_file():
-            raise HTTPException(status_code=404, detail="trace not found")
-        events: list[dict] = []
-        with trace_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    events.append(json.loads(line))
-                    if len(events) >= limit:
-                        break
-        return events
-
-    @app.get("/v1/runs/{run_id}/world")
-    async def run_world(request: Request, run_id: str) -> dict:
-        _authorize(request, token)
-        directory = _run_dir(run_root, run_id)
-        world_path = directory / "world.snapshot.json"
-        if not world_path.is_file():
-            raise HTTPException(status_code=404, detail="world snapshot not found")
-        return json.loads(world_path.read_text(encoding="utf-8"))
-
-    @app.get("/v1/runs/{run_id}/world/events")
-    async def run_world_events(
-        request: Request,
-        run_id: str,
-        limit: int = Query(default=1000, ge=1, le=5000),
-    ) -> list[dict]:
-        _authorize(request, token)
-        directory = _run_dir(run_root, run_id)
-        event_path = directory / "world.events.jsonl"
-        if not event_path.is_file():
-            raise HTTPException(status_code=404, detail="world event log not found")
-        events: list[dict] = []
-        with event_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    events.append(json.loads(line))
-                    if len(events) >= limit:
-                        break
-        return events
-
-    @app.get("/v1/runs/{run_id}/plan")
-    async def run_plan(
-        request: Request,
-        run_id: str,
-        limit: int = Query(default=5, ge=1, le=50),
-    ) -> dict:
-        _authorize(request, token)
-        directory = _run_dir(run_root, run_id)
-        world_path = directory / "world.snapshot.json"
-        if not world_path.is_file():
-            raise HTTPException(status_code=404, detail="world snapshot not found")
-        snapshot = WorldSnapshot.model_validate(
-            json.loads(world_path.read_text(encoding="utf-8"))
+    )
+    app.include_router(
+        build_coordination_router(
+            coordination=coordination,
+            run_root=run_root,
+            skill_root=skill_root,
+            token=token,
         )
-        skills = load_skills(skill_root) if skill_root is not None else []
-        candidates = HeuristicSkillPlanner().propose(snapshot, skills, limit=limit)
-        return {
-            "planner": "heuristic-skill-v1",
-            "world_revision": snapshot.revision,
-            "candidates": [candidate.model_dump() for candidate in candidates],
-        }
-
-    @app.get("/v1/runs/{run_id}/otel")
-    async def run_otel(request: Request, run_id: str) -> dict:
-        _authorize(request, token)
-        directory = _run_dir(run_root, run_id)
-        trace_path = directory / "trace.jsonl"
-        if not trace_path.is_file():
-            raise HTTPException(status_code=404, detail="trace not found")
-        return trace_to_otlp_json(trace_path)
-
+    )
     return app
