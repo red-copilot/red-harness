@@ -23,7 +23,15 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
                 "relations": {},
                 "observations": {},
                 "artifacts": {},
-                "capabilities": {},
+                "capabilities": {
+                    "cap-1": {
+                        "id": "cap-1",
+                        "type": "network.reachability",
+                        "subject": "agent",
+                        "scope": "target",
+                        "attributes": {},
+                    }
+                },
                 "hypotheses": {},
                 "goals": {"goal-1": {"id": "goal-1", "description": "demo"}},
                 "failures": {},
@@ -128,6 +136,10 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     assert world["revision"] == 1
     world_events = client.get("/v1/runs/run_test/world/events", headers=headers).json()
     assert world_events[0]["kind"] == "goal"
+
+    plan = client.get("/v1/runs/run_test/plan", headers=headers).json()
+    assert plan["planner"] == "heuristic-skill-v1"
+    assert plan["candidates"][0]["skill_id"] == "network.service-discovery"
 
     otel = client.get("/v1/runs/run_test/otel", headers=headers).json()
     spans = otel["resourceSpans"][0]["scopeSpans"][0]["spans"]
