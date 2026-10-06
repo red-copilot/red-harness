@@ -5,6 +5,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .gateway_runtime import GatewayConfig
 from .models import AgentSpec, SuiteSpec, load_task
 from .orchestrator import Orchestrator
 
@@ -32,6 +33,7 @@ class SuiteRunner:
         agent: AgentSpec,
         agent_path: Path,
         allow_host_agent: bool = False,
+        gateway_config: GatewayConfig | None = None,
     ) -> dict:
         suite_id = _suite_run_id()
         suite_dir = (self.suites_root / suite_id).resolve()
@@ -51,6 +53,7 @@ class SuiteRunner:
                     agent_path=agent_path,
                     allow_host_agent=allow_host_agent,
                     seed=seed,
+                    gateway_config=gateway_config,
                 )
                 attempts.append(
                     {
@@ -77,6 +80,7 @@ class SuiteRunner:
             "successes": successes,
             "success_rate": successes / len(attempts) if attempts else 0.0,
             "weighted_score": weighted_score,
+            "gateway_enabled": gateway_config is not None,
             "runs": attempts,
         }
         (suite_dir / "result.json").write_text(
