@@ -1,0 +1,15 @@
+apiVersion: redharness/v1
+id: hello-001
+name: Harness smoke test
+category: general
+difficulty: trivial
+tags: [smoke]
+objective:
+  description: Write the exact text "red-harness-ok" to proof.txt in REDHARNESS_RUN_DIR.
+environment:
+  provider: none
+budgets:
+  wall_time: 30
+verification:
+  type: python
+  entrypoint: verifier.py
