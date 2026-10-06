@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from .models import (
+    ActionRecord,
     Artifact,
     Capability,
+    Constraint,
     Entity,
     Failure,
     Goal,
@@ -21,6 +23,8 @@ _KIND_MAP = {
     "capability": ("capabilities", Capability),
     "hypothesis": ("hypotheses", Hypothesis),
     "goal": ("goals", Goal),
+    "action": ("actions", ActionRecord),
+    "constraint": ("constraints", Constraint),
     "failure": ("failures", Failure),
 }
 
