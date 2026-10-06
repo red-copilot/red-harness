@@ -19,6 +19,9 @@ jobs:
       - run: redharness validate benchmarks/examples/hello-docker-verifier/task.yaml
       - run: redharness validate-suite benchmarks/examples/smoke-suite.yaml
       - run: redharness gateway --help
+      - run: redharness serve --help
+      - run: redharness worker --help
+      - run: redharness capabilities
       - run: redharness run benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml --allow-host-agent --seed 7
       - run: >-
           redharness suite benchmarks/examples/smoke-suite.yaml
@@ -54,3 +57,72 @@ jobs:
           --agent agents/examples/demo.yaml
           --allow-host-agent
           --seed 13
+      - name: distributed control plane and worker e2e
+        env:
+          REDHARNESS_CONTROL_TOKEN: ci-token
+        run: |
+          set -euo pipefail
+          rm -rf .redharness/distributed-runs
+          rm -f /tmp/redharness-control.db
+          redharness serve \
+            --queue-db /tmp/redharness-control.db \
+            --runs-root .redharness/distributed-runs \
+            --benchmarks-root benchmarks \
+            --host 127.0.0.1 \
+            --port 8780 >/tmp/redharness-control.log 2>&1 &
+          control_pid=$!
+          trap 'kill "$control_pid" 2>/dev/null || true' EXIT
+          python - <<'PY'
+          import time
+          import httpx
+
+          for _ in range(100):
+              try:
+                  if httpx.get("http://127.0.0.1:8780/health", timeout=0.5).status_code == 200:
+                      break
+              except Exception:
+                  pass
+              time.sleep(0.1)
+          else:
+              raise SystemExit("control plane failed to start")
+          PY
+          redharness submit benchmarks/examples/hello/task.yaml \
+            --agent agents/examples/demo.yaml \
+            --control-url http://127.0.0.1:8780 \
+            --runs-root .redharness/distributed-runs \
+            --allow-host-agent \
+            --seed 21 >/tmp/submitted-job.json
+          redharness worker \
+            --control-url http://127.0.0.1:8780 \
+            --workspace-root . \
+            --allow-host-jobs \
+            --once
+          python - <<'PY'
+          import httpx
+
+          headers = {"Authorization": "Bearer ci-token"}
+          jobs = httpx.get(
+              "http://127.0.0.1:8780/v1/jobs", headers=headers, timeout=5
+          ).json()
+          assert len(jobs) == 1, jobs
+          assert jobs[0]["state"] == "completed", jobs[0]
+          assert jobs[0]["result"]["success"] is True, jobs[0]
+          board = httpx.get(
+              "http://127.0.0.1:8780/v1/leaderboard", headers=headers, timeout=5
+          ).json()
+          assert board[0]["success_rate"] == 1.0, board
+          assert board[0]["mean_score"] == 100.0, board
+          run_id = jobs[0]["result"]["run_id"]
+          trace = httpx.get(
+              f"http://127.0.0.1:8780/v1/runs/{run_id}/trace",
+              headers=headers,
+              timeout=5,
+          ).json()
+          assert trace, trace
+          otel = httpx.get(
+              f"http://127.0.0.1:8780/v1/runs/{run_id}/otel",
+              headers=headers,
+              timeout=5,
+          ).json()
+          assert otel["resourceSpans"], otel
+          PY
