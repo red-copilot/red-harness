@@ -18,7 +18,7 @@ def test_budget_monitor_accounts_and_exceeds(tmp_path: Path) -> None:
         json.dumps(
             {
                 "type": "model.usage",
-                "data": {"input_tokens": 8, "output_tokens": 4, "cost_usd": 0.2},
+                "data": {"input_tokens": 8, "output_tokens": 4, "cost_usd": 0.2, "model_calls": 1},
             }
         )
         + "\n",
