@@ -456,7 +456,9 @@ class PiAdapter:
                 "containerized": True,
             },
         )
-        return result    def _command(self, task: TaskSpec, *, gateway_enabled: bool) -> list[str]:
+        return result
+
+    def _command(self, task: TaskSpec, *, gateway_enabled: bool) -> list[str]:
         return [self.pi.binary, *self._pi_args(task, gateway_enabled=gateway_enabled)]
 
 
