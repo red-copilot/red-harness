@@ -79,7 +79,7 @@ class Orchestrator:
         world.upsert("goal", root_goal)
         context_builder = WorldContextBuilder()
         (run_dir / "world.context.txt").write_text(
-            context_builder.render(world.snapshot),
+            context_builder.render(world.snapshot, query=task.objective.description),
             encoding="utf-8",
         )
         started = time.monotonic()
