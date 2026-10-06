@@ -14,7 +14,7 @@ from .environment import build_environment
 from .gateway_runtime import GatewayConfig, GatewayRuntime
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
-from .verifier import run_python_verifier
+from .verifier import run_verifier
 
 
 def _sha256(path: Path) -> str:
@@ -114,11 +114,12 @@ class Orchestrator:
                     "milestones": {},
                 }
             else:
-                verified, vout, verr = run_python_verifier(
+                verified, vout, verr = run_verifier(
                     task,
                     task_dir=task_dir,
                     run_dir=run_dir,
                     environment_project=handle.project_name,
+                    environment_network=handle.network_name,
                     trace=trace,
                     seed=seed,
                 )
