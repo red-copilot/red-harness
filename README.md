@@ -1,30 +1,33 @@
 # Red Harness
 
-Red Harness is a reproducible evaluation runtime for security agents. It separates benchmark tasks, agents, target environments, model/tool access, budgets, verification, and scoring so results can be independently checked and compared.
+Red Harness is a reproducible evaluation runtime and control plane for security agents. It keeps benchmark tasks, agents, target environments, model/tool access, budgets, verification, scoring, telemetry, and distributed execution separate so results can be independently reproduced and compared.
 
 ## Current capabilities
 
-Version 0.5 provides:
+Version 0.6 provides:
 
-- declarative task, agent, suite, and gateway-policy contracts
+- declarative task, agent, suite, policy, and distributed-job contracts
 - Docker Compose or no-op benchmark environments
-- trusted local CLI agents and restricted Docker agents
+- trusted CLI agents and restricted Docker agents
 - Python or Docker-sandboxed verifiers
-- append-only JSONL traces and result bundles
-- real-time wall-time, token, model-call, tool-call, and cost budgets
-- policy-gated Tool Gateway
+- host or isolated Docker-sidecar Tool/Model Gateway
 - OpenAI-compatible streaming and non-streaming model proxy
+- token, model-call, tool-call, cost, and wall-time budgets
 - provider credential isolation
-- host Gateway mode for development
-- isolated Docker Gateway sidecar mode
 - Docker runtime profiles, including gVisor via `runtime: runsc`
-- parallel suite workers
-- standard pass@k estimation
-- weighted score and per-domain aggregation
-- GitHub Actions coverage for real Docker Agent, Gateway, sidecar, and Docker Verifier flows
+- parallel suite execution, pass@k, weighted score, and domain aggregation
+- authenticated control-plane API
+- leased distributed worker queue with heartbeat/recovery semantics
+- worker-local provider secrets and workspace path resolution
+- benchmark registry scanning
+- persisted result/trace viewer API
+- leaderboard aggregation
+- OTLP/HTTP JSON-compatible trace export
+- Firecracker capability detection and machine-profile contract
+- GitHub Actions coverage for Docker Agent, sidecar Gateway, Docker Verifier, and a real HTTP control-plane/worker flow
 
 > [!WARNING]
-> CLI agents and `verification.type: python` execute trusted host processes. For untrusted evaluation inputs, use Docker agents and Docker verifiers. The `runtime: runsc` profile requires gVisor to be installed and registered with the local Docker daemon. Firecracker is not implemented in v0.5.
+> CLI agents and `verification.type: python` execute trusted host processes. For untrusted evaluation inputs, use Docker agents and Docker verifiers. `runtime: runsc` requires gVisor to be installed and registered with Docker. v0.6 defines and validates the Firecracker host/profile contract, but it does not yet launch microVMs; CI does not provide `/dev/kvm`.
 
 ## Install
 
@@ -34,16 +37,7 @@ python -m pip install -e ".[dev]"
 
 Python 3.11+ is required. Docker is required for Docker agents, sidecar Gateway mode, Docker verifiers, and Docker Compose benchmark environments.
 
-## Quick start
-
-Validate the example contracts:
-
-```bash
-redharness validate benchmarks/examples/hello/task.yaml
-redharness validate-suite benchmarks/examples/smoke-suite.yaml
-```
-
-Run the trusted local smoke agent:
+## Local run
 
 ```bash
 redharness run benchmarks/examples/hello/task.yaml \
@@ -52,7 +46,7 @@ redharness run benchmarks/examples/hello/task.yaml \
   --seed 42
 ```
 
-Run the smoke suite in parallel:
+Parallel suite:
 
 ```bash
 redharness suite benchmarks/examples/smoke-suite.yaml \
@@ -61,9 +55,7 @@ redharness suite benchmarks/examples/smoke-suite.yaml \
   --workers 2
 ```
 
-## Suite contract and scoring
-
-A suite can declare parallelism and pass@k targets:
+A suite may declare:
 
 ```yaml
 apiVersion: redharness/v1
@@ -80,47 +72,144 @@ tasks:
     weight: 2.0
 ```
 
-Each repeat remains a fully independent run with its own trace, budget, verifier, and seed.
-
-Suite summaries contain:
-
-```json
-{
-  "workers": 4,
-  "success_rate": 0.6,
-  "weighted_score": 72.5,
-  "pass_at_k": {
-    "1": 0.6,
-    "3": 0.94,
-    "5": 1.0
-  },
-  "domains": {
-    "web": {
-      "weighted_score": 72.5,
-      "weighted_success_rate": 0.6,
-      "pass_at_k": {
-        "1": 0.6,
-        "3": 0.94,
-        "5": 1.0
-      }
-    }
-  }
-}
-```
-
 pass@k uses the standard unbiased estimator:
 
 ```text
 pass@k = 1 - C(n-c, k) / C(n, k)
 ```
 
-where `n` is the number of attempts and `c` is the number of successful attempts. Domain grouping comes from each task's `category`.
+Domain aggregation is based on each task's `category`.
+
+## Distributed control plane
+
+The reference control plane uses SQLite for durable job state and leases. Workers communicate only through HTTP, so they can run on different machines as long as each worker has the same benchmark/agent checkout or compatible workspace layout.
+
+Set an authentication token and start the control plane:
+
+```bash
+export REDHARNESS_CONTROL_TOKEN="replace-with-a-random-secret"
+
+redharness serve \
+  --queue-db .redharness/control.db \
+  --runs-root .redharness/runs \
+  --benchmarks-root benchmarks \
+  --host 0.0.0.0 \
+  --port 8780
+```
+
+Submit a job using worker-visible repository-relative paths:
+
+```bash
+redharness submit benchmarks/examples/hello/task.yaml \
+  --agent agents/examples/demo.yaml \
+  --control-url http://control-plane:8780 \
+  --runs-root .redharness/runs \
+  --seed 100
+```
+
+Start a worker:
+
+```bash
+export REDHARNESS_CONTROL_TOKEN="replace-with-a-random-secret"
+
+redharness worker \
+  --control-url http://control-plane:8780 \
+  --workspace-root /srv/red-harness
+```
+
+Host-process jobs are rejected by workers unless the worker is explicitly started with:
+
+```bash
+--allow-host-jobs
+```
+
+### Lease model
+
+A job transitions through:
+
+```text
+queued -> running -> completed
+                  -> failed
+```
+
+When a Worker claims a job it receives a time-limited lease. It heartbeats while Orchestrator is running. If the Worker disappears and the lease expires, another Worker can reclaim the job. Each reclaim increments the job `attempts` counter.
+
+The SQLite backend is the single-control-plane reference implementation. The queue API is intentionally separated from Orchestrator so a PostgreSQL/Redis backend can replace it without changing Worker execution semantics.
+
+Provider API keys are never placed in queue payloads. Jobs store only the environment-variable name, such as `REDHARNESS_MODEL_API_KEY`; the Worker resolves the actual secret locally.
+
+## Control-plane API
+
+The authenticated API includes:
+
+```text
+POST /v1/jobs
+GET  /v1/jobs
+GET  /v1/jobs/{job_id}
+POST /v1/jobs/claim
+POST /v1/jobs/{job_id}/heartbeat
+POST /v1/jobs/{job_id}/complete
+POST /v1/jobs/{job_id}/fail
+
+GET  /v1/benchmarks
+GET  /v1/leaderboard
+GET  /v1/capabilities
+
+GET  /v1/runs/{run_id}
+GET  /v1/runs/{run_id}/trace
+GET  /v1/runs/{run_id}/otel
+```
+
+`/health` remains unauthenticated for service health checks. Other control-plane routes require the configured bearer token.
+
+## Leaderboard
+
+Completed distributed jobs are aggregated by `agent_id`. The current reference leaderboard reports:
+
+- run count
+- success rate
+- mean score
+- median duration
+- total estimated model cost
+
+Ordering is capability-first: mean score, success rate, then lower cost and lower duration.
+
+The queue stores full result JSON, so richer benchmark-profile or suite-level leaderboards can be layered on top without changing worker execution.
+
+## Benchmark registry
+
+The control plane recursively scans `task.yaml` files beneath `--benchmarks-root` and exposes valid tasks through `/v1/benchmarks`. Invalid task contracts are returned with validation errors instead of crashing the registry.
+
+## Trace viewer and OpenTelemetry
+
+Every run continues to write append-only `trace.jsonl`.
+
+The control plane exposes the normalized events directly:
+
+```text
+GET /v1/runs/{run_id}/trace
+```
+
+It also converts them to an OTLP/HTTP JSON-compatible trace document:
+
+```text
+GET /v1/runs/{run_id}/otel
+```
+
+Local export:
+
+```bash
+redharness otel-export .redharness/runs/run_... \
+  --output trace.otlp.json
+```
+
+Each Red Harness event becomes a span carrying run/task/actor/event attributes plus serialized event data. This export is intentionally file/HTTP payload generation in v0.6; direct collector delivery can be added without modifying the trace recorder.
 
 ## Gateway modes
 
 ### Host mode
 
-Host mode is convenient for trusted local development:
+Useful for trusted local development:
 
 ```bash
 redharness run benchmarks/examples/hello/task.yaml \
@@ -130,29 +219,14 @@ redharness run benchmarks/examples/hello/task.yaml \
   --gateway-policy examples/gateway-policy.yaml
 ```
 
-Harness injects:
+The Agent receives only a one-time Gateway token. Real provider credentials remain on the Harness/Gateway side.
 
-```text
-REDHARNESS_GATEWAY_URL
-REDHARNESS_GATEWAY_TOKEN
-OPENAI_BASE_URL
-OPENAI_API_KEY
-```
-
-The injected API key is a one-time Gateway token. The actual model-provider credential remains on the Harness/Gateway side.
-
-### Docker sidecar mode
-
-Build the supplied Gateway image:
+### Isolated Docker sidecar
 
 ```bash
 docker build -f docker/gateway/Dockerfile \
   -t redharness-gateway:local .
-```
 
-Then run a Docker Agent through an isolated sidecar:
-
-```bash
 redharness run benchmarks/examples/hello/task.yaml \
   --agent agents/examples/docker-gateway.yaml \
   --gateway \
@@ -171,73 +245,18 @@ Docker Agent ───── private internal network ───── Gateway si
      └─ benchmark target network
 ```
 
-The Gateway publishes no host port. The Agent can join both the private Gateway network and the benchmark environment network. Target containers do not need to share the Gateway network.
-
-If a model upstream is configured, only the Gateway sidecar is additionally attached to an egress-capable Docker bridge. The private Agent-to-Gateway network remains internal.
-
-`network: none` is intentionally incompatible with any Gateway mode because it means no Agent networking.
-
-## Model proxy
-
-Configure the real provider credential only in the Harness environment:
-
-```bash
-export REDHARNESS_MODEL_API_KEY="..."
-```
-
-Then:
-
-```bash
-redharness run benchmark/task.yaml \
-  --agent agents/my-agent.yaml \
-  --gateway \
-  --gateway-mode sidecar \
-  --gateway-image redharness-gateway:local \
-  --model-upstream https://provider.example/v1 \
-  --input-price-per-million 2.50 \
-  --output-price-per-million 10.00
-```
-
-For non-streaming requests, usage is read from the provider response. For streaming requests, the proxy forces `stream_options.include_usage=true`, relays SSE chunks, and records the final usage/cost event.
-
-If an upstream omits usage, Harness records:
-
-```text
-model.usage_missing
-```
-
-rather than fabricating token counts.
+The Gateway publishes no host port. When a provider upstream is configured, only the sidecar is additionally attached to an egress-capable Docker bridge.
 
 ## Tool Gateway
 
-The built-in v0.5 tools remain intentionally narrow:
+The built-in tools remain intentionally narrow:
 
 ```text
 file.read
 file.write
 ```
 
-Example policy:
-
-```yaml
-allowed_tools:
-  - file.read
-  - file.write
-
-denied_tools: []
-
-max_tool_output_bytes: 65536
-max_file_write_bytes: 1048576
-```
-
-Rules:
-
-- `file.read` is restricted to the task directory and run workspace
-- `file.write` is restricted to the run workspace
-- path traversal outside those roots is rejected
-- denied calls still count against `max_tool_calls`
-- read and write sizes are policy-limited
-- no host-side arbitrary shell tool is exposed
+The default policy prevents path traversal and constrains reads/writes to task/run roots. No host-side arbitrary shell tool is exposed.
 
 ## Execution profiles
 
@@ -264,24 +283,30 @@ verification:
   timeout: 120
 ```
 
-When `runtime` is set, Harness passes it directly through Docker's `--runtime` flag. A standard Docker installation can omit the field. A gVisor installation typically uses `runsc`.
+Check local support:
 
-The Docker Agent sandbox also uses:
+```bash
+redharness capabilities
+```
 
-- read-only root filesystem
-- all Linux capabilities dropped
-- `no-new-privileges`
-- PID, CPU, and memory limits
-- isolated tmpfs
-- task mounted read-only
-- run workspace mounted read/write
-- no Docker socket mount
+Output reports availability of:
 
-Docker Verifier uses a read-only run bundle as well.
+```text
+docker
+gvisor_runsc
+firecracker
+kvm
+```
 
-## Budgets and accounting
+### Firecracker contract
 
-Task budgets:
+v0.6 contains a `FirecrackerProfile` that validates kernel/rootfs images and generates the boot-source, root drive, and machine configuration expected by a future Firecracker backend. `FirecrackerBackend.validate_host()` requires both the `firecracker` binary and `/dev/kvm`.
+
+This is deliberately not advertised as a runnable backend yet. VM lifecycle, jailer/network setup, snapshotting, and run-bundle mounts remain Phase 7 work.
+
+## Budgets and result bundles
+
+Task budgets can enforce:
 
 ```yaml
 budgets:
@@ -292,68 +317,7 @@ budgets:
   max_cost_usd: 20
 ```
 
-Exceeding an enforced budget terminates the Agent and returns:
-
-```text
-status: budget_exceeded
-```
-
-Result metrics include:
-
-```json
-{
-  "duration_ms": 731,
-  "input_tokens": 1200,
-  "output_tokens": 300,
-  "total_tokens": 1500,
-  "model_calls": 4,
-  "tool_calls": 12,
-  "cost_usd": 0.04
-}
-```
-
-## Architecture
-
-```text
-Task / Suite / Seed
-        │
-        v
-   Orchestrator
-        │
-        ├── Environment Provider
-        │
-        ├── Gateway Runtime
-        │      ├── host
-        │      └── isolated Docker sidecar
-        │              ├── Tool Policy
-        │              └── Model Proxy
-        │
-        ├── Agent Adapter
-        │      ├── trusted CLI
-        │      └── Docker / custom runtime
-        │
-        ├── Budget Monitor
-        ├── Trace Recorder
-        └── Verifier
-               ├── trusted Python
-               └── Docker / custom runtime
-
-SuiteRunner
-   ├── parallel workers
-   ├── weighted score
-   ├── pass@k
-   └── domain aggregation
-```
-
-Core separation rule:
-
-```text
-Task != Environment != Agent != Model != Tool != Verifier
-```
-
-## Run bundle
-
-Each attempt is written beneath `.redharness/runs/<run_id>/`:
+Each run is stored beneath `.redharness/runs/<run_id>/`:
 
 ```text
 result.json
@@ -365,7 +329,38 @@ verifier.stdout.log
 verifier.stderr.log
 ```
 
-Suite summaries are written beneath `.redharness/suites/<suite_run_id>/result.json`.
+## Architecture
+
+```text
+                         Control Plane
+                  ┌────────────┼─────────────┐
+                  │            │             │
+              Job Queue    Registry     Leaderboard
+                  │                          │
+          claim / lease / heartbeat          │
+                  │                          │
+          ┌───────┴────────┐                 │
+          │                │                 │
+       Worker A         Worker B             │
+          │                │                 │
+          └────── Orchestrator ──────────────┘
+                       │
+          ┌────────────┼──────────────┐
+          │            │              │
+      Environment    Gateway       Verifier
+                       │
+                   Agent / Model
+                       │
+                Trace + Result
+                       │
+              Trace API / OTLP
+```
+
+Core separation rule:
+
+```text
+Task != Environment != Agent != Model != Tool != Verifier
+```
 
 ## Roadmap
 
@@ -374,4 +369,5 @@ Suite summaries are written beneath `.redharness/suites/<suite_run_id>/result.js
 3. **Done:** Tool Gateway, model proxy, credential isolation, streaming accounting.
 4. **Done:** Docker Verifier sandbox and Docker Agent Gateway support.
 5. **Done:** isolated Gateway sidecar, Docker runtime profiles, parallel workers, pass@k, domain scoring.
-6. Firecracker/microVM backend, distributed worker queue, OpenTelemetry export, trace UI, benchmark registry, and leaderboard.
+6. **Done:** authenticated control plane, leased distributed workers, benchmark registry, leaderboard, trace-viewer API, OTLP JSON export, Firecracker host/profile contract.
+7. PostgreSQL/Redis queue backend, KVM-enabled Firecracker lifecycle, snapshot pooling, OpenTelemetry collector delivery, browser trace UI, signed benchmark registry, and multi-tenant scheduling.
