@@ -227,7 +227,15 @@ class PiAdapter:
         if self.pi.thinking:
             args.extend(["--thinking", self.pi.thinking])
         args.extend(self.pi.extra_args)
-        args.append(task.objective.description)
+        world_protocol = (
+            "\n\nRed Harness world-state protocol:\n"
+            "When you discover durable, task-relevant state, append one JSON object per line to "
+            "$REDHARNESS_WORLD_INBOX. Use schema_version redharness.world.submit/v1 and one of "
+            "entity, relation, observation, artifact, capability, hypothesis, goal, or failure. "
+            "Prefer high-value state changes over verbose narration. Do not write to "
+            "world.events.jsonl or world.snapshot.json directly."
+        )
+        args.append(task.objective.description + world_protocol)
         return args
 
     def _create_command(
@@ -270,6 +278,7 @@ class PiAdapter:
                 "-e", f"REDHARNESS_TASK_ID={task.id}",
                 "-e", "REDHARNESS_TASK_DIR=/task",
                 "-e", "REDHARNESS_RUN_DIR=/run/redharness",
+                "-e", "REDHARNESS_WORLD_INBOX=/run/redharness/world.inbox.jsonl",
                 "-e", f"REDHARNESS_SEED={seed}",
                 "-e", "PI_CODING_AGENT_DIR=/run/redharness/pi-agent",
                 "-e", "PI_CODING_AGENT_SESSION_DIR=/run/redharness/pi-sessions",
