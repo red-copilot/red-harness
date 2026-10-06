@@ -28,6 +28,7 @@ Version 0.8 provides:
 - event-sourced universal world-state runtime with materialized snapshots
 - domain-neutral skill metadata registry for future planners and domain extensions
 - optional read-only heuristic planner over World State + Skill metadata
+- leased coordination blackboard for explicit multi-agent work distribution
 - leaderboard aggregation
 - OTLP/HTTP JSON-compatible trace export
 - Firecracker capability detection and machine-profile contract
@@ -265,6 +266,14 @@ GET  /v1/runs/{run_id}/trace
 GET  /v1/runs/{run_id}/world
 GET  /v1/runs/{run_id}/world/events
 GET  /v1/runs/{run_id}/plan
+POST /v1/runs/{run_id}/plan/publish
+GET  /v1/work
+POST /v1/work
+POST /v1/work/claim
+POST /v1/work/{work_id}/heartbeat
+POST /v1/work/{work_id}/complete
+POST /v1/work/{work_id}/fail
+POST /v1/work/{work_id}/release
 GET  /v1/runs/{run_id}/otel
 ```
 
