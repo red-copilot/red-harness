@@ -51,12 +51,39 @@ class TaskSpec(BaseModel):
 
 
 class AgentSpec(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     api_version: Literal["redharness/v1"] = Field(default="redharness/v1", alias="apiVersion")
     id: str = Field(min_length=1)
-    type: Literal["cli"] = "cli"
-    command: list[str] = Field(min_length=1)
+    type: Literal["cli", "docker"] = "cli"
+    command: list[str] = Field(default_factory=list)
     cwd: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
+    image: str | None = None
+    network: Literal["environment", "none"] = "environment"
+
+    @model_validator(mode="after")
+    def validate_adapter(self) -> AgentSpec:
+        if self.type == "cli" and not self.command:
+            raise ValueError("cli agents require command")
+        if self.type == "docker" and not self.image:
+            raise ValueError("docker agents require image")
+        return self
+
+
+class SuiteTaskSpec(BaseModel):
+    path: str = Field(min_length=1)
+    weight: float = Field(default=1.0, gt=0)
+
+
+class SuiteSpec(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    api_version: Literal["redharness/v1"] = Field(alias="apiVersion")
+    id: str = Field(min_length=1)
+    repeat: int = Field(default=1, ge=1)
+    base_seed: int = Field(default=0, ge=0)
+    tasks: list[SuiteTaskSpec] = Field(min_length=1)
 
 
 class VerificationResult(BaseModel):
@@ -80,3 +107,7 @@ def load_task(path: str | Path) -> TaskSpec:
 
 def load_agent(path: str | Path) -> AgentSpec:
     return AgentSpec.model_validate(_load_yaml(Path(path)))
+
+
+def load_suite(path: str | Path) -> SuiteSpec:
+    return SuiteSpec.model_validate(_load_yaml(Path(path)))
