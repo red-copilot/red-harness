@@ -91,7 +91,7 @@ class Orchestrator:
                 (run_dir / "verifier.stderr.log").write_text(verr, encoding="utf-8")
                 verification = verified.model_dump()
                 status = "finished"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - orchestrator boundary records all failures.
             status = "error"
             verification = {
                 "success": False,
@@ -106,7 +106,7 @@ class Orchestrator:
         finally:
             try:
                 environment.stop()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - teardown must not hide the run result.
                 trace.emit(
                     "environment.error",
                     data={"error_type": type(exc).__name__, "message": str(exc)},
