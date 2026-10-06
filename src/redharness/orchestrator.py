@@ -15,6 +15,7 @@ from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .trace import TraceRecorder
 from .verifier import run_verifier
+from .world import Goal, WorldStore
 
 
 def _sha256(path: Path) -> str:
@@ -46,6 +47,15 @@ class Orchestrator:
         run_dir.mkdir(parents=True, exist_ok=False)
         task_dir = task_path.resolve().parent
         trace = TraceRecorder(run_dir / "trace.jsonl", run_id, task.id)
+        world = WorldStore(run_dir / "world.events.jsonl")
+        root_goal = Goal(
+            id=f"goal:{task.id}:objective",
+            description=task.objective.description,
+            status="active",
+            priority=1.0,
+            attributes={"task_id": task.id, "category": task.category},
+        )
+        world.upsert("goal", root_goal)
         started = time.monotonic()
         status = "running"
         usage = UsageMetrics()
@@ -184,6 +194,11 @@ class Orchestrator:
                 "agent_sha256": _sha256(agent_path),
             },
         }
+        root_goal.status = "completed" if result["success"] else "failed"
+        root_goal.attributes.update(
+            {"run_status": status, "score": result["score"], "success": result["success"]}
+        )
+        world.upsert("goal", root_goal)
         (run_dir / "result.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
