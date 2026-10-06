@@ -93,7 +93,7 @@ class AgentSpec(BaseModel):
     cwd: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     image: str | None = None
-    network: Literal["environment", "none"] = "environment"
+    network: Literal["environment", "none", "host"] = "environment"
     runtime: str | None = None
     pi: PiSpec | None = None
 
