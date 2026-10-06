@@ -172,6 +172,9 @@ class ContainerPiAdapter(PiAdapter):
         if gateway_enabled and self.spec.network == "none":
             raise AgentError("Pi network:none is incompatible with per-run Gateway")
 
+        if self.spec.network == "host" and gateway_url and gateway_network is None:
+            gateway_url = gateway_url.replace("host.docker.internal", "127.0.0.1")
+
         event_file = run_dir / "events.jsonl"
         event_file.write_text("", encoding="utf-8")
         raw_path = run_dir / "agent.stdout.log"
