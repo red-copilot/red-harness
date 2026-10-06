@@ -65,6 +65,7 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
         queue_db=tmp_path / "control.db",
         runs_root=runs_root,
         benchmarks_root=Path("benchmarks/examples"),
+        skills_root=Path("skills/examples"),
         token="secret",
     )
     client = TestClient(app)
@@ -72,6 +73,10 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
 
     assert client.get("/health").status_code == 200
     assert client.get("/v1/jobs").status_code == 401
+
+    skills = client.get("/v1/skills", headers=headers)
+    assert skills.status_code == 200
+    assert any(item.get("id") == "network.service-discovery" for item in skills.json())
 
     benchmarks = client.get("/v1/benchmarks", headers=headers)
     assert benchmarks.status_code == 200
