@@ -127,6 +127,36 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
     assert ledger.failure_count == 1
     assert ledger.no_progress_count == 1
 
+    ledger.record_event(
+        AgentEvent(
+            type="progress.updated",
+            data={
+                "current_subgoal": "enumerate web routes",
+                "completed_subgoal": "identify service",
+                "confirmed_fact": "http is reachable",
+                "expected_observation": "admin route exists",
+                "actual_observation": "/admin returned 200",
+                "hypothesis": {
+                    "id": "hyp-admin",
+                    "statement": "admin endpoint is exposed",
+                    "status": "supported",
+                    "confidence": 0.9,
+                    "evidence_for": ["obs-admin"],
+                    "evidence_against": [],
+                },
+                "replan_reason": "new capability",
+                "made_progress": True,
+            },
+        )
+    )
+    assert ledger.current_subgoal == "enumerate web routes"
+    assert ledger.completed_subgoals == ["identify service"]
+    assert ledger.confirmed_facts == ["http is reachable"]
+    assert ledger.expected_observation == "admin route exists"
+    assert ledger.actual_observation == "/admin returned 200"
+    assert ledger.hypotheses["hyp-admin"].status == "supported"
+    assert ledger.replan_reasons == ["new capability"]
+
     ledger.record_submission(accepted=True, completed=True)
     assert ledger.accepted_submissions == 1
     assert ledger.objective_completed is True
