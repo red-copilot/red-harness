@@ -76,6 +76,30 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
+    (run_dir / "progress.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "redharness.progress/v1",
+                "active_goal": "goal-1",
+                "completed_subgoals": [],
+                "blocked_subgoals": [],
+                "confirmed_facts": [],
+                "current_subgoal": "enumerate services",
+                "hypotheses": {},
+                "expected_observation": None,
+                "actual_observation": None,
+                "replan_reasons": [],
+                "last_action": None,
+                "failure_count": 0,
+                "no_progress_count": 2,
+                "accepted_submissions": 0,
+                "rejected_submissions": 0,
+                "objective_completed": False,
+                "last_event_type": None,
+            }
+        ),
+        encoding="utf-8",
+    )
     (run_dir / "trace.jsonl").write_text(
         json.dumps(
             {
@@ -162,6 +186,17 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     plan = client.get("/v1/runs/run_test/plan", headers=headers).json()
     assert plan["planner"] == "heuristic-skill-v1"
     assert plan["candidates"][0]["skill_id"] == "network.service-discovery"
+
+    rolling = client.get(
+        "/v1/runs/run_test/plan/rolling?horizon=2",
+        headers=headers,
+    ).json()
+    assert rolling["planner"] == "rolling-horizon-skill-v1"
+    assert rolling["horizon"] == 2
+    assert rolling["current_subgoal"] == "enumerate services"
+    assert rolling["no_progress_count"] == 2
+    assert rolling["actions"][0]["skill_id"] == "network.service-discovery"
+    assert "no_progress_threshold" in rolling["actions"][0]["replan_triggers"]
 
     published = client.post(
         "/v1/runs/run_test/plan/publish",
