@@ -270,13 +270,31 @@ class WorldContextBuilder:
             return rendered
 
         marker = "[context truncated to character budget]"
+        compact_lines: list[str] = []
+        index = 0
+        while index < len(lines):
+            if (
+                lines[index].startswith("## ")
+                and index + 1 < len(lines)
+                and lines[index + 1] == "- none"
+            ):
+                index += 2
+                continue
+            compact_lines.append(lines[index])
+            index += 1
+
         kept: list[str] = []
         used = 0
-        for line in lines:
+        for line in compact_lines:
             addition = len(line) + 1
-            if used + addition + len(marker) + 1 > self.max_chars:
-                break
-            kept.append(line)
-            used += addition
+            if used + addition + len(marker) + 1 <= self.max_chars:
+                kept.append(line)
+                used += addition
+                continue
+            if line.startswith("- ") and used + len(marker) + 8 < self.max_chars:
+                available = self.max_chars - used - len(marker) - 6
+                kept.append(line[:available].rstrip() + " …")
+                used += len(kept[-1]) + 1
+            break
         kept.append(marker)
         return "\n".join(kept) + "\n"
