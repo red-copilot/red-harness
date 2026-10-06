@@ -136,6 +136,7 @@ class CLIAdapter:
                 "REDHARNESS_WORLD_CONTEXT": str(run_dir / "world.context.txt"),
                 "REDHARNESS_SUBMISSION_INBOX": str(run_dir / "submission.inbox.jsonl"),
                 "REDHARNESS_FEEDBACK_FILE": str(run_dir / "agent.feedback.jsonl"),
+                "REDHARNESS_PROGRESS_FILE": str(run_dir / "progress.json"),
                 "REDHARNESS_SEED": str(seed),
             }
         )
@@ -313,6 +314,8 @@ class DockerAdapter:
                 "REDHARNESS_SUBMISSION_INBOX=/run/redharness/submission.inbox.jsonl",
                 "-e",
                 "REDHARNESS_FEEDBACK_FILE=/run/redharness/agent.feedback.jsonl",
+                "-e",
+                "REDHARNESS_PROGRESS_FILE=/run/redharness/progress.json",
                 "-e",
                 f"REDHARNESS_SEED={seed}",
             ]
