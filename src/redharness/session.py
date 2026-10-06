@@ -73,7 +73,7 @@ class OneShotAgentSession:
         *,
         run_kwargs: dict[str, Any],
         run_dir: Path,
-    ) -> "OneShotAgentSession":
+    ) -> OneShotAgentSession:
         session = cls(adapter, run_kwargs=run_kwargs, run_dir=run_dir)
         session.feedback_path.touch(exist_ok=True)
         session.control_path.touch(exist_ok=True)
