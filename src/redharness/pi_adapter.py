@@ -323,7 +323,7 @@ class PiAdapter:
         elif self.spec.network == "host":
             primary_network = "host"
         elif self.spec.network == "environment":
-            primary_network = environment_network or ("bridge" if gateway_enabled else "bridge")
+            primary_network = environment_network or "bridge"
         else:
             primary_network = "none"
 
@@ -402,7 +402,7 @@ class PiAdapter:
                     )
                     if monitor.poll():
                         _terminate_process(proc)
-                        subprocess.run(["docker", "kill", container_name], capture_output=True)
+                        subprocess.run(["docker", "kill", container_name], capture_output=True, check=False)
                         break
                     if time.monotonic() - started > task.budgets.wall_time:
                         timed_out = True
