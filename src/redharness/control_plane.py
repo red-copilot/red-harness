@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from .coordination import CoordinationStore, WorkItemSpec
 from .execution import ExecutionCapabilities
 from .otel import trace_to_otlp_json
 from .planner import HeuristicSkillPlanner
@@ -29,6 +30,30 @@ class LeaseRequest(BaseModel):
 class CompleteRequest(BaseModel):
     worker_id: str = Field(min_length=1, max_length=200)
     result: dict
+
+
+
+
+class WorkClaimRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=300)
+    agent_id: str = Field(min_length=1, max_length=200)
+    lease_seconds: int = Field(default=60, ge=10, le=3600)
+
+
+class WorkLeaseRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=200)
+    lease_seconds: int = Field(default=60, ge=10, le=3600)
+
+
+class WorkCompleteRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=200)
+    result: dict = Field(default_factory=dict)
+
+
+class WorkFailRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=200)
+    error: str = Field(min_length=1, max_length=4000)
+    requeue: bool = False
 
 
 class FailRequest(BaseModel):
@@ -65,6 +90,7 @@ def create_control_plane(
 ) -> FastAPI:
     app = FastAPI(title="Red Harness Control Plane", version="0.6.0")
     queue = SQLiteQueue(queue_db)
+    coordination = CoordinationStore(queue_db.with_name("coordination.db"))
     run_root = runs_root.resolve()
     benchmark_root = benchmarks_root.resolve() if benchmarks_root else None
     skill_root = skills_root.resolve() if skills_root else None
@@ -137,6 +163,85 @@ def create_control_plane(
         _authorize(request, token)
         if not queue.fail(job_id, body.worker_id, body.error):
             raise HTTPException(status_code=409, detail="lease is not owned by worker")
+        return {"ok": True}
+
+    @app.post("/v1/work")
+    async def submit_work(request: Request, body: WorkItemSpec) -> dict:
+        _authorize(request, token)
+        return coordination.submit(body)
+
+    @app.get("/v1/work")
+    async def list_work(
+        request: Request,
+        run_id: str | None = None,
+        state: str | None = None,
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> list[dict]:
+        _authorize(request, token)
+        if state not in {None, "queued", "running", "completed", "failed"}:
+            raise HTTPException(status_code=400, detail="invalid work state")
+        return coordination.list(run_id=run_id, state=state, limit=limit)
+
+    @app.post("/v1/work/claim")
+    async def claim_work(request: Request, body: WorkClaimRequest) -> dict | None:
+        _authorize(request, token)
+        return coordination.claim(
+            body.run_id,
+            body.agent_id,
+            lease_seconds=body.lease_seconds,
+        )
+
+    @app.post("/v1/work/{work_id}/heartbeat")
+    async def heartbeat_work(
+        request: Request,
+        work_id: str,
+        body: WorkLeaseRequest,
+    ) -> dict[str, bool]:
+        _authorize(request, token)
+        if not coordination.heartbeat(
+            work_id,
+            body.agent_id,
+            lease_seconds=body.lease_seconds,
+        ):
+            raise HTTPException(status_code=409, detail="work lease is not owned by agent")
+        return {"ok": True}
+
+    @app.post("/v1/work/{work_id}/complete")
+    async def complete_work(
+        request: Request,
+        work_id: str,
+        body: WorkCompleteRequest,
+    ) -> dict[str, bool]:
+        _authorize(request, token)
+        if not coordination.complete(work_id, body.agent_id, body.result):
+            raise HTTPException(status_code=409, detail="work lease is not owned by agent")
+        return {"ok": True}
+
+    @app.post("/v1/work/{work_id}/fail")
+    async def fail_work(
+        request: Request,
+        work_id: str,
+        body: WorkFailRequest,
+    ) -> dict[str, bool]:
+        _authorize(request, token)
+        if not coordination.fail(
+            work_id,
+            body.agent_id,
+            body.error,
+            requeue=body.requeue,
+        ):
+            raise HTTPException(status_code=409, detail="work lease is not owned by agent")
+        return {"ok": True}
+
+    @app.post("/v1/work/{work_id}/release")
+    async def release_work(
+        request: Request,
+        work_id: str,
+        body: WorkLeaseRequest,
+    ) -> dict[str, bool]:
+        _authorize(request, token)
+        if not coordination.release(work_id, body.agent_id):
+            raise HTTPException(status_code=409, detail="work lease is not owned by agent")
         return {"ok": True}
 
     @app.get("/v1/leaderboard")
