@@ -191,8 +191,8 @@ def create_gateway_app(
         writer.emit("tool.result", tool=call.name, ok=True)
         return {"ok": True, "result": result}
 
-    @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request) -> JSONResponse | StreamingResponse:
+    @app.post("/v1/chat/completions", response_model=None)
+    async def chat_completions(request: Request):
         _authorize(request, gateway_token)
         if model_upstream is None:
             raise HTTPException(status_code=503, detail="model upstream is not configured")
