@@ -24,6 +24,8 @@ jobs:
       - run: redharness validate benchmarks/examples/hello-docker-verifier/task.yaml
       - run: redharness validate-suite benchmarks/examples/smoke-suite.yaml
       - run: python -c "from redharness.models import load_agent; a=load_agent('agents/examples/pi.yaml'); assert a.type == 'pi'"
+      - run: python -c "from redharness.models import load_agent; a=load_agent('agents/examples/pi-tsec.yaml'); assert a.type == 'pi' and a.network == 'host'"
+      - run: redharness tsec --help
       - run: redharness gateway --help
       - run: redharness serve --help
       - run: redharness worker --help
