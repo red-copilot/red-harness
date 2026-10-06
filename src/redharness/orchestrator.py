@@ -5,8 +5,8 @@ import json
 import shutil
 import time
 import uuid
-from datetime import UTC, datetime
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
