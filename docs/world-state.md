@@ -106,3 +106,44 @@ redharness run benchmarks/examples/hello/task.yaml \
 The new run copies and replays the prior world event log, re-activates the root task goal, builds a
 fresh context projection, and starts a new Agent session. It does not replay or depend on the old
 provider transcript.
+
+
+## Repository boundary
+
+World-state consumers depend on the `WorldRepository` protocol rather than on JSONL paths. The
+current implementation is `FileWorldRepository`, which persists `world.events.jsonl` and a
+materialized snapshot. `WorldStore` remains as a compatibility alias.
+
+Both the Orchestrator and State Plane API accept a repository factory. A future SQLite/PostgreSQL
+backend can therefore replace the file implementation without changing Agent, planner, or run
+semantics.
+
+The authoritative source remains the event stream. Snapshots are derived and must never contain
+state that cannot be reconstructed from repository events.
+
+## Provenance and temporal semantics
+
+Every world record carries common metadata:
+
+```text
+provenance.actor
+provenance.source
+provenance.event_id
+provenance.source_event_id
+
+observed_at
+valid_from
+expires_at
+supersedes[]
+```
+
+The reducer derives authoritative event provenance when a mutation is accepted. Agent-provided
+domain metadata may add a human/tool source, but cannot replace the event actor or event identity
+written by the Harness.
+
+`valid_from` and `expires_at` describe a validity window; invalid reversed windows are rejected.
+`supersedes` records explicit replacement relationships without requiring the storage graph to be
+a DAG.
+
+These fields are intentionally generic: credentials, sessions, cloud permissions, service
+observations, exploit capabilities, and other domain extensions may all become stale over time.
