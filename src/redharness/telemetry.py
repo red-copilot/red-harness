@@ -19,6 +19,10 @@ def emit(event_type: str, **data: Any) -> None:
         handle.flush()
 
 
+def model_request(*, model: str | None = None, count: int = 1) -> None:
+    emit("model.request", model=model, count=count)
+
+
 def model_usage(
     *,
     input_tokens: int = 0,
@@ -26,6 +30,7 @@ def model_usage(
     total_tokens: int | None = None,
     cost_usd: float = 0.0,
     model: str | None = None,
+    model_calls: int = 1,
 ) -> None:
     emit(
         "model.usage",
@@ -34,6 +39,7 @@ def model_usage(
         total_tokens=total_tokens if total_tokens is not None else input_tokens + output_tokens,
         cost_usd=cost_usd,
         model=model,
+        model_calls=model_calls,
     )
 
 
