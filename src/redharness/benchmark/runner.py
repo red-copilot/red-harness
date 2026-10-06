@@ -89,7 +89,7 @@ class BenchmarkRunner:
             )
 
         (run_dir / "world.context.txt").write_text(
-            context_builder.render(world.snapshot),
+            context_builder.render(world.snapshot, query=session.objective.description),
             encoding="utf-8",
         )
 
