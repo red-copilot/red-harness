@@ -106,6 +106,12 @@ class BenchmarkRunner:
             },
         )
 
+        if agent.type in {"docker", "pi"} and agent.network == "environment":
+            raise ValueError(
+                "externally provisioned benchmarks do not provide a Harness environment network; "
+                "configure the container Agent with network: host or a future benchmark network"
+            )
+
         agent_result: AgentResult | None = None
         submission_results: list[dict] = []
         teardown_error: str | None = None
