@@ -408,7 +408,7 @@ class PiAdapter:
                         timed_out = True
                         self.trace.emit("budget.exceeded", data={"budget": "wall_time"})
                         _terminate_process(proc)
-                        subprocess.run(["docker", "kill", container_name], capture_output=True)
+                        subprocess.run(["docker", "kill", container_name], capture_output=True, check=False)
                         break
                     time.sleep(0.05)
                 returncode = proc.wait()
