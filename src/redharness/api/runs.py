@@ -7,7 +7,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..otel import trace_to_otlp_json
-from ..planner import HeuristicSkillPlanner
+from ..planner import HeuristicSkillPlanner, RollingHorizonPlanner
+from ..progress import ProgressLedger
 from ..skills import load_skills
 from ..world import FileWorldRepository, WorldRepository
 from .common import authorize, run_dir
@@ -93,6 +94,35 @@ def build_runs_router(
             "world_revision": snapshot.revision,
             "candidates": [candidate.model_dump() for candidate in candidates],
         }
+
+    @router.get("/v1/runs/{run_id}/plan/rolling")
+    async def run_rolling_plan(
+        request: Request,
+        run_id: str,
+        horizon: int = Query(default=3, ge=1, le=3),
+    ) -> dict:
+        authorize(request, token)
+        directory = run_dir(run_root, run_id)
+        repository = world_repository_factory(directory / "world.events.jsonl")
+        snapshot = repository.snapshot
+        if snapshot.revision == 0:
+            raise HTTPException(status_code=404, detail="world snapshot not found")
+        skills = load_skills(skill_root) if skill_root is not None else []
+
+        progress_path = directory / "progress.json"
+        progress = ProgressLedger()
+        if progress_path.is_file():
+            progress = ProgressLedger.model_validate(
+                json.loads(progress_path.read_text(encoding="utf-8"))
+            )
+
+        plan = RollingHorizonPlanner().propose(
+            snapshot,
+            skills,
+            progress=progress,
+            horizon=horizon,
+        )
+        return plan.model_dump(mode="json")
 
     @router.get("/v1/runs/{run_id}/otel")
     async def run_otel(request: Request, run_id: str) -> dict:
