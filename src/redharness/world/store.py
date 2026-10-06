@@ -10,7 +10,7 @@ from .models import WorldEvent, WorldObjectKind, WorldSnapshot
 from .reducer import WorldReducer
 
 
-class WorldStore:
+class FileWorldRepository:
     """Append-only world event store with a materialized JSON snapshot."""
 
     def __init__(self, event_path: Path, snapshot_path: Path | None = None) -> None:
@@ -95,3 +95,6 @@ class WorldStore:
             encoding="utf-8",
         )
         temp.replace(self.snapshot_path)
+
+
+WorldStore = FileWorldRepository
