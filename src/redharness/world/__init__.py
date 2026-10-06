@@ -18,6 +18,7 @@ from .models import (
 from .protocol import IngestReport, WorldSubmission, ingest_world_inbox, write_submission
 from .reducer import WorldReducer
 from .repository import WorldRepository
+from .retrieval import WorldRetriever
 from .store import FileWorldRepository, WorldStore
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "WorldRecord",
     "WorldReducer",
     "WorldRepository",
+    "WorldRetriever",
     "WorldSnapshot",
     "WorldStore",
     "WorldSubmission",
