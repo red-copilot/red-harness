@@ -36,6 +36,9 @@ class RollingPlan(BaseModel):
     horizon: int = Field(ge=1, le=3)
     current_subgoal: str | None = None
     no_progress_count: int = 0
+    replan_required: bool = False
+    replan_reasons: list[str] = Field(default_factory=list)
+    previous_verification_status: str | None = None
     actions: list[PlannedAction] = Field(default_factory=list)
 
 class Planner(Protocol):
@@ -188,10 +191,21 @@ class RollingHorizonPlanner:
                 )
             )
 
+        previous_verification_status = None
+        if progress.last_verification is not None:
+            previous_verification_status = progress.last_verification.get("status")
+
+        replan_reasons = list(progress.replan_reasons)
+        if progress.no_progress_count >= 2 and "no_progress_threshold" not in replan_reasons:
+            replan_reasons.append("no_progress_threshold")
+
         return RollingPlan(
             world_revision=snapshot.revision,
             horizon=horizon,
             current_subgoal=progress.current_subgoal,
             no_progress_count=progress.no_progress_count,
+            replan_required=bool(replan_reasons),
+            replan_reasons=replan_reasons,
+            previous_verification_status=previous_verification_status,
             actions=actions,
         )
