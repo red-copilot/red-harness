@@ -1,0 +1,19 @@
+apiVersion: redharness/skill/v1
+id: network.service-discovery
+domain: network
+description: Discover reachable network services and record observations.
+tags: [discovery, network]
+
+requires:
+  - kind: capability
+    type: network.reachability
+
+produces:
+  - kind: observation
+    type: network.service
+  - kind: entity
+    type: network.service
+
+cost: 0.2
+risk: 0.1
+noise: 0.4
