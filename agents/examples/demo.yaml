@@ -1,0 +1,10 @@
+apiVersion: redharness/v1
+id: demo-agent
+type: cli
+command:
+  - python
+  - -c
+  - |
+    import os
+    from pathlib import Path
+    Path(os.environ["REDHARNESS_RUN_DIR"], "proof.txt").write_text("red-harness-ok\n")
