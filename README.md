@@ -27,6 +27,7 @@ Version 0.8 provides:
 - persisted result/trace viewer API
 - event-sourced universal world-state runtime with materialized snapshots
 - domain-neutral skill metadata registry for future planners and domain extensions
+- optional read-only heuristic planner over World State + Skill metadata
 - leaderboard aggregation
 - OTLP/HTTP JSON-compatible trace export
 - Firecracker capability detection and machine-profile contract
@@ -263,6 +264,7 @@ GET  /v1/runs/{run_id}
 GET  /v1/runs/{run_id}/trace
 GET  /v1/runs/{run_id}/world
 GET  /v1/runs/{run_id}/world/events
+GET  /v1/runs/{run_id}/plan
 GET  /v1/runs/{run_id}/otel
 ```
 
