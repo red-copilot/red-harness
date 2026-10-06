@@ -161,6 +161,35 @@ def create_control_plane(
                         break
         return events
 
+    @app.get("/v1/runs/{run_id}/world")
+    async def run_world(request: Request, run_id: str) -> dict:
+        _authorize(request, token)
+        directory = _run_dir(run_root, run_id)
+        world_path = directory / "world.snapshot.json"
+        if not world_path.is_file():
+            raise HTTPException(status_code=404, detail="world snapshot not found")
+        return json.loads(world_path.read_text(encoding="utf-8"))
+
+    @app.get("/v1/runs/{run_id}/world/events")
+    async def run_world_events(
+        request: Request,
+        run_id: str,
+        limit: int = Query(default=1000, ge=1, le=5000),
+    ) -> list[dict]:
+        _authorize(request, token)
+        directory = _run_dir(run_root, run_id)
+        event_path = directory / "world.events.jsonl"
+        if not event_path.is_file():
+            raise HTTPException(status_code=404, detail="world event log not found")
+        events: list[dict] = []
+        with event_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    events.append(json.loads(line))
+                    if len(events) >= limit:
+                        break
+        return events
+
     @app.get("/v1/runs/{run_id}/otel")
     async def run_otel(request: Request, run_id: str) -> dict:
         _authorize(request, token)
