@@ -12,7 +12,7 @@
     "cwd": {"type": ["string", "null"]},
     "env": {"type": "object", "additionalProperties": {"type": "string"}},
     "image": {"type": ["string", "null"]},
-    "network": {"enum": ["environment", "none"]},
+    "network": {"enum": ["environment", "none", "host"]},
     "runtime": {"type": ["string", "null"], "minLength": 1},
     "pi": {
       "type": ["object", "null"],
