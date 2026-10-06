@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ..agent import AgentResult, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
+from ..progress import ProgressLedger
 from ..session import AgentObservation
 from ..trace import TraceRecorder
 from ..world import Entity, FileWorldRepository, Goal, WorldContextBuilder, ingest_world_inbox
@@ -56,6 +57,10 @@ class BenchmarkRunner:
         world = FileWorldRepository(run_dir / "world.events.jsonl")
         context_builder = WorldContextBuilder()
         started = time.monotonic()
+
+        progress = ProgressLedger(active_goal=f"goal:{session.case_id}:objective")
+        progress_path = run_dir / "progress.json"
+        progress.write(progress_path)
 
         root_goal = Goal(
             id=f"goal:{session.case_id}:objective",
@@ -135,6 +140,11 @@ class BenchmarkRunner:
                 },
             )
             submitted = await adapter.submit(session, submission)
+            progress.record_submission(
+                accepted=submitted.accepted,
+                completed=submitted.completed,
+            )
+            progress.write(progress_path)
             data = submitted.model_dump()
             data["value_sha256"] = _submission_hash(submission.value)
             submission_results.append(data)
@@ -173,7 +183,9 @@ class BenchmarkRunner:
             completed_online = False
             if callable(start_session):
                 agent_session = await start_session(**run_kwargs)
-                async for _event in agent_session.events():
+                async for event in agent_session.events():
+                    progress.record_event(event)
+                    progress.write(progress_path)
                     for submission in submission_inbox.poll():
                         if await submit_candidate(submission, agent_session):
                             completed_online = True
@@ -211,6 +223,9 @@ class BenchmarkRunner:
                         break
 
             evaluation = await adapter.evaluate(session)
+            if evaluation.success:
+                progress.objective_completed = True
+            progress.write(progress_path)
         finally:
             try:
                 await adapter.teardown(session)
@@ -269,6 +284,7 @@ class BenchmarkRunner:
             "world": {
                 "revision": world.snapshot.revision,
             },
+            "progress": progress.model_dump(mode="json"),
             "metrics": {
                 "duration_ms": int((time.monotonic() - started) * 1000),
                 **agent_result.metrics.as_dict(),
