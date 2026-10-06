@@ -44,6 +44,8 @@ _COLLECTIONS = {
 def _selector_matches(snapshot: WorldSnapshot, selector: StateSelector) -> bool:
     collection = getattr(snapshot, _COLLECTIONS[selector.kind])
     for item in collection.values():
+        if not item.is_valid_at():
+            continue
         type_name = getattr(item, "type", None)
         if type_name is None or not fnmatch.fnmatchcase(type_name, selector.type):
             continue
