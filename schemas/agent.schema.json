@@ -7,13 +7,38 @@
   "properties": {
     "apiVersion": {"const": "redharness/v1"},
     "id": {"type": "string", "minLength": 1},
-    "type": {"enum": ["cli", "docker"]},
+    "type": {"enum": ["cli", "docker", "pi"]},
     "command": {"type": "array", "items": {"type": "string"}},
     "cwd": {"type": ["string", "null"]},
     "env": {"type": "object", "additionalProperties": {"type": "string"}},
     "image": {"type": ["string", "null"]},
     "network": {"enum": ["environment", "none"]},
-    "runtime": {"type": ["string", "null"], "minLength": 1}
+    "runtime": {"type": ["string", "null"], "minLength": 1},
+    "pi": {
+      "type": ["object", "null"],
+      "properties": {
+        "binary": {"type": "string", "minLength": 1},
+        "launcher_args": {"type": "array", "items": {"type": "string"}},
+        "provider": {"type": ["string", "null"]},
+        "model": {"type": "string", "minLength": 1},
+        "thinking": {
+          "type": ["string", "null"],
+          "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max", null]
+        },
+        "tools": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "approve_project": {"type": "boolean"},
+        "context_files": {"type": "boolean"},
+        "extensions": {"type": "boolean"},
+        "skills": {"type": "boolean"},
+        "prompt_templates": {"type": "boolean"},
+        "themes": {"type": "boolean"},
+        "mcp": {"type": "boolean"},
+        "offline": {"type": "boolean"},
+        "extra_args": {"type": "array", "items": {"type": "string"}}
+      },
+      "required": ["model"],
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }
