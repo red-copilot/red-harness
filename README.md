@@ -4,12 +4,12 @@ Red Harness is a reproducible evaluation runtime and control plane for security 
 
 ## Current capabilities
 
-Version 0.7 provides:
+Version 0.8 provides:
 
 - declarative task, agent, suite, policy, and distributed-job contracts
-- first-class [Pi](https://pi.dev/docs/latest) Agent Adapter using Pi JSON mode
+- first-class [Pi](https://pi.dev/docs/latest) Agent Adapter running inside Kali Rolling Docker
 - Pi tool/model event normalization into Harness traces and budgets
-- isolated per-run Pi configuration and deterministic non-interactive defaults
+- Kali Rolling + `kali-linux-core` Pi image with curated security tools\n- isolated per-run Pi configuration and deterministic non-interactive defaults\n- TSec Benchmark SDK lifecycle adapter (`list/start/submit/close`) with Harness-owned benchmark credentials
 - optional Pi model routing through the Red Harness credential-isolating Gateway
 - Docker Compose or no-op benchmark environments
 - trusted CLI agents and restricted Docker agents
@@ -31,7 +31,7 @@ Version 0.7 provides:
 - GitHub Actions coverage for Pi 1.0.4, Docker Agent, sidecar Gateway, Docker Verifier, and a real HTTP control-plane/worker flow
 
 > [!WARNING]
-> CLI agents, the host Pi adapter, and `verification.type: python` execute trusted host processes. For untrusted evaluation inputs, use Docker agents and Docker verifiers. Pi project trust is not a sandbox. `runtime: runsc` requires gVisor to be installed and registered with Docker. v0.7 defines and validates the Firecracker host/profile contract, but it does not yet launch microVMs; CI does not provide `/dev/kvm`.
+> CLI agents and `verification.type: python` execute trusted host processes. Pi runs inside a restricted Docker container by default. `runtime: runsc` requires gVisor to be installed and registered with Docker. v0.8 defines and validates the Firecracker host/profile contract, but it does not yet launch microVMs; CI does not provide `/dev/kvm`.
 
 ## Install
 
@@ -140,7 +140,7 @@ agent_settled                 -> pi.agent_settled
 
 Pi model usage contributes input/output/total tokens, cache usage, reasoning usage, and model cost to the existing Harness budget and result metrics. The raw Pi JSONL stream is retained in `agent.stdout.log`.
 
-By default, each run receives a fresh `PI_CODING_AGENT_DIR`; Pi sessions are ephemeral, install telemetry/update checks are disabled, project trust is denied, and project context/extensions/skills/MCP/templates/themes are not loaded unless explicitly enabled in the agent contract.
+By default, Pi runs in Docker with a read-only root filesystem, dropped Linux capabilities, bounded CPU/RAM/PIDs, read-only task mount, writable run workspace, and a fresh per-run `PI_CODING_AGENT_DIR`. Pi sessions are ephemeral, telemetry/update checks are disabled, project trust is denied, and project context/extensions/skills/MCP/templates/themes are not loaded unless explicitly enabled.
 
 ### Pi through the Harness model Gateway
 
@@ -160,7 +160,26 @@ redharness run benchmark/task.yaml \
 
 For that run Harness creates an isolated Pi `models.json` with a `redharness` provider whose API key is the one-time `REDHARNESS_GATEWAY_TOKEN`. The real upstream credential remains inside the Gateway process. Gateway model events are authoritative in this mode, so Pi's copy of model usage is not counted twice.
 
-The current first-class Pi adapter is a host-process adapter and therefore supports host Gateway mode. Docker-sidecar Gateway mode is reserved for Docker agents because its endpoint is reachable only on the private Docker network.
+The Pi adapter is containerized and supports both host Gateway mode and Docker sidecar Gateway mode. For VPN-backed benchmarks such as TSec, `network: host` is available on Linux workers; sidecar Gateway mode is intentionally incompatible with `network: host` because the Agent must join the private Gateway network.
+
+## TSec Benchmark SDK
+
+Install the optional SDK dependency and build the Pi/Kali image:
+
+```bash
+python -m pip install -e ".[tsec]"
+docker build -t redharness/pi-kali:local docker/pi-kali
+```
+
+Set `BENCHMARK_BASE_URL` and `BENCHMARK_TOKEN` only on the Harness worker. Run one challenge with:
+
+```bash
+redharness tsec --agent agents/examples/pi-tsec.yaml
+```
+
+Use `--challenge WEB-001` for a specific challenge or `--all` for every unfinished challenge. Harness performs the SDK lifecycle and never passes the Benchmark token into Pi. Pi receives only the challenge description and target addresses and emits candidates as `REDHARNESS_FLAG=<flag>`. Candidate plaintext is submitted through the SDK; trace records only the SHA256 of each candidate. Challenge close is always executed in `finally`.
+
+For VPN-backed targets, `agents/examples/pi-tsec.yaml` uses `network: host` so the Kali container shares the Linux worker's VPN routes. See [`docs/tsec.md`](docs/tsec.md).
 
 ## Distributed control plane
 
@@ -199,7 +218,7 @@ redharness worker \
   --workspace-root /srv/red-harness
 ```
 
-Host-process jobs, including `type: pi`, are rejected by workers unless the worker is explicitly started with:
+Host-process CLI jobs are rejected by workers unless the worker is explicitly started with:
 
 ```bash
 --allow-host-jobs
@@ -340,7 +359,7 @@ file.write
 
 The default policy prevents path traversal and constrains reads/writes to task/run roots. No host-side arbitrary shell tool is exposed.
 
-Pi built-in tools do not pass through this Tool Gateway in v0.7; they are observed through Pi's JSON event stream and run with the Pi process permissions. This is why the first-class Pi adapter is explicitly a trusted host adapter.
+Pi built-in tools do not pass through this Tool Gateway in v0.8; they are observed through Pi's JSON event stream and execute inside the Kali container. The container receives no Docker socket and no host filesystem mounts beyond the benchmark task/run paths.
 
 ## Execution profiles
 
