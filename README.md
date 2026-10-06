@@ -1,27 +1,28 @@
 # Red Harness
 
-Red Harness is a reproducible evaluation runtime for security agents. It keeps the benchmark, agent, environment, telemetry, verifier, and scoring path separate so results can be independently checked and compared.
+Red Harness is a reproducible evaluation runtime for security agents. It separates benchmark tasks, agent implementations, target environments, model/tool access, telemetry, verification, and scoring so results can be independently checked and compared.
 
 ## Current capabilities
 
-Version 0.2 provides:
+Version 0.3 provides:
 
-- declarative `task.yaml`, `agent.yaml`, and suite contracts
+- declarative task, agent, suite, and gateway-policy contracts
 - Docker Compose or no-op benchmark environments
-- trusted local CLI agent adapter (explicit opt-in)
+- trusted local CLI agent adapter
 - restricted Docker agent adapter
 - independent Python verifier
-- append-only `trace.jsonl`
-- agent telemetry protocol through `events.jsonl`
-- model token/cost accounting and tool-call accounting
-- wall-time, token, model-call, tool-call, and cost budgets
-- seed/repeat execution
-- weighted benchmark suites
-- per-run and per-suite result bundles
-- GitHub Actions CI
+- append-only JSONL trace and result bundles
+- real-time wall-time, token, model-call, tool-call, and cost budgets
+- seed/repeat execution and weighted suites
+- policy-gated Tool Gateway
+- OpenAI-compatible non-streaming model proxy
+- provider credential isolation
+- per-run Gateway lifecycle for CLI agents
+- automatic `OPENAI_BASE_URL` / one-time token injection
+- GitHub Actions CI covering direct and Gateway-backed runs
 
 > [!WARNING]
-> The local CLI adapter and Python verifier execute host processes and are intended only for trusted development inputs. Use the Docker adapter for agent isolation. Verifier sandboxing is still roadmap work.
+> The local CLI adapter and Python verifier execute host processes and are intended only for trusted development inputs. Use the Docker adapter for agent isolation. Per-run Gateway auto-injection currently supports CLI agents; Docker agents can use the standalone Gateway service until a network-sidecar mode is added.
 
 ## Install
 
@@ -33,14 +34,14 @@ Python 3.11+ is required. Docker is required for Docker agents and Docker Compos
 
 ## Quick start
 
-Validate a task and suite:
+Validate the example contracts:
 
 ```bash
 redharness validate benchmarks/examples/hello/task.yaml
 redharness validate-suite benchmarks/examples/smoke-suite.yaml
 ```
 
-Run the smoke task with the trusted local demo agent:
+Run directly:
 
 ```bash
 redharness run benchmarks/examples/hello/task.yaml \
@@ -49,22 +50,215 @@ redharness run benchmarks/examples/hello/task.yaml \
   --seed 42
 ```
 
-Repeat a task:
+Run through the per-run Tool Gateway:
 
 ```bash
 redharness run benchmarks/examples/hello/task.yaml \
-  --agent agents/examples/demo.yaml \
+  --agent agents/examples/gateway-demo.yaml \
   --allow-host-agent \
-  --repeat 5 \
-  --seed 1000
+  --gateway \
+  --gateway-policy examples/gateway-policy.yaml \
+  --seed 42
 ```
 
-Run a suite:
+When `--gateway` is enabled for a CLI agent, Harness starts an ephemeral localhost service, generates a one-time bearer token, and injects:
+
+```text
+REDHARNESS_GATEWAY_URL
+REDHARNESS_GATEWAY_TOKEN
+OPENAI_BASE_URL
+OPENAI_API_KEY
+```
+
+`OPENAI_API_KEY` contains only the one-time Gateway token. The real provider credential stays in the Harness process.
+
+## Model proxy
+
+Set the actual model API key in the Harness environment:
+
+```bash
+export REDHARNESS_MODEL_API_KEY="..."
+```
+
+Then run with an OpenAI-compatible upstream:
+
+```bash
+redharness run benchmark/task.yaml \
+  --agent agents/my-agent.yaml \
+  --allow-host-agent \
+  --gateway \
+  --model-upstream https://provider.example/v1 \
+  --input-price-per-million 2.50 \
+  --output-price-per-million 10.00
+```
+
+The Agent talks to the ephemeral Red Harness URL. The Gateway replaces the Agent bearer token with the real provider credential before forwarding the request.
+
+For successful non-streaming `/v1/chat/completions` requests, the Gateway emits:
+
+```text
+model.request
+model.response
+model.usage
+```
+
+Usage is extracted from the upstream response and converted into Harness token/cost metrics. Failed model requests still count toward `max_model_calls`.
+
+Streaming is intentionally rejected in v0.3 so accounting remains deterministic.
+
+## Tool Gateway
+
+The v0.3 built-ins are deliberately narrow:
+
+```text
+file.read
+file.write
+```
+
+Unknown or denied tools are rejected. There is no host-side arbitrary shell execution.
+
+Example policy:
+
+```yaml
+allowed_tools:
+  - file.read
+  - file.write
+
+denied_tools: []
+
+max_tool_output_bytes: 65536
+max_file_write_bytes: 1048576
+```
+
+Rules:
+
+- `file.read` is restricted to the benchmark task directory and run workspace.
+- `file.write` is restricted to the run workspace.
+- path traversal outside those roots is rejected
+- denied tool attempts are still counted against `max_tool_calls`
+- outputs and writes have policy-controlled size limits
+
+An Agent calls:
+
+```http
+POST /v1/tools/call
+Authorization: Bearer <REDHARNESS_GATEWAY_TOKEN>
+Content-Type: application/json
+
+{
+  "name": "file.write",
+  "args": {
+    "path": "proof.txt",
+    "content": "..."
+  }
+}
+```
+
+## Standalone Gateway
+
+Docker agents or external workers can run the Gateway separately.
+
+Set a Gateway token:
+
+```bash
+export REDHARNESS_GATEWAY_TOKEN="replace-with-random-token"
+```
+
+Then:
+
+```bash
+redharness gateway \
+  --workspace .redharness/run-workspace \
+  --task-dir benchmarks/example \
+  --event-file .redharness/events.jsonl \
+  --policy examples/gateway-policy.yaml
+```
+
+Provider credentials are read from `REDHARNESS_MODEL_API_KEY` by default and are never returned to clients.
+
+## Budgets and accounting
+
+A task can declare:
+
+```yaml
+budgets:
+  wall_time: 3600
+  max_tokens: 200000
+  max_model_calls: 300
+  max_tool_calls: 1000
+  max_cost_usd: 20
+```
+
+Harness tails the event stream while the Agent runs. Exceeding a configured budget terminates the Agent and returns:
+
+```text
+status: budget_exceeded
+```
+
+Result metrics include:
+
+```json
+{
+  "duration_ms": 731,
+  "input_tokens": 1200,
+  "output_tokens": 300,
+  "total_tokens": 1500,
+  "model_calls": 4,
+  "tool_calls": 12,
+  "cost_usd": 0.04
+}
+```
+
+## Suites
+
+```yaml
+apiVersion: redharness/v1
+id: web-suite
+repeat: 3
+base_seed: 1000
+
+tasks:
+  - path: web/task-001/task.yaml
+    weight: 1.0
+  - path: web/task-002/task.yaml
+    weight: 2.0
+```
+
+Run:
 
 ```bash
 redharness suite benchmarks/examples/smoke-suite.yaml \
   --agent agents/examples/demo.yaml \
   --allow-host-agent
+```
+
+The same `--gateway` and model proxy options can be applied to suites.
+
+## Architecture
+
+```text
+Benchmark Task ─────────────┐
+Agent Spec ─────────────────┼──> Orchestrator
+Suite / Seed ───────────────┘        │
+                                     ├──> Environment Provider
+                                     ├──> Gateway Runtime
+                                     │      ├── Policy Engine
+                                     │      ├── Tool Gateway
+                                     │      └── Model Proxy
+                                     ├──> Agent Adapter
+                                     │      ├── CLI
+                                     │      └── Docker
+                                     ├──> Budget Monitor
+                                     ├──> Trace Recorder
+                                     └──> Independent Verifier
+                                                │
+                                            Result Bundle
+```
+
+Core rule:
+
+```text
+Task != Environment != Agent != Model != Tool != Verifier
 ```
 
 ## Run bundle
@@ -83,165 +277,11 @@ verifier.stderr.log
 
 A suite summary is written beneath `.redharness/suites/<suite_run_id>/result.json`.
 
-## Task contract
-
-```yaml
-apiVersion: redharness/v1
-id: example
-name: Example task
-category: web
-
-objective:
-  description: Complete the objective in the isolated benchmark environment.
-
-environment:
-  provider: docker-compose
-  manifest: env/docker-compose.yml
-
-budgets:
-  wall_time: 3600
-  max_tokens: 200000
-  max_model_calls: 300
-  max_tool_calls: 1000
-  max_cost_usd: 20
-
-verification:
-  type: python
-  entrypoint: verifier.py
-```
-
-The verifier, never the agent's final answer, determines success.
-
-## Agent adapters
-
-Trusted local CLI agent:
-
-```yaml
-apiVersion: redharness/v1
-id: local-agent
-type: cli
-command: [python, agent.py]
-```
-
-Docker agent:
-
-```yaml
-apiVersion: redharness/v1
-id: isolated-agent
-type: docker
-image: ghcr.io/example/security-agent:latest
-network: environment
-command: []
-```
-
-The Docker adapter currently uses these restrictive defaults:
-
-- read-only root filesystem
-- all Linux capabilities dropped
-- `no-new-privileges`
-- PID, memory, and CPU limits
-- isolated `/tmp`
-- task mounted read-only
-- run directory mounted read/write
-- no Docker socket mount
-- `--pull=never`
-- `network: none` unless the agent is intentionally attached to the benchmark environment
-
-When `network: environment` is used, the agent joins the Docker Compose default network. Benchmark authors are responsible for declaring an internal Docker network when internet egress must be prohibited.
-
-## Agent telemetry protocol
-
-Harness creates `REDHARNESS_EVENT_FILE`. Agents or a future model/tool proxy append JSONL events:
-
-```json
-{"type":"model.usage","data":{"input_tokens":1200,"output_tokens":300,"cost_usd":0.04,"model":"model-x"}}
-{"type":"tool.call","data":{"tool":"shell.exec"}}
-```
-
-Python agents can use the included helper:
-
-```python
-from redharness.telemetry import model_usage, tool_call
-
-tool_call(tool="shell.exec")
-model_usage(
-    input_tokens=1200,
-    output_tokens=300,
-    cost_usd=0.04,
-    model="model-x",
-)
-```
-
-Harness tails this event stream while the Agent is running. If a configured budget is exceeded, the Agent process is terminated and the run ends with `status: budget_exceeded`.
-
-The same event contract is intended to be produced by the future Model Proxy and Tool Gateway, so Agent implementations do not become coupled to one model vendor.
-
-## Suite contract
-
-```yaml
-apiVersion: redharness/v1
-id: web-suite
-repeat: 3
-base_seed: 1000
-
-tasks:
-  - path: web/task-001/task.yaml
-    weight: 1.0
-  - path: web/task-002/task.yaml
-    weight: 2.0
-```
-
-Each repeat receives a stable seed. Results include success rate and weighted score, while individual attempts retain their own full trace and metrics.
-
-## Architecture
-
-```text
-Benchmark Task ───────┐
-Agent Spec ───────────┼──> Orchestrator
-Suite / Seed ─────────┘        │
-                               ├──> Environment Provider
-                               ├──> Agent Adapter
-                               │      └──> CLI / Docker
-                               ├──> Budget Monitor
-                               │      └──> Agent Telemetry
-                               ├──> Trace Recorder
-                               └──> Independent Verifier
-                                          │
-                                      Result Bundle
-```
-
-Core rule:
-
-```text
-Task != Environment != Agent != Model != Tool != Verifier
-```
-
-## Result metrics
-
-A result contains capability outcome plus efficiency metrics:
-
-```json
-{
-  "success": true,
-  "score": 100,
-  "seed": 42,
-  "metrics": {
-    "duration_ms": 731,
-    "input_tokens": 1200,
-    "output_tokens": 300,
-    "total_tokens": 1500,
-    "model_calls": 4,
-    "tool_calls": 12,
-    "cost_usd": 0.04
-  }
-}
-```
-
 ## Roadmap
 
-1. **Done:** reproducible task contract, environment lifecycle, verifier and result bundles.
-2. **Done:** Docker Agent, telemetry accounting, enforceable budgets, repeat/seed and suites.
-3. Tool Gateway with policy engine and model-provider proxy adapters.
-4. Sandboxed verifiers plus gVisor/Firecracker execution profiles.
-5. Parallel/distributed workers, pass@k and domain scoring profiles.
-6. OpenTelemetry export, trace viewer, benchmark registry and leaderboard.
+1. **Done:** task/environment/verifier/result execution contract.
+2. **Done:** Docker Agent, telemetry budgets, repeat/seed, suites.
+3. **Done:** policy-gated Tool Gateway, OpenAI-compatible model proxy, credential isolation, per-run CLI Gateway.
+4. Docker network-sidecar Gateway, streaming proxy accounting, provider adapters.
+5. Sandboxed verifiers plus gVisor/Firecracker execution profiles.
+6. Parallel/distributed workers, pass@k, domain scoring, OpenTelemetry, trace viewer, registry and leaderboard.
