@@ -9,6 +9,15 @@ from pydantic import BaseModel, Field
 from .session import AgentEvent
 
 
+class ProgressHypothesis(BaseModel):
+    id: str
+    statement: str | None = None
+    status: str = "open"
+    confidence: float | None = None
+    evidence_for: list[str] = Field(default_factory=list)
+    evidence_against: list[str] = Field(default_factory=list)
+
+
 class ProgressLedger(BaseModel):
     schema_version: str = "redharness.progress/v1"
     active_goal: str | None = None
@@ -16,6 +25,10 @@ class ProgressLedger(BaseModel):
     blocked_subgoals: list[str] = Field(default_factory=list)
     confirmed_facts: list[str] = Field(default_factory=list)
     current_subgoal: str | None = None
+    hypotheses: dict[str, ProgressHypothesis] = Field(default_factory=dict)
+    expected_observation: str | None = None
+    actual_observation: str | None = None
+    replan_reasons: list[str] = Field(default_factory=list)
     last_action: dict[str, Any] | None = None
     failure_count: int = 0
     no_progress_count: int = 0
@@ -32,6 +45,9 @@ class ProgressLedger(BaseModel):
                 "tool_call_id": event.data.get("tool_call_id"),
                 "status": "running",
             }
+            expected = event.data.get("expected_observation")
+            if isinstance(expected, str) and expected:
+                self.expected_observation = expected
         elif event.type == "tool.result":
             failed = bool(event.data.get("is_error", False))
             self.last_action = {
@@ -39,13 +55,63 @@ class ProgressLedger(BaseModel):
                 "tool_call_id": event.data.get("tool_call_id"),
                 "status": "failed" if failed else "succeeded",
             }
+            actual = event.data.get("observation")
+            if isinstance(actual, str) and actual:
+                self.actual_observation = actual
             if failed:
                 self.failure_count += 1
                 self.no_progress_count += 1
             else:
                 self.no_progress_count = 0
-        elif event.type in {"progress.updated", "capability.acquired", "goal.completed"}:
+        elif event.type == "progress.updated":
+            self._record_progress_update(event.data)
+        elif event.type in {"capability.acquired", "goal.completed"}:
             self.no_progress_count = 0
+
+
+    def _record_progress_update(self, data: dict[str, Any]) -> None:
+        current = data.get("current_subgoal", data.get("subgoal"))
+        if isinstance(current, str) and current:
+            self.current_subgoal = current
+
+        completed = data.get("completed_subgoal")
+        if isinstance(completed, str) and completed not in self.completed_subgoals:
+            self.completed_subgoals.append(completed)
+
+        blocked = data.get("blocked_subgoal")
+        if isinstance(blocked, str) and blocked not in self.blocked_subgoals:
+            self.blocked_subgoals.append(blocked)
+
+        fact = data.get("confirmed_fact")
+        if isinstance(fact, str) and fact not in self.confirmed_facts:
+            self.confirmed_facts.append(fact)
+
+        expected = data.get("expected_observation")
+        if isinstance(expected, str) and expected:
+            self.expected_observation = expected
+
+        actual = data.get("actual_observation")
+        if isinstance(actual, str) and actual:
+            self.actual_observation = actual
+
+        hypothesis = data.get("hypothesis")
+        if isinstance(hypothesis, dict) and isinstance(hypothesis.get("id"), str):
+            item = ProgressHypothesis.model_validate(hypothesis)
+            self.hypotheses[item.id] = item
+
+        replan_reason = data.get("replan_reason")
+        if (
+            isinstance(replan_reason, str)
+            and replan_reason
+            and replan_reason not in self.replan_reasons
+        ):
+            self.replan_reasons.append(replan_reason)
+
+        made_progress = data.get("made_progress")
+        if made_progress is True:
+            self.no_progress_count = 0
+        elif made_progress is False:
+            self.no_progress_count += 1
 
     def record_submission(self, *, accepted: bool, completed: bool) -> None:
         if accepted:
