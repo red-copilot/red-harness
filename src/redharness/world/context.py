@@ -269,6 +269,14 @@ class WorldContextBuilder:
         if len(rendered) <= self.max_chars:
             return rendered
 
-        marker = "\n\n[context truncated to character budget]\n"
-        budget = max(0, self.max_chars - len(marker))
-        return rendered[:budget].rstrip() + marker
+        marker = "[context truncated to character budget]"
+        kept: list[str] = []
+        used = 0
+        for line in lines:
+            addition = len(line) + 1
+            if used + addition + len(marker) + 1 > self.max_chars:
+                break
+            kept.append(line)
+            used += addition
+        kept.append(marker)
+        return "\n".join(kept) + "\n"
