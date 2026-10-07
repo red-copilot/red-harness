@@ -169,3 +169,33 @@ learned retrieval later.
 
 World State remains durable memory. `progress.json` is separate solver working state and should not
 be treated as ground truth about the target.
+
+
+## Live ingestion and single-writer semantics
+
+Agent processes never append directly to the canonical `world.events.jsonl`. They submit untrusted
+JSONL mutations to `world.inbox.jsonl`.
+
+`WorldInboxCursor` incrementally consumes only newly appended lines, validates each submission, and
+applies accepted mutations through the Harness-owned `WorldRepository`. This makes the Harness
+process the single authoritative writer for a run while preserving the append-only WorldEvent log.
+
+During session-based runs, accepted live mutations cause:
+
+```text
+world.inbox.jsonl
+  -> WorldInboxCursor
+  -> WorldRepository append
+  -> world revision N+1
+  -> world.context.txt refresh
+  -> world.state.updated trace
+  -> trusted AgentSession observation
+```
+
+Both external benchmark runs and ordinary Orchestrator runs use this session path when the Agent
+adapter exposes `start_session()`. Legacy one-shot adapters retain end-of-run ingestion as a
+compatibility fallback.
+
+The file-backed repository is still process-local/single-writer oriented. Multi-process agent
+writers must continue to submit through the Harness boundary rather than writing the canonical
+event log directly.
