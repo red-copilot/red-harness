@@ -28,7 +28,7 @@ class ContainerPiSession(OneShotAgentSession):
             run_dir=run_dir,
             poll_interval=poll_interval,
         )
-        self.container_name = ("rh_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
+        self.container_name = ("harness_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
 
     async def close(self, reason: str) -> None:
         await super().close(reason)
@@ -255,7 +255,7 @@ class ContainerPiAdapter(PiAdapter):
         (run_dir / "pi-sessions").mkdir(parents=True, exist_ok=True)
         (run_dir / "home").mkdir(parents=True, exist_ok=True)
 
-        container_name = ("rh_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
+        container_name = ("harness_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
         sidecar_gateway = gateway_enabled and gateway_network is not None
         host_gateway = gateway_enabled and not sidecar_gateway and self.spec.network != "host"
         if sidecar_gateway:
