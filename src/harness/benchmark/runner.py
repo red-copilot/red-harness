@@ -11,9 +11,9 @@ from pathlib import Path
 from ..agent import AgentResult, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..progress import ProgressLedger
+from ..session import AgentObservation
 from ..skills import load_skills
 from ..solver_loop import SolverLoop
-from ..session import AgentObservation
 from ..trace import TraceRecorder
 from ..world import (
     Entity,
