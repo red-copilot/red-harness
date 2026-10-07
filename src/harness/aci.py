@@ -6,15 +6,7 @@ from pydantic import BaseModel, Field
 
 from .progress import ProgressLedger
 from .session import AgentEvent
-from .world import (
-    ActionRecord,
-    Artifact,
-    Capability,
-    Failure,
-    Hypothesis,
-    Observation,
-    WorldRepository,
-)
+from .world import Artifact, Capability, Failure, Hypothesis, Observation, WorldRepository
 
 
 def _id(prefix: str) -> str:
@@ -32,8 +24,28 @@ class ActionIntent(BaseModel):
     replan_conditions: list[str] = Field(default_factory=list)
 
 
+class SemanticObservation(BaseModel):
+    id: str | None = None
+    action_id: str | None = None
+    type: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    content: dict = Field(default_factory=dict)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    source: str | None = None
+
+
 class TypedACI:
-    """Translate small typed Agent events into authoritative solver/world state."""
+    """Translate typed untrusted Agent events into authoritative semantic state."""
+
+    @staticmethod
+    def _require_agent_event(event: AgentEvent) -> None:
+        if event.source != "agent":
+            raise ValueError(f"{event.type} is only accepted from the agent event channel")
+
+    @staticmethod
+    def _require_runtime_event(event: AgentEvent) -> None:
+        if event.source != "runtime" or not event.trusted:
+            raise ValueError(f"{event.type} requires trusted runtime provenance")
 
     def apply(
         self,
@@ -44,22 +56,36 @@ class TypedACI:
         actor: str,
     ) -> int:
         if event.type == "action.intent":
-            progress.record_intent(ActionIntent.model_validate(event.data))
+            self._require_agent_event(event)
+            progress.record_intent(
+                ActionIntent.model_validate(event.data),
+                world_revision=world.snapshot.revision,
+            )
             return 0
 
         if event.type == "world.observe":
-            data = event.data
-            summary = data.get("summary")
-            if isinstance(summary, str) and summary:
-                progress.actual_observation = summary
+            self._require_agent_event(event)
+            item = SemanticObservation.model_validate(event.data)
+            intent = progress.action_intent or {}
+            current_action_id = intent.get("action_id")
+            effective_action_id = item.action_id or (
+                current_action_id if isinstance(current_action_id, str) else None
+            )
+            content = dict(item.content)
+            if effective_action_id:
+                content["action_id"] = effective_action_id
+            progress.record_semantic_observation(
+                summary=item.summary,
+                action_id=effective_action_id,
+            )
             world.upsert(
                 "observation",
                 Observation(
-                    id=str(data.get("id") or _id("obs")),
-                    type=str(data["type"]),
-                    content=dict(data.get("content") or {}),
-                    confidence=data.get("confidence"),
-                    source=data.get("source"),
+                    id=str(item.id or _id("obs")),
+                    type=item.type,
+                    content=content,
+                    confidence=item.confidence,
+                    source=item.source,
                 ),
                 actor=actor,
                 source_event_id=event.event_id,
@@ -67,6 +93,7 @@ class TypedACI:
             return 1
 
         if event.type == "world.hypothesis":
+            self._require_agent_event(event)
             data = event.data
             world.upsert(
                 "hypothesis",
@@ -83,6 +110,7 @@ class TypedACI:
             return 1
 
         if event.type == "world.capability":
+            self._require_agent_event(event)
             data = event.data
             world.upsert(
                 "capability",
@@ -99,6 +127,7 @@ class TypedACI:
             return 1
 
         if event.type == "world.artifact":
+            self._require_agent_event(event)
             data = event.data
             world.upsert(
                 "artifact",
@@ -114,6 +143,7 @@ class TypedACI:
             return 1
 
         if event.type == "world.failure":
+            self._require_agent_event(event)
             data = event.data
             world.upsert(
                 "failure",
@@ -130,63 +160,9 @@ class TypedACI:
             )
             return 1
 
-        if event.type == "tool.call":
-            call_id = str(event.data.get("tool_call_id") or _id("tool"))
-            intent = progress.action_intent
-            world.upsert(
-                "action",
-                ActionRecord(
-                    id=f"action:{call_id}",
-                    type=str(event.data.get("tool") or "tool"),
-                    status="running",
-                    attributes={
-                        "tool_call_id": call_id,
-                        "intent_action_id": (
-                            intent.get("action_id") if isinstance(intent, dict) else None
-                        ),
-                    },
-                ),
-                actor=actor,
-                source_event_id=event.event_id,
-            )
-            return 1
-
-        if event.type == "tool.result":
-            call_id = str(event.data.get("tool_call_id") or _id("tool"))
-            failed = bool(event.data.get("is_error", False))
-            world.upsert(
-                "action",
-                ActionRecord(
-                    id=f"action:{call_id}",
-                    type=str(event.data.get("tool") or "tool"),
-                    status="failed" if failed else "succeeded",
-                    attributes={
-                        "tool_call_id": call_id,
-                        "duration_ms": event.data.get("duration_ms"),
-                        "failure_class": event.data.get("failure_class"),
-                    },
-                ),
-                actor=actor,
-                source_event_id=event.event_id,
-            )
-            world.upsert(
-                "observation",
-                Observation(
-                    id=f"obs:tool:{call_id}",
-                    type="tool.execution",
-                    content={
-                        "tool": event.data.get("tool"),
-                        "tool_call_id": call_id,
-                        "status": "failed" if failed else "succeeded",
-                        "duration_ms": event.data.get("duration_ms"),
-                        "failure_class": event.data.get("failure_class"),
-                    },
-                    confidence=1.0,
-                    source="harness.tool",
-                ),
-                actor="harness",
-                source_event_id=event.event_id,
-            )
-            return 2
+        if event.type in {"tool.call", "tool.result"}:
+            self._require_runtime_event(event)
+            # Raw execution telemetry belongs in trace/budget state, not semantic World state.
+            return 0
 
         return 0
