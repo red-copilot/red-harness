@@ -38,7 +38,7 @@ Each mutation is represented as a `WorldEvent`:
 
 ```json
 {
-  "schema_version": "harness.world/v1",
+  "schema_version": "harness/world/v1",
   "kind": "capability",
   "op": "upsert",
   "object": {
@@ -69,13 +69,13 @@ The task objective is seeded as the root Goal when the run starts and updated wi
 success, score, and run status when execution finishes.
 
 Agents receive a `HARNESS_WORLD_INBOX` path. They may append untrusted JSONL submissions
-using the `harness.world.submit/v1` envelope. The Harness validates each submission and copies
+using the `harness/world-submission/v1` envelope. The Harness validates each submission and copies
 accepted mutations into the authoritative world event log with the actor forced to `agent`.
 
 Example:
 
 ```json
-{"schema_version":"harness.world.submit/v1","kind":"capability","op":"upsert","object":{"id":"cap-shell","type":"host.shell","subject":"agent","scope":"host-1","attributes":{}}}
+{"schema_version":"harness/world-submission/v1","kind":"capability","op":"upsert","object":{"id":"cap-shell","type":"host.shell","subject":"agent","scope":"host-1","attributes":{}}}
 ```
 
 Agents never write `world.db`, `world.events.jsonl`, or `world.snapshot.json` directly. Invalid inbox lines are
