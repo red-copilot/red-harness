@@ -181,7 +181,14 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     world = client.get("/v1/runs/run_test/world", headers=headers).json()
     assert world["revision"] == 2
     world_events = client.get("/v1/runs/run_test/world/events", headers=headers).json()
+    assert world_events[0]["sequence"] == 1
     assert world_events[0]["kind"] == "goal"
+    incremental = client.get(
+        "/v1/runs/run_test/world/events?after_sequence=1",
+        headers=headers,
+    ).json()
+    assert [item["sequence"] for item in incremental] == [2]
+    assert incremental[0]["kind"] == "capability"
 
     plan = client.get("/v1/runs/run_test/plan", headers=headers).json()
     assert plan["planner"] == "heuristic-skill-v1"
