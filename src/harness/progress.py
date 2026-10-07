@@ -27,9 +27,13 @@ class ProgressLedger(BaseModel):
     current_subgoal: str | None = None
     hypotheses: dict[str, ProgressHypothesis] = Field(default_factory=dict)
     action_intent: dict[str, Any] | None = None
+    intent_world_revision: int | None = None
+    expected_observations: list[str] = Field(default_factory=list)
     expected_observation: str | None = None
     actual_observation: str | None = None
+    actual_observation_action_id: str | None = None
     replan_reasons: list[str] = Field(default_factory=list)
+    replan_history: list[str] = Field(default_factory=list)
     last_verification: dict[str, Any] | None = None
     verified_actions: int = 0
     contradicted_actions: int = 0
@@ -46,51 +50,72 @@ class ProgressLedger(BaseModel):
     def record_event(self, event: AgentEvent) -> None:
         self.last_event_type = event.type
         if event.type == "tool.call":
-            self.actual_observation = None
+            if event.source != "runtime" or not event.trusted:
+                return
             self.last_action = {
                 "tool": event.data.get("tool"),
                 "tool_call_id": event.data.get("tool_call_id"),
                 "status": "running",
             }
-            expected = event.data.get("expected_observation")
-            if isinstance(expected, str) and expected:
-                self.expected_observation = expected
         elif event.type == "tool.result":
+            if event.source != "runtime" or not event.trusted:
+                return
             failed = bool(event.data.get("is_error", False))
             self.last_action = {
                 "tool": event.data.get("tool"),
                 "tool_call_id": event.data.get("tool_call_id"),
                 "status": "failed" if failed else "succeeded",
             }
-            actual = event.data.get("observation")
-            if isinstance(actual, str) and actual:
-                self.actual_observation = actual
             if failed:
                 self.failure_count += 1
                 self.no_progress_count += 1
-            else:
-                self.no_progress_count = 0
         elif event.type == "progress.updated":
             self._record_progress_update(event.data)
         elif event.type in {"capability.acquired", "goal.completed"}:
             self.no_progress_count = 0
 
-
-    def record_intent(self, intent: Any) -> None:
+    def record_intent(self, intent: Any, *, world_revision: int) -> None:
         data = (
             intent.model_dump(mode="json")
             if hasattr(intent, "model_dump")
             else dict(intent)
         )
+        if self.replan_reasons:
+            for reason in self.replan_reasons:
+                if reason not in self.replan_history:
+                    self.replan_history.append(reason)
+            self.replan_reasons.clear()
         self.action_intent = data
+        self.intent_world_revision = world_revision
         subgoal = data.get("subgoal_id")
         if isinstance(subgoal, str) and subgoal:
             self.current_subgoal = subgoal
         expected = data.get("expected_observations") or []
+        self.expected_observations = [
+            str(item) for item in expected if isinstance(item, str) and item
+        ]
         self.expected_observation = (
-            str(expected[0]) if isinstance(expected, list) and expected else None
+            self.expected_observations[0] if self.expected_observations else None
         )
         self.actual_observation = None
+        self.actual_observation_action_id = None
+
+    def record_semantic_observation(
+        self,
+        *,
+        summary: str,
+        action_id: str | None,
+    ) -> bool:
+        intent = self.action_intent or {}
+        current_action_id = intent.get("action_id")
+        if not isinstance(current_action_id, str) or not current_action_id:
+            return False
+        effective_action_id = action_id or current_action_id
+        if effective_action_id != current_action_id:
+            return False
+        self.actual_observation = summary
+        self.actual_observation_action_id = effective_action_id
+        return True
 
     def _record_progress_update(self, data: dict[str, Any]) -> None:
         current = data.get("current_subgoal", data.get("subgoal"))
@@ -111,11 +136,16 @@ class ProgressLedger(BaseModel):
 
         expected = data.get("expected_observation")
         if isinstance(expected, str) and expected:
+            self.expected_observations = [expected]
             self.expected_observation = expected
 
         actual = data.get("actual_observation")
+        action_id = data.get("action_id")
         if isinstance(actual, str) and actual:
-            self.actual_observation = actual
+            self.record_semantic_observation(
+                summary=actual,
+                action_id=action_id if isinstance(action_id, str) else None,
+            )
 
         hypothesis = data.get("hypothesis")
         if isinstance(hypothesis, dict) and isinstance(hypothesis.get("id"), str):
@@ -147,11 +177,15 @@ class ProgressLedger(BaseModel):
         if status == "verified":
             self.verified_actions += 1
             self.no_progress_count = 0
+            if self.replan_reasons:
+                for reason in self.replan_reasons:
+                    if reason not in self.replan_history:
+                        self.replan_history.append(reason)
+                self.replan_reasons.clear()
         elif status == "contradicted":
             self.contradicted_actions += 1
-            if (self.last_action or {}).get("status") != "failed":
-                self.failure_count += 1
-                self.no_progress_count += 1
+            self.failure_count += 1
+            self.no_progress_count += 1
         elif status == "pending":
             self.pending_actions += 1
 
