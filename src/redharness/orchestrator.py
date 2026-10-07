@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import shutil
+import sqlite3
 import time
 import uuid
 from collections.abc import Callable
@@ -72,7 +73,10 @@ class Orchestrator:
             if not source.is_file():
                 raise FileNotFoundError(f"resume world state not found: {source}")
             if source.suffix == ".db":
-                shutil.copyfile(source, world_db_path)
+                with sqlite3.connect(source) as source_db, sqlite3.connect(
+                    world_db_path
+                ) as target_db:
+                    source_db.backup(target_db)
             else:
                 shutil.copyfile(source, world_event_path)
         world = self.world_repository_factory(world_event_path)
