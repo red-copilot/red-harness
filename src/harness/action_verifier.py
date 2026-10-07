@@ -10,11 +10,24 @@ from .progress import ProgressLedger
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]{3,}")
+_NEGATIVE_PHRASES = (
+    "not found",
+    "missing",
+    "closed",
+    "denied",
+    "failed",
+    "unreachable",
+    "not reachable",
+    "not accessible",
+    "refused",
+    "forbidden",
+)
 
 
 class ActionVerification(BaseModel):
     status: Literal["verified", "contradicted", "pending"]
     expected_observation: str | None = None
+    expected_observations: list[str] = Field(default_factory=list)
     actual_observation: str | None = None
     evidence: list[str] = Field(default_factory=list)
     replan_required: bool = False
@@ -22,13 +35,19 @@ class ActionVerification(BaseModel):
 
 
 class ActionVerifier:
-    """Conservative deterministic verifier for solver action outcomes."""
+    """Conservative verifier over action-bound semantic observations."""
 
     @staticmethod
     def _tokens(value: str | None) -> set[str]:
         if not value:
             return set()
         return {token.lower() for token in _TOKEN_RE.findall(value)}
+
+    @classmethod
+    def _coverage(cls, expected: str, actual: str) -> float:
+        expected_tokens = cls._tokens(expected)
+        actual_tokens = cls._tokens(actual)
+        return len(expected_tokens & actual_tokens) / max(1, len(expected_tokens))
 
     def verify(
         self,
@@ -37,24 +56,23 @@ class ActionVerifier:
         planned_world_revision: int | None = None,
         current_world_revision: int | None = None,
     ) -> ActionVerification | None:
-        expected = progress.expected_observation
+        expected_values = list(progress.expected_observations)
+        if not expected_values and progress.expected_observation:
+            expected_values = [progress.expected_observation]
+        if not expected_values:
+            return None
+
         actual = progress.actual_observation
-        last_action = progress.last_action or {}
+        intent = progress.action_intent or {}
+        intent_action_id = intent.get("action_id")
+        if (
+            actual is not None
+            and isinstance(intent_action_id, str)
+            and progress.actual_observation_action_id != intent_action_id
+        ):
+            actual = None
 
-        reasons: list[str] = []
         evidence: list[str] = []
-
-        if last_action.get("status") == "failed":
-            reasons.append("action_failed")
-            return ActionVerification(
-                status="contradicted",
-                expected_observation=expected,
-                actual_observation=actual,
-                evidence=["last action failed"],
-                replan_required=True,
-                replan_reasons=reasons,
-            )
-
         world_revision_changed = (
             planned_world_revision is not None
             and current_world_revision is not None
@@ -65,62 +83,63 @@ class ActionVerifier:
                 f"world_revision={planned_world_revision}->{current_world_revision}"
             )
 
-        if expected is None:
-            return None
-
         if actual is None:
-            reasons.append("expected_observation_missing")
+            return ActionVerification(
+                status="pending",
+                expected_observation=expected_values[0],
+                expected_observations=expected_values,
+                evidence=[*evidence, "waiting for action-bound semantic observation"],
+                replan_required=False,
+            )
+
+        scored = sorted(
+            (
+                (self._coverage(expected, actual), expected)
+                for expected in expected_values
+            ),
+            reverse=True,
+        )
+        best_coverage, best_expected = scored[0]
+        actual_lower = actual.lower()
+        expected_lower = best_expected.lower()
+
+        actual_negative = any(phrase in actual_lower for phrase in _NEGATIVE_PHRASES)
+        expected_negative = any(phrase in expected_lower for phrase in _NEGATIVE_PHRASES)
+        if actual_negative and not expected_negative:
+            reasons = ["expected_observation_contradicted"]
             if world_revision_changed:
                 reasons.append("world_revision_changed")
             return ActionVerification(
-                status="pending",
-                expected_observation=expected,
-                evidence=["expected observation has no actual observation yet"],
-                replan_required=True,
-                replan_reasons=reasons,
-            )
-
-        expected_tokens = self._tokens(expected)
-        actual_tokens = self._tokens(actual)
-        overlap = expected_tokens & actual_tokens
-        coverage = len(overlap) / max(1, len(expected_tokens))
-
-        explicit_negative = any(
-            token in actual.lower()
-            for token in ("not found", "missing", "closed", "denied", "failed", "unreachable")
-        )
-        if explicit_negative:
-            reasons.append("expected_observation_contradicted")
-            evidence.append("actual observation contains explicit negative evidence")
-            return ActionVerification(
                 status="contradicted",
-                expected_observation=expected,
+                expected_observation=best_expected,
+                expected_observations=expected_values,
                 actual_observation=actual,
-                evidence=evidence,
+                evidence=[
+                    *evidence,
+                    "actual observation contains explicit negative evidence",
+                ],
                 replan_required=True,
                 replan_reasons=reasons,
             )
 
-        if expected.lower() in actual.lower() or coverage >= 0.6:
-            evidence.append(f"token_coverage={coverage:.2f}")
+        if expected_lower in actual_lower or best_coverage >= 0.6:
             return ActionVerification(
                 status="verified",
-                expected_observation=expected,
+                expected_observation=best_expected,
+                expected_observations=expected_values,
                 actual_observation=actual,
-                evidence=evidence,
-                replan_required=bool(reasons),
-                replan_reasons=reasons,
+                evidence=[*evidence, f"token_coverage={best_coverage:.2f}"],
             )
 
-        reasons.append("expected_observation_not_evidenced")
+        reasons = ["expected_observation_not_evidenced"]
         if world_revision_changed:
             reasons.append("world_revision_changed")
-        evidence.append(f"token_coverage={coverage:.2f}")
         return ActionVerification(
             status="pending",
-            expected_observation=expected,
+            expected_observation=best_expected,
+            expected_observations=expected_values,
             actual_observation=actual,
-            evidence=evidence,
+            evidence=[*evidence, f"token_coverage={best_coverage:.2f}"],
             replan_required=True,
             replan_reasons=reasons,
         )
