@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from .models import WorldEvent, WorldObjectKind, WorldSnapshot
 from .reducer import WorldReducer
+from .repository import WorldConflictError
 
 
 class FileWorldRepository:
@@ -25,12 +26,19 @@ class FileWorldRepository:
     def snapshot(self) -> WorldSnapshot:
         return self._snapshot.model_copy(deep=True)
 
-    def events(self, *, limit: int | None = None) -> list[WorldEvent]:
+    def events(
+        self,
+        *,
+        limit: int | None = None,
+        after_sequence: int | None = None,
+    ) -> list[WorldEvent]:
         if not self.event_path.exists():
             return []
         events: list[WorldEvent] = []
         with self.event_path.open("r", encoding="utf-8") as handle:
             for number, line in enumerate(handle, start=1):
+                if after_sequence is not None and number <= after_sequence:
+                    continue
                 if not line.strip():
                     continue
                 try:
@@ -46,9 +54,29 @@ class FileWorldRepository:
     def replay(self) -> WorldSnapshot:
         return self._reducer.replay(self.events())
 
-    def append(self, event: WorldEvent) -> WorldSnapshot:
+    def append(
+        self,
+        event: WorldEvent,
+        *,
+        expected_revision: int | None = None,
+    ) -> WorldSnapshot:
         line = event.model_dump_json()
         with self._lock:
+            if (
+                expected_revision is not None
+                and expected_revision != self._snapshot.revision
+            ):
+                raise WorldConflictError(
+                    f"world revision conflict: expected {expected_revision}, "
+                    f"current {self._snapshot.revision}"
+                )
+            for existing in self.events():
+                if existing.id == event.id:
+                    if existing.model_dump_json() != line:
+                        raise ValueError(
+                            f"world event id {event.id} already exists with different payload"
+                        )
+                    return self.snapshot
             candidate = self._snapshot.model_copy(deep=True)
             self._reducer.apply(candidate, event)
             with self.event_path.open("a", encoding="utf-8") as handle:
@@ -65,6 +93,7 @@ class FileWorldRepository:
         *,
         actor: str = "harness",
         source_event_id: str | None = None,
+        expected_revision: int | None = None,
     ) -> WorldSnapshot:
         data = obj.model_dump(mode="json") if isinstance(obj, BaseModel) else dict(obj)
         return self.append(
@@ -74,7 +103,8 @@ class FileWorldRepository:
                 object=data,
                 actor=actor,
                 source_event_id=source_event_id,
-            )
+            ),
+            expected_revision=expected_revision,
         )
 
     def remove(
@@ -83,9 +113,11 @@ class FileWorldRepository:
         object_id: str,
         *,
         actor: str = "harness",
+        expected_revision: int | None = None,
     ) -> WorldSnapshot:
         return self.append(
-            WorldEvent(kind=kind, op="remove", object={"id": object_id}, actor=actor)
+            WorldEvent(kind=kind, op="remove", object={"id": object_id}, actor=actor),
+            expected_revision=expected_revision,
         )
 
     def _write_snapshot(self) -> None:
