@@ -11,6 +11,7 @@ from typing import Any
 from .agent import AgentError, AgentResult, _terminate_process
 from .budget import BudgetMonitor
 from .models import AgentSpec, TaskSpec
+from .runtime_paths import runtime_event_path
 from .trace import TraceRecorder
 
 
@@ -406,7 +407,7 @@ class PiAdapter:
         else:
             primary_network = "none"
 
-        event_file = run_dir / "runtime.events.jsonl"
+        event_file = runtime_event_path(run_dir)
         event_file.write_text("", encoding="utf-8")
         raw_path = run_dir / "agent.stdout.log"
         stderr_path = run_dir / "agent.stderr.log"
