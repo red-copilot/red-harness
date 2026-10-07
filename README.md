@@ -541,7 +541,7 @@ Externally evaluated benchmarks may accept structured submissions through
 `HARNESS_FEEDBACK_FILE`. TSec uses this path for online flag feedback while retaining
 `HARNESS_FLAG=<flag>` as a compatibility fallback.
 
-Each benchmark run also maintains `progress.json` (`harness.progress/v1`) separately from
+Each benchmark run also maintains `progress.json` (`harness/progress/v1`) separately from
 World State. It tracks active solver progress, recent action status, no-progress/failure counters,
 submission outcomes, and objective completion. Containerized Pi sessions can be actively stopped
 when the evaluator reports objective completion.
