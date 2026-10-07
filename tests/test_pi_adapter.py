@@ -93,7 +93,7 @@ def test_pi_container_command_is_restricted_and_passes_direct_secret(
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert "NET_RAW" in command
     assert "FAKE_PROVIDER_KEY=secret" in command
-    assert "HARNESS_EVENT_FILE=/run/harness/events.jsonl" in command
+    assert "HARNESS_EVENT_FILE=/run/harness/agent.events.jsonl" in command
     assert "HARNESS_NETWORK_PROFILE=unrestricted" in command
     assert "harness-pi-kali:test" in command
 
