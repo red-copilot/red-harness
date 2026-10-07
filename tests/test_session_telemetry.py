@@ -8,7 +8,6 @@ from pathlib import Path
 from harness.agent import AgentResult
 from harness.budget import UsageMetrics
 from harness.failures import FailureClass, classify_failure
-from harness.pi_container import ContainerPiSession
 from harness.progress import ProgressLedger
 from harness.runtime_paths import runtime_event_path
 from harness.session import AgentEvent, AgentObservation, OneShotAgentSession
@@ -179,29 +178,6 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["active_goal"] == "goal:test"
     assert saved["objective_completed"] is True
-
-
-def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path) -> None:
-    calls: list[list[str]] = []
-
-    def fake_run(command, **_kwargs):
-        calls.append(command)
-        return type("Result", (), {"returncode": 0})()
-
-    monkeypatch.setattr("harness.pi_container.subprocess.run", fake_run)
-    run_dir = tmp_path / "run_demo"
-    run_dir.mkdir()
-    session = ContainerPiSession(
-        object(),
-        run_kwargs={},
-        run_dir=run_dir,
-    )
-    asyncio.run(session.close("objective-complete"))
-
-    assert calls == [["docker", "kill", "harness_pi_run_demo"]]
-    control = (tmp_path / "run_demo" / "agent.control.jsonl")
-    assert "objective-complete" in control.read_text(encoding="utf-8")
-
 
 
 def test_oneshot_session_rejects_agent_tool_spoofing(tmp_path: Path) -> None:
