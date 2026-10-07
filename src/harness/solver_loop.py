@@ -5,8 +5,10 @@ from pathlib import Path
 
 from .aci import TypedACI
 from .action_verifier import ActionVerifier
+from .planner import RollingHorizonPlanner, RollingPlan
 from .progress import ProgressLedger
 from .session import AgentEvent, AgentObservation, AgentSession
+from .skills import SkillSpec
 from .trace import TraceRecorder
 from .world import WorldContextBuilder, WorldRepository
 from .world.live import WorldInboxCursor
@@ -41,6 +43,9 @@ class SolverLoop:
         action_verifier: ActionVerifier | None = None,
         context_builder: WorldContextBuilder | None = None,
         world_inbox: WorldInboxCursor | None = None,
+        skills: list[SkillSpec] | None = None,
+        planner: RollingHorizonPlanner | None = None,
+        plan_horizon: int = 3,
     ) -> None:
         self.world = world
         self.progress = progress
@@ -58,6 +63,11 @@ class SolverLoop:
             actor=actor,
         )
         self.progress_path = run_dir / "progress.json"
+        self.plan_path = run_dir / "plan.json"
+        self.skills = list(skills or [])
+        self.planner = planner or RollingHorizonPlanner()
+        self.plan_horizon = max(1, min(3, plan_horizon))
+        self._last_plan_signature: tuple | None = None
         self.stats = SolverLoopStats()
 
     async def process_event(self, session: AgentSession, event: AgentEvent) -> None:
@@ -192,6 +202,57 @@ class SolverLoop:
                     )
 
         self.progress.write(self.progress_path)
+        await self.maybe_replan(session)
+
+    async def maybe_replan(
+        self,
+        session: AgentSession,
+        *,
+        force: bool = False,
+    ) -> RollingPlan | None:
+        reasons = list(self.progress.replan_reasons)
+        if self.progress.no_progress_count >= 2 and "no_progress_threshold" not in reasons:
+            reasons.append("no_progress_threshold")
+        if not force and not reasons:
+            return None
+
+        signature = (
+            self.world.snapshot.revision,
+            tuple(reasons),
+            self.progress.no_progress_count,
+            (self.progress.last_verification or {}).get("status"),
+        )
+        if not force and signature == self._last_plan_signature:
+            return None
+
+        plan = self.planner.propose(
+            self.world.snapshot,
+            self.skills,
+            progress=self.progress,
+            horizon=self.plan_horizon,
+        )
+        self.plan_path.write_text(
+            plan.model_dump_json(indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self._last_plan_signature = signature
+        self.planned_world_revision = self.world.snapshot.revision
+        payload = plan.model_dump(mode="json")
+        self.trace.emit(
+            "solver.plan.updated",
+            actor="harness",
+            data=payload,
+        )
+        await session.observe(
+            AgentObservation(
+                type="solver.plan.updated",
+                data={
+                    **payload,
+                    "plan_path": "plan.json",
+                },
+            )
+        )
+        return plan
 
     def finish_ingest(self) -> None:
         report = self.world_inbox.poll()
