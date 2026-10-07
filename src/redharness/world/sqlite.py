@@ -331,27 +331,41 @@ class SQLiteWorldRepository:
             self.append(WorldEvent.model_validate_json(line))
 
     def _write_exports(self) -> None:
-        events = self.events()
-        temp_events = self.export_event_path.with_suffix(
-            self.export_event_path.suffix + ".tmp"
-        )
-        temp_events.write_text(
-            "".join(event.model_dump_json() + "\n" for event in events),
-            encoding="utf-8",
-        )
-        temp_events.replace(self.export_event_path)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    "SELECT payload_json FROM world_events ORDER BY sequence"
+                ).fetchall()
+                events = [
+                    WorldEvent.model_validate_json(row["payload_json"])
+                    for row in rows
+                ]
+                snapshot = self._load_snapshot(connection)
 
-        snapshot = self.snapshot
-        temp_snapshot = self.snapshot_path.with_suffix(
-            self.snapshot_path.suffix + ".tmp"
-        )
-        temp_snapshot.write_text(
-            json.dumps(
-                snapshot.model_dump(mode="json"),
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        temp_snapshot.replace(self.snapshot_path)
+                temp_events = self.export_event_path.with_suffix(
+                    self.export_event_path.suffix + ".tmp"
+                )
+                temp_events.write_text(
+                    "".join(event.model_dump_json() + "\n" for event in events),
+                    encoding="utf-8",
+                )
+                temp_events.replace(self.export_event_path)
+
+                temp_snapshot = self.snapshot_path.with_suffix(
+                    self.snapshot_path.suffix + ".tmp"
+                )
+                temp_snapshot.write_text(
+                    json.dumps(
+                        snapshot.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                temp_snapshot.replace(self.snapshot_path)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
