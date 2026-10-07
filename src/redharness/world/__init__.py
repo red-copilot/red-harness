@@ -18,8 +18,9 @@ from .models import (
 )
 from .protocol import IngestReport, WorldSubmission, ingest_world_inbox, write_submission
 from .reducer import WorldReducer
-from .repository import WorldRepository
+from .repository import WorldConflictError, WorldRepository
 from .retrieval import WorldRetriever
+from .sqlite import SQLiteWorldRepository
 from .store import FileWorldRepository, WorldStore
 
 __all__ = [
@@ -36,6 +37,8 @@ __all__ = [
     "Observation",
     "Provenance",
     "Relation",
+    "SQLiteWorldRepository",
+    "WorldConflictError",
     "WorldContextBuilder",
     "WorldEvent",
     "WorldInboxCursor",
