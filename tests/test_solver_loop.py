@@ -39,7 +39,10 @@ def test_solver_loop_applies_aci_updates_world_and_verifies(tmp_path: Path) -> N
             session,
             AgentEvent(
                 type="action.intent",
+                source="agent",
+                trusted=False,
                 data={
+                    "action_id": "action-admin",
                     "description": "probe admin",
                     "expected_observations": ["admin endpoint exists"],
                 },
@@ -51,8 +54,11 @@ def test_solver_loop_applies_aci_updates_world_and_verifies(tmp_path: Path) -> N
             session,
             AgentEvent(
                 type="world.observe",
+                source="agent",
+                trusted=False,
                 data={
                     "id": "obs-admin",
+                    "action_id": "action-admin",
                     "type": "web.endpoint",
                     "summary": "admin endpoint exists",
                     "content": {"path": "/admin", "status": 200},
@@ -95,6 +101,8 @@ def test_solver_loop_rejects_invalid_typed_event_without_stopping(tmp_path: Path
             session,
             AgentEvent(
                 type="world.observe",
+                source="agent",
+                trusted=False,
                 data={"id": "bad-observation"},
             ),
         )
@@ -147,3 +155,110 @@ def test_solver_loop_publishes_initial_and_replan_updates(tmp_path: Path) -> Non
     assert len(updates) == 2
     assert updates[-1].data["actions"][0]["skill_id"] == "alternate-path"
     assert updates[-1].data["plan_path"] == "plan.json"
+
+
+
+def test_solver_loop_does_not_verify_or_mutate_world_on_tool_result(tmp_path: Path) -> None:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger()
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-tool", "task-tool")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="probe admin",
+        planned_world_revision=world.snapshot.revision,
+    )
+
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="action.intent",
+                source="agent",
+                trusted=False,
+                data={
+                    "action_id": "action-admin",
+                    "description": "probe admin",
+                    "expected_observations": ["admin endpoint exists"],
+                },
+            ),
+        )
+    )
+    revision_before = world.snapshot.revision
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="tool.result",
+                source="runtime",
+                trusted=True,
+                data={
+                    "tool": "bash",
+                    "tool_call_id": "call-1",
+                    "is_error": False,
+                },
+            ),
+        )
+    )
+
+    assert world.snapshot.revision == revision_before
+    assert progress.last_verification is None
+    assert not any(item.type == "solver.verification" for item in session.feedback)
+
+
+def test_solver_loop_does_not_cross_verify_other_action_observation(tmp_path: Path) -> None:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger()
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-bind", "task-bind")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="probe admin",
+        planned_world_revision=world.snapshot.revision,
+    )
+
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="action.intent",
+                source="agent",
+                trusted=False,
+                data={
+                    "action_id": "action-current",
+                    "description": "probe admin",
+                    "expected_observations": ["admin endpoint exists"],
+                },
+            ),
+        )
+    )
+    asyncio.run(
+        loop.process_event(
+            session,
+            AgentEvent(
+                type="world.observe",
+                source="agent",
+                trusted=False,
+                data={
+                    "action_id": "action-other",
+                    "type": "web.endpoint",
+                    "summary": "admin endpoint exists",
+                    "content": {"path": "/admin"},
+                },
+            ),
+        )
+    )
+
+    assert world.snapshot.observations
+    assert progress.actual_observation is None
+    assert progress.last_verification is not None
+    assert progress.last_verification["status"] == "pending"
+    assert progress.last_verification["replan_required"] is False
