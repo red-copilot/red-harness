@@ -14,6 +14,7 @@ import uvicorn
 
 from .gateway import ModelPricing, create_gateway_app
 from .policy import load_policy
+from .runtime_paths import control_dir, runtime_event_path
 from .trace import TraceRecorder
 
 
@@ -48,6 +49,7 @@ class HostGatewayRuntime:
     ) -> None:
         self.config = config
         self.run_dir = run_dir
+        self.control_dir = control_dir(run_dir)
         self.task_dir = task_dir
         self.trace = trace
         self.expose_to_docker = expose_to_docker
@@ -58,7 +60,7 @@ class HostGatewayRuntime:
         self.url = f"http://{client_host}:{self.port}"
 
         app = create_gateway_app(
-            event_file=run_dir / "events.jsonl",
+            event_file=runtime_event_path(run_dir),
             workspace=run_dir,
             task_dir=task_dir,
             policy=load_policy(config.policy_path),
@@ -193,6 +195,8 @@ class DockerGatewaySidecarRuntime:
             f"{self.task_dir.resolve()}:/task:ro",
             "-v",
             f"{self.run_dir.resolve()}:/run/harness:rw",
+            "-v",
+            f"{self.control_dir.resolve()}:/run/harness-control:rw",
             "-e",
             f"HARNESS_GATEWAY_TOKEN={self.token}",
         ]
@@ -221,7 +225,7 @@ class DockerGatewaySidecarRuntime:
                 "--port",
                 "8765",
                 "--event-file",
-                "/run/harness/events.jsonl",
+                "/run/harness-control/runtime.events.jsonl",
                 "--workspace",
                 "/run/harness",
                 "--task-dir",
