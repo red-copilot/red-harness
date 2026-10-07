@@ -229,6 +229,7 @@ class SolverLoop:
             self.world.snapshot,
             self.skills,
             progress=self.progress,
+            goal_text=self.context_query,
             horizon=self.plan_horizon,
         )
         self.plan_path.write_text(
