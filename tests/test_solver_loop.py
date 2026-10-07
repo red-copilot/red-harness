@@ -259,6 +259,5 @@ def test_solver_loop_does_not_cross_verify_other_action_observation(tmp_path: Pa
 
     assert world.snapshot.observations
     assert progress.actual_observation is None
-    assert progress.last_verification is not None
-    assert progress.last_verification["status"] == "pending"
-    assert progress.last_verification["replan_required"] is False
+    assert progress.last_verification is None
+    assert not any(item.type == "solver.verification" for item in session.feedback)
