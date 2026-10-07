@@ -326,6 +326,9 @@ class Orchestrator:
                 (run_dir / "verifier.stdout.log").write_text(vout, encoding="utf-8")
                 (run_dir / "verifier.stderr.log").write_text(verr, encoding="utf-8")
                 verification = verified.model_dump()
+                if verified.success:
+                    progress.objective_completed = True
+                progress.write(progress_path)
                 status = "finished"
         except Exception as exc:  # noqa: BLE001 - orchestrator boundary records all failures.
             status = "error"
