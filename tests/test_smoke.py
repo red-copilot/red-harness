@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from harness.agent import AgentResult
@@ -108,20 +107,23 @@ class _LiveWorldSession:
 
     async def events(self):
         (self.run_dir / "proof.txt").write_text("red-harness-ok", encoding="utf-8")
-        (self.run_dir / "world.inbox.jsonl").write_text(
-            json.dumps(
-                {
-                    "schema_version": "harness/world-submission/v1",
-                    "kind": "observation",
-                    "object": {
-                        "id": "obs-live-local",
-                        "type": "task.progress",
-                        "content": {"proof": "written"},
-                    },
-                }
-            )
-            + "\n",
-            encoding="utf-8",
+        yield AgentEvent(
+            type="action.intent",
+            data={
+                "action_id": "local-proof",
+                "description": "write proof",
+                "expected_observations": ["proof written"],
+            },
+        )
+        yield AgentEvent(
+            type="world.observe",
+            data={
+                "id": "obs-live-local",
+                "type": "task.progress",
+                "summary": "proof written",
+                "content": {"proof": "written"},
+                "confidence": 1.0,
+            },
         )
         yield AgentEvent(type="progress.updated", data={"made_progress": True})
 
@@ -174,6 +176,10 @@ def test_orchestrator_ingests_world_state_during_session(
 
     assert result["success"] is True
     assert result["world"]["revision"] >= 3
+    assert result["world"]["aci"]["world_mutations"] >= 1
+    assert result["world"]["legacy_inbox"]["accepted"] == 0
+    assert result["world"]["agent_authored_records"] >= 1
+    assert result["progress"]["verified_actions"] >= 1
     assert fake.session is not None
     assert any(item.type == "world.state.updated" for item in fake.session.feedback)
 

@@ -36,6 +36,23 @@ def test_action_verifier_marks_missing_actual_inconclusive() -> None:
 
     result = ActionVerifier().verify(progress)
 
-    assert result.status == "inconclusive"
+    assert result.status == "pending"
     assert result.replan_required is True
     assert "expected_observation_missing" in result.replan_reasons
+
+
+
+def test_action_verifier_skips_without_expected_observation() -> None:
+    progress = ProgressLedger(last_action={"status": "succeeded"})
+    assert ActionVerifier().verify(progress) is None
+
+
+def test_action_verifier_negative_evidence_wins_over_token_overlap() -> None:
+    progress = ProgressLedger(
+        expected_observation="service reachable",
+        actual_observation="service reachable failed",
+        last_action={"status": "succeeded"},
+    )
+    result = ActionVerifier().verify(progress)
+    assert result is not None
+    assert result.status == "contradicted"

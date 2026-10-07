@@ -273,16 +273,18 @@ class PiAdapter:
             args.extend(["--thinking", self.pi.thinking])
         args.extend(self.pi.extra_args)
         world_protocol = (
-            "\n\nRed Harness state protocol:\n"
+            "\n\nHarness solver protocol:\n"
             "Read $HARNESS_WORLD_CONTEXT and $HARNESS_PROGRESS_FILE before acting. "
-            "When you discover durable, task-relevant state, append one JSON object per line to "
-            "$HARNESS_WORLD_INBOX. Use schema_version harness/world-submission/v1 and one of "
-            "entity, relation, observation, artifact, capability, hypothesis, goal, action, "
-            "constraint, or failure. Prefer high-value state changes over verbose narration. "
-            "When your current subgoal, hypothesis, expected observation, actual observation, "
-            "or replan reason changes, append a compact progress.updated JSON event to "
-            "$HARNESS_EVENT_FILE with those fields under data. Do not write to "
-            "world.events.jsonl, world.snapshot.json, or progress.json directly."
+            "Use $HARNESS_EVENT_FILE for typed solver events; do not hand-write WorldSubmission. "
+            "Before a meaningful action append action.intent with data containing description, "
+            "optional tool/subgoal_id, expected_observations, success_conditions, and "
+            "replan_conditions. When you learn durable semantic state append world.observe "
+            "with data {type, summary, content, confidence}; use world.hypothesis, "
+            "world.capability, world.artifact, or world.failure for those kinds. "
+            "Harness validates typed events and writes canonical World state. "
+            "Never write world.db, world.events.jsonl, world.snapshot.json, or progress.json. "
+            "Treat Internet access as optional and non-essential; solve from benchmark targets "
+            "and local tools first."
         )
         args.append(task.objective.description + world_protocol)
         return args
@@ -336,6 +338,8 @@ class PiAdapter:
                 "HARNESS_FEEDBACK_FILE=/run/harness/agent.feedback.jsonl",
                 "-e",
                 "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
+                "-e", "HARNESS_EVENT_FILE=/run/harness/events.jsonl",
+                "-e", f"HARNESS_NETWORK_PROFILE={self.spec.network_profile}",
                 "-e", f"HARNESS_SEED={seed}",
                 "-e", "PI_CODING_AGENT_DIR=/run/harness/pi-agent",
                 "-e", "PI_CODING_AGENT_SESSION_DIR=/run/harness/pi-sessions",
@@ -343,7 +347,7 @@ class PiAdapter:
                 "-e", "PI_SKIP_VERSION_CHECK=1",
             ]
         )
-        if self.pi.offline:
+        if self.pi.offline or self.spec.network_profile != "unrestricted":
             command.extend(["-e", "PI_OFFLINE=1"])
         for name in self.pi.env_passthrough:
             value = os.environ.get(name)
@@ -384,7 +388,9 @@ class PiAdapter:
         if sidecar_gateway and self.spec.network == "host":
             raise AgentError("Pi network:host is incompatible with sidecar Gateway mode")
 
-        if sidecar_gateway:
+        if self.spec.network_profile == "offline":
+            primary_network = "none"
+        elif sidecar_gateway:
             primary_network = str(gateway_network)
         elif self.spec.network == "host":
             primary_network = "host"
@@ -429,6 +435,7 @@ class PiAdapter:
                 "model": self.pi.model,
                 "provider": "harness" if gateway_enabled else self.pi.provider,
                 "tools": self.pi.tools,
+                "network_profile": self.spec.network_profile,
             },
         )
 

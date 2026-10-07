@@ -94,6 +94,7 @@ class AgentSpec(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     image: str | None = None
     network: Literal["environment", "none", "host"] = "environment"
+    network_profile: Literal["offline", "benchmark-only", "unrestricted"] = "unrestricted"
     runtime: str | None = None
     pi: PiSpec | None = None
 

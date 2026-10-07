@@ -26,13 +26,15 @@ class ProgressLedger(BaseModel):
     confirmed_facts: list[str] = Field(default_factory=list)
     current_subgoal: str | None = None
     hypotheses: dict[str, ProgressHypothesis] = Field(default_factory=dict)
+    action_intent: dict[str, Any] | None = None
     expected_observation: str | None = None
     actual_observation: str | None = None
     replan_reasons: list[str] = Field(default_factory=list)
     last_verification: dict[str, Any] | None = None
     verified_actions: int = 0
     contradicted_actions: int = 0
-    inconclusive_actions: int = 0
+    pending_actions: int = 0
+    skipped_verifications: int = 0
     last_action: dict[str, Any] | None = None
     failure_count: int = 0
     no_progress_count: int = 0
@@ -44,6 +46,7 @@ class ProgressLedger(BaseModel):
     def record_event(self, event: AgentEvent) -> None:
         self.last_event_type = event.type
         if event.type == "tool.call":
+            self.actual_observation = None
             self.last_action = {
                 "tool": event.data.get("tool"),
                 "tool_call_id": event.data.get("tool_call_id"),
@@ -72,6 +75,22 @@ class ProgressLedger(BaseModel):
         elif event.type in {"capability.acquired", "goal.completed"}:
             self.no_progress_count = 0
 
+
+    def record_intent(self, intent: Any) -> None:
+        data = (
+            intent.model_dump(mode="json")
+            if hasattr(intent, "model_dump")
+            else dict(intent)
+        )
+        self.action_intent = data
+        subgoal = data.get("subgoal_id")
+        if isinstance(subgoal, str) and subgoal:
+            self.current_subgoal = subgoal
+        expected = data.get("expected_observations") or []
+        self.expected_observation = (
+            str(expected[0]) if isinstance(expected, list) and expected else None
+        )
+        self.actual_observation = None
 
     def _record_progress_update(self, data: dict[str, Any]) -> None:
         current = data.get("current_subgoal", data.get("subgoal"))
@@ -130,10 +149,11 @@ class ProgressLedger(BaseModel):
             self.no_progress_count = 0
         elif status == "contradicted":
             self.contradicted_actions += 1
-            self.failure_count += 1
-            self.no_progress_count += 1
-        else:
-            self.inconclusive_actions += 1
+            if (self.last_action or {}).get("status") != "failed":
+                self.failure_count += 1
+                self.no_progress_count += 1
+        elif status == "pending":
+            self.pending_actions += 1
 
         for reason in data.get("replan_reasons", []):
             if reason not in self.replan_reasons:

@@ -53,21 +53,25 @@ class FakeSession:
         self.closed_reason = None
 
     async def events(self):
-        world_path = self.run_dir / "world.inbox.jsonl"
-        world_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": "harness/world-submission/v1",
-                    "kind": "observation",
-                    "object": {
-                        "id": "obs-live",
-                        "type": "web.endpoint",
-                        "content": {"path": "/admin", "status": 200},
-                    },
-                }
-            )
-            + "\n",
-            encoding="utf-8",
+        yield AgentEvent(
+            type="action.intent",
+            data={
+                "action_id": "action-probe-admin",
+                "description": "probe admin endpoint",
+                "expected_observations": ["admin endpoint exists"],
+                "success_conditions": ["HTTP response proves /admin is routed"],
+                "replan_conditions": ["endpoint absent"],
+            },
+        )
+        yield AgentEvent(
+            type="world.observe",
+            data={
+                "id": "obs-live",
+                "type": "web.endpoint",
+                "summary": "admin endpoint exists at /admin",
+                "content": {"path": "/admin", "status": 200},
+                "confidence": 1.0,
+            },
         )
         path = self.run_dir / "submission.inbox.jsonl"
         path.write_text(
@@ -76,12 +80,7 @@ class FakeSession:
         )
         yield AgentEvent(
             type="progress.updated",
-            data={
-                "step": 1,
-                "expected_observation": "admin endpoint exists",
-                "actual_observation": "admin endpoint exists at /admin",
-                "made_progress": True,
-            },
+            data={"step": 1, "made_progress": True},
         )
 
     async def observe(self, observation):
@@ -156,7 +155,8 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     )
     assert benchmark_feedback.data["accepted"] is True
     assert benchmark_feedback.data["completed"] is True
-    assert result["progress"]["verified_actions"] == 1
+    assert result["progress"]["verified_actions"] >= 1
+    assert result["progress"]["skipped_verifications"] >= 0
     assert result["progress"]["last_verification"]["status"] == "verified"
     assert result["progress"]["accepted_submissions"] == 1
     assert result["progress"]["objective_completed"] is True

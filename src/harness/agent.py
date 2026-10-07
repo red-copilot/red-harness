@@ -137,6 +137,7 @@ class CLIAdapter:
                 "HARNESS_SUBMISSION_INBOX": str(run_dir / "submission.inbox.jsonl"),
                 "HARNESS_FEEDBACK_FILE": str(run_dir / "agent.feedback.jsonl"),
                 "HARNESS_PROGRESS_FILE": str(run_dir / "progress.json"),
+                "HARNESS_NETWORK_PROFILE": self.spec.network_profile,
                 "HARNESS_SEED": str(seed),
             }
         )
@@ -317,6 +318,8 @@ class DockerAdapter:
                 "-e",
                 "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
                 "-e",
+                f"HARNESS_NETWORK_PROFILE={self.spec.network_profile}",
+                "-e",
                 f"HARNESS_SEED={seed}",
             ]
         )
@@ -354,14 +357,18 @@ class DockerAdapter:
         gateway_network: str | None = None,
     ) -> AgentResult:
         gateway_enabled = bool(gateway_url and gateway_token)
-        if gateway_enabled and self.spec.network == "none":
-            raise AgentError("Docker Agent network:none is incompatible with per-run Gateway")
+        if gateway_enabled and (
+            self.spec.network == "none" or self.spec.network_profile == "offline"
+        ):
+            raise AgentError("Docker Agent offline networking is incompatible with per-run Gateway")
 
         container_name = ("rh_agent_" + run_dir.name.lower()).replace("-", "_")[:63]
         sidecar_gateway = gateway_enabled and gateway_network is not None
         host_gateway = gateway_enabled and not sidecar_gateway and self.spec.network != "host"
 
-        if sidecar_gateway:
+        if self.spec.network_profile == "offline":
+            primary_network = "none"
+        elif sidecar_gateway:
             if self.spec.network == "host":
                 raise AgentError("Docker Agent network:host is incompatible with sidecar Gateway")
             primary_network = str(gateway_network)

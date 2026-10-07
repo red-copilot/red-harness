@@ -152,6 +152,8 @@ class ContainerPiAdapter(PiAdapter):
                 "-e",
                 "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
                 "-e",
+                f"HARNESS_NETWORK_PROFILE={self.spec.network_profile}",
+                "-e",
                 f"HARNESS_SEED={seed}",
                 "-e",
                 "PI_CODING_AGENT_DIR=/run/harness/pi-agent",
@@ -165,7 +167,7 @@ class ContainerPiAdapter(PiAdapter):
                 "HOME=/run/harness/home",
             ]
         )
-        if self.pi.offline:
+        if self.pi.offline or self.spec.network_profile != "unrestricted":
             command.extend(["-e", "PI_OFFLINE=1"])
         if gateway_url and gateway_token:
             command.extend(
@@ -236,8 +238,10 @@ class ContainerPiAdapter(PiAdapter):
         gateway_network: str | None = None,
     ) -> AgentResult:
         gateway_enabled = bool(gateway_url and gateway_token)
-        if gateway_enabled and self.spec.network == "none":
-            raise AgentError("Pi network:none is incompatible with per-run Gateway")
+        if gateway_enabled and (
+            self.spec.network == "none" or self.spec.network_profile == "offline"
+        ):
+            raise AgentError("Pi offline networking is incompatible with per-run Gateway")
 
         if self.spec.network == "host" and gateway_url and gateway_network is None:
             gateway_url = gateway_url.replace("host.docker.internal", "127.0.0.1")
@@ -258,7 +262,9 @@ class ContainerPiAdapter(PiAdapter):
         container_name = ("harness_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
         sidecar_gateway = gateway_enabled and gateway_network is not None
         host_gateway = gateway_enabled and not sidecar_gateway and self.spec.network != "host"
-        if sidecar_gateway:
+        if self.spec.network_profile == "offline":
+            primary_network = "none"
+        elif sidecar_gateway:
             if self.spec.network == "host":
                 raise AgentError("Pi network:host is incompatible with sidecar Gateway mode")
             primary_network = str(gateway_network)
@@ -300,6 +306,14 @@ class ContainerPiAdapter(PiAdapter):
                 "tools": self.pi.tools,
                 "gateway_injected": gateway_enabled,
                 "gateway_network": gateway_network,
+                "network_profile": self.spec.network_profile,
+                "network_profile_enforcement": (
+                    "docker-none"
+                    if self.spec.network_profile == "offline"
+                    else "advisory"
+                    if self.spec.network_profile == "benchmark-only"
+                    else "unrestricted"
+                ),
             },
         )
 
