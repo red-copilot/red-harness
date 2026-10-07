@@ -192,3 +192,28 @@ def test_rolling_horizon_consumes_verifier_replan_state() -> None:
     assert plan.replan_required is True
     assert plan.replan_reasons == ["expected_observation_missing"]
     assert plan.previous_verification_status == "inconclusive"
+
+
+def test_rejected_submission_becomes_planner_replan_signal() -> None:
+    progress = ProgressLedger()
+    progress.record_submission(accepted=False, completed=False)
+
+    assert progress.rejected_submissions == 1
+    assert progress.no_progress_count == 1
+    assert "benchmark_negative_feedback" in progress.replan_reasons
+
+    skill = SkillSpec(
+        id="alternate-path",
+        description="Try an alternate path after negative benchmark feedback",
+        produces=[{"kind": "observation", "type": "alternate.evidence"}],
+    )
+    plan = RollingHorizonPlanner().propose(
+        WorldSnapshot(),
+        [skill],
+        progress=progress,
+        horizon=1,
+    )
+
+    assert plan.replan_required is True
+    assert "benchmark_negative_feedback" in plan.replan_reasons
+    assert "benchmark_negative_feedback" in plan.actions[0].replan_triggers
