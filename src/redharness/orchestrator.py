@@ -20,8 +20,8 @@ from .session import AgentObservation
 from .trace import TraceRecorder
 from .verifier import run_verifier
 from .world import (
-    SQLiteWorldRepository,
     Goal,
+    SQLiteWorldRepository,
     WorldContextBuilder,
     WorldRepository,
     ingest_world_inbox,
