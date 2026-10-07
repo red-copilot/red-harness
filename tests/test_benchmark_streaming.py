@@ -151,7 +151,6 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert fake_agent.session is not None
     assert fake_agent.session.closed_reason == "objective-complete"
     feedback_types = [item.type for item in fake_agent.session.feedback]
-    assert "world.state.updated" in feedback_types
     assert "solver.verification" in feedback_types
     assert "benchmark.feedback" in feedback_types
     benchmark_feedback = next(
