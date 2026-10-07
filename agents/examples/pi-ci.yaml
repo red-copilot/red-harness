@@ -1,7 +1,7 @@
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: pi-kali-smoke
 type: pi
-image: redharness-pi-kali:ci
+image: harness-pi-kali:ci
 network: environment
 pi:
   binary: python3

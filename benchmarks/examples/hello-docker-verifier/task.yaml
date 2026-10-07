@@ -1,18 +1,18 @@
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: hello-docker-verifier-001
 name: Docker verifier smoke test
 category: general
 difficulty: trivial
 tags: [smoke, docker-verifier]
 objective:
-  description: Write the exact text "red-harness-ok" to proof.txt in REDHARNESS_RUN_DIR.
+  description: Write the exact text "red-harness-ok" to proof.txt in HARNESS_RUN_DIR.
 environment:
   provider: none
 budgets:
   wall_time: 30
 verification:
   type: docker
-  image: redharness-verifier:ci
+  image: harness-verifier:ci
   command:
     - python
     - /task/verifier.py
