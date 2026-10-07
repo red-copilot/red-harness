@@ -258,6 +258,7 @@ def test_benchmark_runner_replans_after_negative_feedback(monkeypatch, tmp_path:
     assert fake_agent.session is not None
     feedback_types = [item.type for item in fake_agent.session.feedback]
     assert "solver.replan_requested" in feedback_types
+    assert "solver.plan.updated" in feedback_types
 
     negative_feedback = next(
         item
