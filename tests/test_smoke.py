@@ -68,6 +68,39 @@ def test_smoke_resume_world_state(tmp_path: Path) -> None:
 
 
 
+def test_smoke_resume_sqlite_world_state(tmp_path: Path) -> None:
+    task_path = Path("benchmarks/examples/hello/task.yaml")
+    agent_path = Path("agents/examples/demo.yaml")
+    orchestrator = Orchestrator(tmp_path / "runs")
+
+    first = orchestrator.run(
+        task=load_task(task_path),
+        task_path=task_path,
+        agent=load_agent(agent_path),
+        agent_path=agent_path,
+        allow_host_agent=True,
+        seed=3,
+    )
+    first_dir = tmp_path / "runs" / first["run_id"]
+    world_db = first_dir / "world.db"
+    assert world_db.is_file()
+
+    second = orchestrator.run(
+        task=load_task(task_path),
+        task_path=task_path,
+        agent=load_agent(agent_path),
+        agent_path=agent_path,
+        allow_host_agent=True,
+        seed=4,
+        resume_world_events=world_db,
+    )
+
+    assert second["world"]["resumed"] is True
+    assert second["world"]["revision"] >= first["world"]["revision"]
+    second_dir = tmp_path / "runs" / second["run_id"]
+    assert (second_dir / "world.db").is_file()
+
+
 class _LiveWorldSession:
     def __init__(self, run_dir: Path) -> None:
         self.run_dir = run_dir
