@@ -111,7 +111,7 @@ class _LiveWorldSession:
         (self.run_dir / "world.inbox.jsonl").write_text(
             json.dumps(
                 {
-                    "schema_version": "harness.world.submit/v1",
+                    "schema_version": "harness/world-submission/v1",
                     "kind": "observation",
                     "object": {
                         "id": "obs-live-local",
