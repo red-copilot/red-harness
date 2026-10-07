@@ -73,6 +73,30 @@ class SolverLoop:
         self.progress.record_event(event)
         before_revision = self.world.snapshot.revision
 
+        if event.type == "agent.event_rejected":
+            self.stats.aci_rejected += 1
+            self.trace.emit(
+                "aci.rejected",
+                actor="harness",
+                data={
+                    "event_type": event.data.get("event_type"),
+                    "error_type": "UntrustedEventType",
+                    "message": event.data.get("reason"),
+                },
+            )
+            await session.observe(
+                AgentObservation(
+                    type="aci.feedback",
+                    data={
+                        "accepted": False,
+                        "event_type": event.data.get("event_type"),
+                        "message": event.data.get("reason"),
+                    },
+                )
+            )
+            self.progress.write(self.progress_path)
+            return
+
         try:
             aci_mutations = self.typed_aci.apply(
                 event,
