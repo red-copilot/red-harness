@@ -61,7 +61,7 @@ def test_world_inbox_cursor_handles_partial_and_invalid_lines(tmp_path) -> None:
         handle.write(
             json.dumps(
                 {
-                    "schema_version": "harness.world.submit/v1",
+                    "schema_version": "harness/world-submission/v1",
                     "kind": "observation",
                     "object": {
                         "id": "obs-partial",
