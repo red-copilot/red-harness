@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from redharness.coordination import CoordinationStore, WorkItemSpec
+from harness.coordination import CoordinationStore, WorkItemSpec
 
 
 def test_coordination_claim_complete_and_release(tmp_path: Path) -> None:

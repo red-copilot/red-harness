@@ -1,9 +1,9 @@
 import json
 from pathlib import Path
 
-from redharness.budget import BudgetMonitor
-from redharness.models import BudgetSpec
-from redharness.trace import TraceRecorder
+from harness.budget import BudgetMonitor
+from harness.models import BudgetSpec
+from harness.trace import TraceRecorder
 
 
 def test_budget_monitor_accounts_and_exceeds(tmp_path: Path) -> None:

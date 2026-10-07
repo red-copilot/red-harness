@@ -4,8 +4,8 @@ from pathlib import Path
 import httpx
 from fastapi.testclient import TestClient
 
-from redharness.gateway import ModelPricing, create_gateway_app
-from redharness.policy import GatewayPolicy
+from harness.gateway import ModelPricing, create_gateway_app
+from harness.policy import GatewayPolicy
 
 
 def _events(path: Path) -> list[dict]:

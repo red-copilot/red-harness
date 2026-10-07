@@ -4,17 +4,17 @@ import asyncio
 import json
 from pathlib import Path
 
-from redharness.agent import AgentResult
-from redharness.benchmark.base import (
+from harness.agent import AgentResult
+from harness.benchmark.base import (
     BenchmarkCase,
     BenchmarkSession,
     EvaluationResult,
     SubmissionResult,
 )
-from redharness.benchmark.runner import BenchmarkRunner
-from redharness.budget import UsageMetrics
-from redharness.models import AgentSpec, BudgetSpec, ObjectiveSpec
-from redharness.session import AgentEvent
+from harness.benchmark.runner import BenchmarkRunner
+from harness.budget import UsageMetrics
+from harness.models import AgentSpec, BudgetSpec, ObjectiveSpec
+from harness.session import AgentEvent
 
 
 class FakeBenchmarkAdapter:
@@ -57,7 +57,7 @@ class FakeSession:
         world_path.write_text(
             json.dumps(
                 {
-                    "schema_version": "redharness.world.submit/v1",
+                    "schema_version": "harness.world.submit/v1",
                     "kind": "observation",
                     "object": {
                         "id": "obs-live",
@@ -111,7 +111,7 @@ class FakeAgentAdapter:
 
 
 def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path: Path) -> None:
-    import redharness.benchmark.runner as runner_module
+    import harness.benchmark.runner as runner_module
 
     fake_agent = FakeAgentAdapter()
     monkeypatch.setattr(
@@ -123,7 +123,7 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     case = BenchmarkCase(id="CASE-1", benchmark="fake")
     agent = AgentSpec.model_validate(
         {
-            "apiVersion": "redharness/v1",
+            "apiVersion": "harness/v1",
             "id": "demo",
             "type": "cli",
             "command": ["true"],

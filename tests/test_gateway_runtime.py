@@ -1,9 +1,9 @@
 import json
 from pathlib import Path
 
-from redharness.gateway_runtime import GatewayConfig
-from redharness.models import load_agent, load_task
-from redharness.orchestrator import Orchestrator
+from harness.gateway_runtime import GatewayConfig
+from harness.models import load_agent, load_task
+from harness.orchestrator import Orchestrator
 
 
 def test_per_run_gateway_is_injected_and_accounted(tmp_path: Path) -> None:

@@ -3,8 +3,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from redharness.control_plane import create_control_plane
-from redharness.world import FileWorldRepository
+from harness.control_plane import create_control_plane
+from harness.world import FileWorldRepository
 
 
 def test_control_plane_endpoints(tmp_path: Path) -> None:
@@ -18,7 +18,7 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     (run_dir / "world.snapshot.json").write_text(
         json.dumps(
             {
-                "schema_version": "redharness.world/v1",
+                "schema_version": "harness.world/v1",
                 "revision": 1,
                 "entities": {},
                 "relations": {},
@@ -45,7 +45,7 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
             [
                 json.dumps(
                     {
-                        "schema_version": "redharness.world/v1",
+                        "schema_version": "harness.world/v1",
                         "id": "wevt-1",
                         "ts": "2026-10-06T08:00:00+00:00",
                         "kind": "goal",
@@ -56,7 +56,7 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
                 ),
                 json.dumps(
                     {
-                        "schema_version": "redharness.world/v1",
+                        "schema_version": "harness.world/v1",
                         "id": "wevt-2",
                         "ts": "2026-10-06T08:00:01+00:00",
                         "kind": "capability",
@@ -79,7 +79,7 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     (run_dir / "progress.json").write_text(
         json.dumps(
             {
-                "schema_version": "redharness.progress/v1",
+                "schema_version": "harness.progress/v1",
                 "active_goal": "goal-1",
                 "completed_subgoals": [],
                 "blocked_subgoals": [],
@@ -274,7 +274,7 @@ def test_control_plane_uses_world_repository_factory(tmp_path: Path) -> None:
     (run_dir / "world.events.jsonl").write_text(
         json.dumps(
             {
-                "schema_version": "redharness.world/v1",
+                "schema_version": "harness.world/v1",
                 "id": "wevt-repo",
                 "ts": "2026-10-06T08:00:00+00:00",
                 "kind": "goal",

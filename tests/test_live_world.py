@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 
-from redharness.world import WorldStore
-from redharness.world.live import WorldInboxCursor
-from redharness.world.protocol import WorldSubmission, write_submission
+from harness.world import WorldStore
+from harness.world.live import WorldInboxCursor
+from harness.world.protocol import WorldSubmission, write_submission
 
 
 def test_world_inbox_cursor_ingests_only_new_lines(tmp_path) -> None:
@@ -61,7 +61,7 @@ def test_world_inbox_cursor_handles_partial_and_invalid_lines(tmp_path) -> None:
         handle.write(
             json.dumps(
                 {
-                    "schema_version": "redharness.world.submit/v1",
+                    "schema_version": "harness.world.submit/v1",
                     "kind": "observation",
                     "object": {
                         "id": "obs-partial",
