@@ -80,7 +80,7 @@ class HostGatewayRuntime:
         self.server = uvicorn.Server(uvicorn_config)
         self.thread = threading.Thread(
             target=self.server.run,
-            name=f"redharness-gateway-{self.port}",
+            name=f"harness-gateway-{self.port}",
             daemon=True,
         )
 
@@ -146,7 +146,7 @@ class DockerGatewaySidecarRuntime:
         self.token = secrets.token_urlsafe(32)
         self.container_name = f"rh_gateway_{safe_id}"[:63]
         self.network_name = f"rh_gateway_net_{safe_id}"[:63]
-        self.url = "http://redharness-gateway:8765"
+        self.url = "http://harness-gateway:8765"
 
     @staticmethod
     def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -175,7 +175,7 @@ class DockerGatewaySidecarRuntime:
             "--network",
             self.network_name,
             "--network-alias",
-            "redharness-gateway",
+            "harness-gateway",
             "--read-only",
             "--cap-drop",
             "ALL",
@@ -192,15 +192,15 @@ class DockerGatewaySidecarRuntime:
             "-v",
             f"{self.task_dir.resolve()}:/task:ro",
             "-v",
-            f"{self.run_dir.resolve()}:/run/redharness:rw",
+            f"{self.run_dir.resolve()}:/run/harness:rw",
             "-e",
-            f"REDHARNESS_GATEWAY_TOKEN={self.token}",
+            f"HARNESS_GATEWAY_TOKEN={self.token}",
         ]
         if self.config.sidecar_runtime:
             command.extend(["--runtime", self.config.sidecar_runtime])
         if self.config.model_api_key:
             command.extend(
-                ["-e", f"REDHARNESS_MODEL_API_KEY={self.config.model_api_key}"]
+                ["-e", f"HARNESS_MODEL_API_KEY={self.config.model_api_key}"]
             )
 
         policy_args: list[str] = []
@@ -221,9 +221,9 @@ class DockerGatewaySidecarRuntime:
                 "--port",
                 "8765",
                 "--event-file",
-                "/run/redharness/events.jsonl",
+                "/run/harness/events.jsonl",
                 "--workspace",
-                "/run/redharness",
+                "/run/harness",
                 "--task-dir",
                 "/task",
                 *policy_args,

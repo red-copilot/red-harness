@@ -1,4 +1,4 @@
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: gateway-demo-agent
 type: cli
 command:
@@ -9,8 +9,8 @@ command:
     import os
     import urllib.request
 
-    url = os.environ["REDHARNESS_GATEWAY_URL"] + "/v1/tools/call"
-    token = os.environ["REDHARNESS_GATEWAY_TOKEN"]
+    url = os.environ["HARNESS_GATEWAY_URL"] + "/v1/tools/call"
+    token = os.environ["HARNESS_GATEWAY_TOKEN"]
     body = json.dumps({
         "name": "file.write",
         "args": {"path": "proof.txt", "content": "red-harness-ok\n"},

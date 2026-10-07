@@ -2,14 +2,14 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
-from redharness.benchmark import tsec
-from redharness.models import AgentSpec, BudgetSpec
+from harness.benchmark import tsec
+from harness.models import AgentSpec, BudgetSpec
 
 
 def _agent() -> AgentSpec:
     return AgentSpec.model_validate(
         {
-            "apiVersion": "redharness/v1",
+            "apiVersion": "harness/v1",
             "id": "pi-tsec",
             "type": "pi",
             "image": "pi:test",

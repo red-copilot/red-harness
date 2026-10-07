@@ -42,7 +42,7 @@ def _new_run_id() -> str:
 class Orchestrator:
     def __init__(
         self,
-        runs_root: str | Path = ".redharness/runs",
+        runs_root: str | Path = ".harness/runs",
         *,
         world_repository_factory: Callable[[Path], WorldRepository] = SQLiteWorldRepository,
     ) -> None:

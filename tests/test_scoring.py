@@ -1,6 +1,6 @@
 import pytest
 
-from redharness.scoring import pass_at_k, weighted_mean
+from harness.scoring import pass_at_k, weighted_mean
 
 
 def test_pass_at_k_estimator() -> None:

@@ -1,4 +1,4 @@
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: smoke-suite
 repeat: 2
 base_seed: 1000

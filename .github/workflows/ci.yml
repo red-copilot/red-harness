@@ -18,66 +18,98 @@ jobs:
       - run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.0.4
       - run: pi --version
       - run: python -m pip install -e ".[dev]"
+      - name: enforce harness namespace
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          forbidden = (
+              "redharness",
+              "REDHARNESS_",
+              ".redharness",
+              "rh_pi_",
+              '"harness.world/',
+              '"harness.progress/',
+          )
+          violations = []
+          for path in Path(".").rglob("*"):
+              if not path.is_file() or ".git" in path.parts:
+                  continue
+              if path == Path(".github/workflows/ci.yml"):
+                  continue
+              try:
+                  text = path.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
+              for token in forbidden:
+                  if token in text:
+                      violations.append(f"{path}: {token}")
+          if violations:
+              raise SystemExit(
+                  "legacy or non-standard harness namespace detected:\n"
+                  + "\n".join(violations)
+              )
+          PY
       - run: ruff check .
       - run: pytest -q
-      - run: redharness validate benchmarks/examples/hello/task.yaml
-      - run: redharness validate benchmarks/examples/hello-docker-verifier/task.yaml
-      - run: redharness validate-suite benchmarks/examples/smoke-suite.yaml
-      - run: python -c "from redharness.models import load_agent; a=load_agent('agents/examples/pi.yaml'); assert a.type == 'pi'"
-      - run: python -c "from redharness.models import load_agent; a=load_agent('agents/examples/pi-tsec.yaml'); assert a.type == 'pi' and a.network == 'host'"
-      - run: redharness tsec --help
-      - run: redharness gateway --help
-      - run: redharness serve --help
-      - run: redharness worker --help
-      - run: redharness capabilities
-      - run: redharness run benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml --allow-host-agent --seed 7
+      - run: harness validate benchmarks/examples/hello/task.yaml
+      - run: harness validate benchmarks/examples/hello-docker-verifier/task.yaml
+      - run: harness validate-suite benchmarks/examples/smoke-suite.yaml
+      - run: python -c "from harness.models import load_agent; a=load_agent('agents/examples/pi.yaml'); assert a.type == 'pi'"
+      - run: python -c "from harness.models import load_agent; a=load_agent('agents/examples/pi-tsec.yaml'); assert a.type == 'pi' and a.network == 'host'"
+      - run: harness tsec --help
+      - run: harness gateway --help
+      - run: harness serve --help
+      - run: harness worker --help
+      - run: harness capabilities
+      - run: harness run benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml --allow-host-agent --seed 7
       - run: >-
-          redharness suite benchmarks/examples/smoke-suite.yaml
+          harness suite benchmarks/examples/smoke-suite.yaml
           --agent agents/examples/demo.yaml
           --allow-host-agent
           --workers 2
       - run: >-
-          redharness run benchmarks/examples/hello/task.yaml
+          harness run benchmarks/examples/hello/task.yaml
           --agent agents/examples/gateway-demo.yaml
           --allow-host-agent
           --gateway
           --gateway-policy examples/gateway-policy.yaml
           --seed 11
-      - run: docker build -t redharness-gateway-demo:ci agents/examples/docker-gateway
-      - run: docker build -t redharness-verifier:ci benchmarks/examples/hello-docker-verifier
-      - run: docker build -f docker/gateway/Dockerfile -t redharness-gateway:ci .
+      - run: docker build -t harness-gateway-demo:ci agents/examples/docker-gateway
+      - run: docker build -t harness-verifier:ci benchmarks/examples/hello-docker-verifier
+      - run: docker build -f docker/gateway/Dockerfile -t harness-gateway:ci .
       - run: >-
-          redharness run benchmarks/examples/hello/task.yaml
+          harness run benchmarks/examples/hello/task.yaml
           --agent agents/examples/docker-gateway.yaml
           --gateway
           --gateway-policy examples/gateway-policy.yaml
           --seed 12
       - run: >-
-          redharness run benchmarks/examples/hello/task.yaml
+          harness run benchmarks/examples/hello/task.yaml
           --agent agents/examples/docker-gateway.yaml
           --gateway
           --gateway-mode sidecar
-          --gateway-image redharness-gateway:ci
+          --gateway-image harness-gateway:ci
           --gateway-policy examples/gateway-policy.yaml
           --seed 14
       - run: >-
-          redharness run benchmarks/examples/hello-docker-verifier/task.yaml
+          harness run benchmarks/examples/hello-docker-verifier/task.yaml
           --agent agents/examples/demo.yaml
           --allow-host-agent
           --seed 13
       - name: distributed control plane and worker e2e
         env:
-          REDHARNESS_CONTROL_TOKEN: ci-token
+          HARNESS_CONTROL_TOKEN: ci-token
         run: |
           set -euo pipefail
-          rm -rf .redharness/distributed-runs
-          rm -f /tmp/redharness-control.db
-          redharness serve \
-            --queue-db /tmp/redharness-control.db \
-            --runs-root .redharness/distributed-runs \
+          rm -rf .harness/distributed-runs
+          rm -f /tmp/harness-control.db
+          harness serve \
+            --queue-db /tmp/harness-control.db \
+            --runs-root .harness/distributed-runs \
             --benchmarks-root benchmarks \
             --host 127.0.0.1 \
-            --port 8780 >/tmp/redharness-control.log 2>&1 &
+            --port 8780 >/tmp/harness-control.log 2>&1 &
           control_pid=$!
           trap 'kill "$control_pid" 2>/dev/null || true' EXIT
           python - <<'PY'
@@ -94,13 +126,13 @@ jobs:
           else:
               raise SystemExit("control plane failed to start")
           PY
-          redharness submit benchmarks/examples/hello/task.yaml \
+          harness submit benchmarks/examples/hello/task.yaml \
             --agent agents/examples/demo.yaml \
             --control-url http://127.0.0.1:8780 \
-            --runs-root .redharness/distributed-runs \
+            --runs-root .harness/distributed-runs \
             --allow-host-agent \
             --seed 21 >/tmp/submitted-job.json
-          redharness worker \
+          harness worker \
             --control-url http://127.0.0.1:8780 \
             --workspace-root . \
             --allow-host-jobs \

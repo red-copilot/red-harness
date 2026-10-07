@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from redharness.world import (
+from harness.world import (
     Goal,
     Observation,
     WorldContextBuilder,

@@ -1,11 +1,11 @@
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: pi-container-smoke-001
 name: Pi Kali container smoke test
 category: general
 difficulty: trivial
 tags: [smoke, pi, kali, docker]
 objective:
-  description: Write the exact text "red-harness-ok" to proof.txt in REDHARNESS_RUN_DIR.
+  description: Write the exact text "red-harness-ok" to proof.txt in HARNESS_RUN_DIR.
 environment:
   provider: none
 budgets:

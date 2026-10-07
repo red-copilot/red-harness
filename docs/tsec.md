@@ -6,7 +6,7 @@ Red Harness owns the TSec control-plane credential and challenge lifecycle. The 
 
 ```bash
 python -m pip install -e ".[tsec]"
-docker build -t redharness/pi-kali:local docker/pi-kali
+docker build -t harness/pi-kali:local docker/pi-kali
 ```
 
 Configure the platform SDK:
@@ -22,10 +22,10 @@ The worker must already have the Benchmark VPN connected.
 ## Agent
 
 ```yaml
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: pi-kali-tsec
 type: pi
-image: redharness/pi-kali:local
+image: harness/pi-kali:local
 network: host
 pi:
   provider: openai
@@ -42,13 +42,13 @@ On Linux, `network: host` is the recommended TSec mode because the Kali containe
 One unfinished challenge:
 
 ```bash
-redharness tsec --agent agents/examples/pi-tsec.yaml
+harness tsec --agent agents/examples/pi-tsec.yaml
 ```
 
 Specific challenge:
 
 ```bash
-redharness tsec \
+harness tsec \
   --agent agents/examples/pi-tsec.yaml \
   --challenge WEB-001
 ```
@@ -56,7 +56,7 @@ redharness tsec \
 All unfinished challenges:
 
 ```bash
-redharness tsec \
+harness tsec \
   --agent agents/examples/pi-tsec.yaml \
   --all
 ```
@@ -64,7 +64,7 @@ redharness tsec \
 Optional limits:
 
 ```bash
-redharness tsec \
+harness tsec \
   --agent agents/examples/pi-tsec.yaml \
   --all \
   --wall-time 3600 \
@@ -81,7 +81,7 @@ If the platform returns `ResourceUnavailable` while starting a challenge, Harnes
 Hints are opt-in because the TSec SDK documents that viewing a hint reduces flag score:
 
 ```bash
-redharness tsec \
+harness tsec \
   --agent agents/examples/pi-tsec.yaml \
   --challenge WEB-001 \
   --hint
@@ -94,7 +94,7 @@ Harness calls `get_hint()` only when `--hint` is present and records that a scor
 The Pi container never receives `BENCHMARK_TOKEN` or `BENCHMARK_BASE_URL`. Red Harness calls the SDK to start, submit and close challenges. Pi emits candidate answers as:
 
 ```text
-REDHARNESS_FLAG=flag{...}
+HARNESS_FLAG=flag{...}
 ```
 
 Harness extracts them from Pi JSONL and submits them through the SDK. Trace records a SHA256 hash of candidate flags, not plaintext flag values.

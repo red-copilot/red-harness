@@ -19,7 +19,7 @@ class ProgressHypothesis(BaseModel):
 
 
 class ProgressLedger(BaseModel):
-    schema_version: str = "redharness.progress/v1"
+    schema_version: str = "harness/progress/v1"
     active_goal: str | None = None
     completed_subgoals: list[str] = Field(default_factory=list)
     blocked_subgoals: list[str] = Field(default_factory=list)

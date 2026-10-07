@@ -38,7 +38,7 @@ Each mutation is represented as a `WorldEvent`:
 
 ```json
 {
-  "schema_version": "redharness.world/v1",
+  "schema_version": "harness/world/v1",
   "kind": "capability",
   "op": "upsert",
   "object": {
@@ -68,14 +68,14 @@ world.snapshot.json      # compatibility/debug export
 The task objective is seeded as the root Goal when the run starts and updated with the final
 success, score, and run status when execution finishes.
 
-Agents receive a `REDHARNESS_WORLD_INBOX` path. They may append untrusted JSONL submissions
-using the `redharness.world.submit/v1` envelope. The Harness validates each submission and copies
+Agents receive a `HARNESS_WORLD_INBOX` path. They may append untrusted JSONL submissions
+using the `harness/world-submission/v1` envelope. The Harness validates each submission and copies
 accepted mutations into the authoritative world event log with the actor forced to `agent`.
 
 Example:
 
 ```json
-{"schema_version":"redharness.world.submit/v1","kind":"capability","op":"upsert","object":{"id":"cap-shell","type":"host.shell","subject":"agent","scope":"host-1","attributes":{}}}
+{"schema_version":"harness/world-submission/v1","kind":"capability","op":"upsert","object":{"id":"cap-shell","type":"host.shell","subject":"agent","scope":"host-1","attributes":{}}}
 ```
 
 Agents never write `world.db`, `world.events.jsonl`, or `world.snapshot.json` directly. Invalid inbox lines are
@@ -83,7 +83,7 @@ rejected and summarized in the Harness trace. This keeps the world log replayabl
 Agent emits malformed or adversarial state.
 
 Pi receives a concise protocol instruction in its task prompt. Generic CLI/Docker agents can opt
-in simply by detecting `REDHARNESS_WORLD_INBOX`.
+in simply by detecting `HARNESS_WORLD_INBOX`.
 
 ## Planned evolution
 
@@ -92,15 +92,15 @@ in simply by detecting `REDHARNESS_WORLD_INBOX`.
 ## Context and resume
 
 Each run materializes `world.context.txt` from the current snapshot and exposes its path as
-`REDHARNESS_WORLD_CONTEXT`. The projection prioritizes goals, capabilities, open hypotheses,
+`HARNESS_WORLD_CONTEXT`. The projection prioritizes goals, capabilities, open hypotheses,
 artifacts, bounded observations, recent failures, and relations.
 
 A new run may continue directly from a previous SQLite state database:
 
 ```bash
-redharness run benchmarks/examples/hello/task.yaml \
+harness run benchmarks/examples/hello/task.yaml \
   --agent agents/examples/pi.yaml \
-  --resume-world .redharness/runs/<run-id>/world.db
+  --resume-world .harness/runs/<run-id>/world.db
 ```
 
 The new run copies the prior SQLite state database, re-activates the root task goal, builds a fresh

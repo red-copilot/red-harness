@@ -43,11 +43,11 @@ def _run_python_verifier(
     env = os.environ.copy()
     env.update(
         {
-            "REDHARNESS_TASK_ID": task.id,
-            "REDHARNESS_TASK_DIR": str(task_dir),
-            "REDHARNESS_RUN_DIR": str(run_dir),
-            "REDHARNESS_ENV_PROJECT": environment_project or "",
-            "REDHARNESS_SEED": str(seed),
+            "HARNESS_TASK_ID": task.id,
+            "HARNESS_TASK_DIR": str(task_dir),
+            "HARNESS_RUN_DIR": str(run_dir),
+            "HARNESS_ENV_PROJECT": environment_project or "",
+            "HARNESS_SEED": str(seed),
         }
     )
     return subprocess.run(
@@ -110,19 +110,19 @@ def build_docker_verifier_command(
         "-v",
         f"{task_dir.resolve()}:/task:ro",
         "-v",
-        f"{run_dir.resolve()}:/run/redharness:ro",
+        f"{run_dir.resolve()}:/run/harness:ro",
         "-w",
         "/task",
         "-e",
-        f"REDHARNESS_TASK_ID={task.id}",
+        f"HARNESS_TASK_ID={task.id}",
         "-e",
-        "REDHARNESS_TASK_DIR=/task",
+        "HARNESS_TASK_DIR=/task",
         "-e",
-        "REDHARNESS_RUN_DIR=/run/redharness",
+        "HARNESS_RUN_DIR=/run/harness",
         "-e",
-        f"REDHARNESS_ENV_PROJECT={environment_project or ''}",
+        f"HARNESS_ENV_PROJECT={environment_project or ''}",
         "-e",
-        f"REDHARNESS_SEED={seed}",
+        f"HARNESS_SEED={seed}",
         str(task.verification.image),
         ]
     )

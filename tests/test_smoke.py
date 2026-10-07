@@ -1,11 +1,11 @@
 import json
 from pathlib import Path
 
-from redharness.agent import AgentResult
-from redharness.budget import UsageMetrics
-from redharness.models import load_agent, load_task
-from redharness.orchestrator import Orchestrator
-from redharness.session import AgentEvent
+from harness.agent import AgentResult
+from harness.budget import UsageMetrics
+from harness.models import load_agent, load_task
+from harness.orchestrator import Orchestrator
+from harness.session import AgentEvent
 
 
 def test_smoke_run(tmp_path: Path) -> None:
@@ -111,7 +111,7 @@ class _LiveWorldSession:
         (self.run_dir / "world.inbox.jsonl").write_text(
             json.dumps(
                 {
-                    "schema_version": "redharness.world.submit/v1",
+                    "schema_version": "harness/world-submission/v1",
                     "kind": "observation",
                     "object": {
                         "id": "obs-live-local",
@@ -152,7 +152,7 @@ def test_orchestrator_ingests_world_state_during_session(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import redharness.orchestrator as orchestrator_module
+    import harness.orchestrator as orchestrator_module
 
     fake = _LiveWorldAdapter()
     monkeypatch.setattr(

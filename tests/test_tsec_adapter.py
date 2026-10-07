@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from redharness.benchmark.base import BenchmarkCase, Submission
-from redharness.benchmark.tsec_adapter import TSecBenchmarkAdapter
+from harness.benchmark.base import BenchmarkCase, Submission
+from harness.benchmark.tsec_adapter import TSecBenchmarkAdapter
 
 
 class FakeTSecClient:

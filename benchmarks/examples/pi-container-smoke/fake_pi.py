@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 
-run_dir = Path(os.environ["REDHARNESS_RUN_DIR"])
+run_dir = Path(os.environ["HARNESS_RUN_DIR"])
 (run_dir / "proof.txt").write_text("red-harness-ok\n", encoding="utf-8")
 
 events = [

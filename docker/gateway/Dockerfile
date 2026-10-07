@@ -9,4 +9,4 @@ COPY src /app/src
 
 RUN python -m pip install --no-cache-dir .
 
-ENTRYPOINT ["redharness", "gateway"]
+ENTRYPOINT ["harness", "gateway"]

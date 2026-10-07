@@ -1,7 +1,7 @@
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: docker-gateway-demo
 type: docker
-image: redharness-gateway-demo:ci
+image: harness-gateway-demo:ci
 network: environment
 command:
   - python

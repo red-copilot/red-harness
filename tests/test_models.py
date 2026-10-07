@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from redharness.models import AgentSpec, TaskSpec, load_agent, load_suite, load_task
+from harness.models import AgentSpec, TaskSpec, load_agent, load_suite, load_task
 
 
 def test_example_contracts_are_valid() -> None:
@@ -14,13 +14,13 @@ def test_example_contracts_are_valid() -> None:
     agent = load_agent(Path("agents/examples/demo.yaml"))
     pi_agent = load_agent(Path("agents/examples/pi.yaml"))
     suite = load_suite(Path("benchmarks/examples/smoke-suite.yaml"))
-    assert task.api_version == "redharness/v1"
+    assert task.api_version == "harness/v1"
     assert task.budgets.wall_time == 30
     assert docker_verifier.verification.type == "docker"
     assert docker_verifier.verification.network == "none"
     assert agent.type == "cli"
     assert pi_agent.type == "pi"
-    assert pi_agent.image == "redharness-pi-kali:latest"
+    assert pi_agent.image == "harness-pi-kali:latest"
     assert pi_agent.pi is not None
     assert pi_agent.pi.model == "gpt-5.6-sol"
     assert pi_agent.pi.cap_add == ["NET_RAW"]
@@ -31,7 +31,7 @@ def test_docker_agent_requires_image() -> None:
     with pytest.raises(ValidationError):
         AgentSpec.model_validate(
             {
-                "apiVersion": "redharness/v1",
+                "apiVersion": "harness/v1",
                 "id": "bad-docker",
                 "type": "docker",
             }
@@ -42,7 +42,7 @@ def test_pi_agent_requires_pi_config_and_image() -> None:
     with pytest.raises(ValidationError):
         AgentSpec.model_validate(
             {
-                "apiVersion": "redharness/v1",
+                "apiVersion": "harness/v1",
                 "id": "bad-pi",
                 "type": "pi",
             }
@@ -50,7 +50,7 @@ def test_pi_agent_requires_pi_config_and_image() -> None:
     with pytest.raises(ValidationError):
         AgentSpec.model_validate(
             {
-                "apiVersion": "redharness/v1",
+                "apiVersion": "harness/v1",
                 "id": "bad-pi-image",
                 "type": "pi",
                 "pi": {"model": "m"},
@@ -61,7 +61,7 @@ def test_pi_agent_requires_pi_config_and_image() -> None:
 def test_pi_accepts_container_runtime() -> None:
     spec = AgentSpec.model_validate(
         {
-            "apiVersion": "redharness/v1",
+            "apiVersion": "harness/v1",
             "id": "pi-runsc",
             "type": "pi",
             "image": "pi:test",
@@ -76,7 +76,7 @@ def test_docker_verifier_requires_image() -> None:
     with pytest.raises(ValidationError):
         TaskSpec.model_validate(
             {
-                "apiVersion": "redharness/v1",
+                "apiVersion": "harness/v1",
                 "id": "bad-verifier",
                 "name": "Bad verifier",
                 "objective": {"description": "test"},

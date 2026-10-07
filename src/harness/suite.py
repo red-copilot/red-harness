@@ -22,8 +22,8 @@ class SuiteRunner:
     def __init__(
         self,
         *,
-        runs_root: str | Path = ".redharness/runs",
-        suites_root: str | Path = ".redharness/suites",
+        runs_root: str | Path = ".harness/runs",
+        suites_root: str | Path = ".harness/suites",
     ) -> None:
         self.orchestrator = Orchestrator(runs_root)
         self.suites_root = Path(suites_root)

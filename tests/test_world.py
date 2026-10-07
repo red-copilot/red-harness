@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from redharness.world import (
+from harness.world import (
     ActionRecord,
     Capability,
     Constraint,

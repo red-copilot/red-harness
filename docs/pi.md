@@ -5,7 +5,7 @@ Red Harness v0.8 runs Pi inside a dedicated Kali Rolling Docker image and consum
 ## Build the Pi/Kali image
 
 ```bash
-docker build -t redharness/pi-kali:local docker/pi-kali
+docker build -t harness/pi-kali:local docker/pi-kali
 ```
 
 The image contains:
@@ -20,10 +20,10 @@ The image contains:
 ## Agent contract
 
 ```yaml
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: pi-openai-sol
 type: pi
-image: redharness/pi-kali:local
+image: harness/pi-kali:local
 network: environment
 
 pi:
@@ -51,7 +51,7 @@ For VPN-backed benchmark targets on Linux workers, `network: host` is supported.
 ```bash
 export OPENAI_API_KEY="..."
 
-redharness run benchmark/task.yaml \
+harness run benchmark/task.yaml \
   --agent agents/examples/pi.yaml
 ```
 
@@ -62,9 +62,9 @@ Only environment variables explicitly named by `pi.env_passthrough` are copied i
 Pi can also use the Red Harness model proxy. In host-Gateway mode the container receives a one-time Gateway token. In sidecar mode the Pi container joins the private Gateway Docker network.
 
 ```bash
-export REDHARNESS_MODEL_API_KEY="real-provider-key"
+export HARNESS_MODEL_API_KEY="real-provider-key"
 
-redharness run benchmark/task.yaml \
+harness run benchmark/task.yaml \
   --agent agents/examples/pi.yaml \
   --gateway \
   --model-upstream https://provider.example/v1

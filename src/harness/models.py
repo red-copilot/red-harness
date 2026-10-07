@@ -51,7 +51,7 @@ class VerificationSpec(BaseModel):
 class TaskSpec(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    api_version: Literal["redharness/v1"] = Field(alias="apiVersion")
+    api_version: Literal["harness/v1"] = Field(alias="apiVersion")
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     category: str = "general"
@@ -86,7 +86,7 @@ class PiSpec(BaseModel):
 class AgentSpec(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    api_version: Literal["redharness/v1"] = Field(default="redharness/v1", alias="apiVersion")
+    api_version: Literal["harness/v1"] = Field(default="harness/v1", alias="apiVersion")
     id: str = Field(min_length=1)
     type: Literal["cli", "docker", "pi"] = "cli"
     command: list[str] = Field(default_factory=list)
@@ -123,7 +123,7 @@ class SuiteTaskSpec(BaseModel):
 class SuiteSpec(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    api_version: Literal["redharness/v1"] = Field(alias="apiVersion")
+    api_version: Literal["harness/v1"] = Field(alias="apiVersion")
     id: str = Field(min_length=1)
     repeat: int = Field(default=1, ge=1)
     base_seed: int = Field(default=0, ge=0)

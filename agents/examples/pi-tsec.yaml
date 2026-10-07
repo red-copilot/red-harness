@@ -1,7 +1,7 @@
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: pi-kali-tsec
 type: pi
-image: redharness/pi-kali:local
+image: harness/pi-kali:local
 network: host
 env: {}
 pi:

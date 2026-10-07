@@ -1,5 +1,5 @@
-from redharness.action_verifier import ActionVerifier
-from redharness.progress import ProgressLedger
+from harness.action_verifier import ActionVerifier
+from harness.progress import ProgressLedger
 
 
 def test_action_verifier_marks_matching_observation_verified() -> None:

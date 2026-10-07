@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from redharness.world import (
+from harness.world import (
     Goal,
     Observation,
     SQLiteWorldRepository,

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from redharness.execution import FirecrackerProfile
+from harness.execution import FirecrackerProfile
 
 
 def test_firecracker_profile_builds_api_config(tmp_path: Path) -> None:

@@ -1,18 +1,18 @@
 import json
 from pathlib import Path
 
-from redharness.models import AgentSpec, load_task
-from redharness.pi_container import ContainerPiAdapter
-from redharness.trace import TraceRecorder
+from harness.models import AgentSpec, load_task
+from harness.pi_container import ContainerPiAdapter
+from harness.trace import TraceRecorder
 
 
 def _pi_spec() -> AgentSpec:
     return AgentSpec.model_validate(
         {
-            "apiVersion": "redharness/v1",
+            "apiVersion": "harness/v1",
             "id": "pi-container-test",
             "type": "pi",
-            "image": "redharness-pi-kali:test",
+            "image": "harness-pi-kali:test",
             "network": "environment",
             "pi": {
                 "provider": "fake",
@@ -25,7 +25,7 @@ def _pi_spec() -> AgentSpec:
 
 
 def _adapter(monkeypatch, tmp_path: Path) -> ContainerPiAdapter:
-    monkeypatch.setattr("redharness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
+    monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
     return ContainerPiAdapter(
         _pi_spec(),
         allow_host=False,
@@ -53,14 +53,14 @@ def test_pi_gateway_writes_container_visible_provider(monkeypatch, tmp_path: Pat
     adapter = _adapter(monkeypatch, tmp_path)
     agent_dir = adapter._prepare_agent_dir(
         run_dir=tmp_path,
-        gateway_url="http://redharness-gateway:8765",
+        gateway_url="http://harness-gateway:8765",
         gateway_token="one-time-token",
     )
     models = json.loads((agent_dir / "models.json").read_text(encoding="utf-8"))
-    provider = models["providers"]["redharness"]
-    assert provider["baseUrl"] == "http://redharness-gateway:8765/v1"
+    provider = models["providers"]["harness"]
+    assert provider["baseUrl"] == "http://harness-gateway:8765/v1"
     assert provider["api"] == "openai-completions"
-    assert provider["apiKey"] == "$REDHARNESS_GATEWAY_TOKEN"
+    assert provider["apiKey"] == "$HARNESS_GATEWAY_TOKEN"
 
 
 def test_pi_container_command_is_restricted_and_passes_direct_secret(
@@ -88,7 +88,7 @@ def test_pi_container_command_is_restricted_and_passes_direct_secret(
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert "NET_RAW" in command
     assert "FAKE_PROVIDER_KEY=secret" in command
-    assert "redharness-pi-kali:test" in command
+    assert "harness-pi-kali:test" in command
 
 
 def test_pi_gateway_does_not_pass_direct_provider_secret(monkeypatch, tmp_path: Path) -> None:
@@ -106,12 +106,12 @@ def test_pi_gateway_does_not_pass_direct_provider_secret(monkeypatch, tmp_path: 
         network="gateway-net",
         environment_project=None,
         seed=1,
-        gateway_url="http://redharness-gateway:8765",
+        gateway_url="http://harness-gateway:8765",
         gateway_token="one-time-token",
         host_gateway=False,
     )
     assert "FAKE_PROVIDER_KEY=secret" not in command
-    assert "REDHARNESS_GATEWAY_TOKEN=one-time-token" in command
+    assert "HARNESS_GATEWAY_TOKEN=one-time-token" in command
 
 
 def test_pi_json_protocol_normalizes_model_and_tool_events(monkeypatch, tmp_path: Path) -> None:
@@ -119,7 +119,7 @@ def test_pi_json_protocol_normalizes_model_and_tool_events(monkeypatch, tmp_path
     event_file = tmp_path / "events.jsonl"
     event_file.write_text("", encoding="utf-8")
     records = [
-        {"type": "session", "version": 3, "id": "s1", "cwd": "/run/redharness"},
+        {"type": "session", "version": 3, "id": "s1", "cwd": "/run/harness"},
         {
             "type": "message_start",
             "message": {"role": "assistant", "provider": "fake", "model": "fake-model"},

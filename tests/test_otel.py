@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from redharness.otel import export_otlp_json, trace_to_otlp_json
+from harness.otel import export_otlp_json, trace_to_otlp_json
 
 
 def test_trace_to_otlp_json(tmp_path: Path) -> None:
