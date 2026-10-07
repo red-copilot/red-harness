@@ -245,8 +245,40 @@ class PiAdapter:
             )
         return agent_dir
 
-    def _pi_args(self, task: TaskSpec, *, gateway_enabled: bool) -> list[str]:
-        args = [*self.pi.launcher_args, "--mode", "json", "--no-session"]
+    def _solver_prompt(self, task: TaskSpec) -> str:
+        protocol = (
+            "\n\nHarness solver protocol:\n"
+            "Read $HARNESS_WORLD_CONTEXT and $HARNESS_PROGRESS_FILE before acting. "
+            "$HARNESS_EVENT_FILE is the untrusted Agent ACI channel; write only typed solver events there. "
+            "Before a meaningful action append action.intent with data containing description, "
+            "optional tool/subgoal_id, expected_observations, success_conditions, and "
+            "replan_conditions. When you learn durable semantic state append world.observe "
+            "with data {type, summary, content, confidence}; use world.hypothesis, "
+            "world.capability, world.artifact, or world.failure for those kinds. "
+            "Include the current action_id on world.observe when reporting an action result. "
+            "Harness validates typed events and writes canonical World state. "
+            "Never write world.db, world.events.jsonl, world.snapshot.json, or progress.json. "
+            "Benchmark submissions are interactive: after appending a candidate to "
+            "$HARNESS_SUBMISSION_INBOX, keep the process alive and read new records from "
+            "$HARNESS_FEEDBACK_FILE before deciding the next action. A rejected candidate is "
+            "evidence to revise the current hypothesis or path; do not resubmit the same value. "
+            "When feedback requests replanning, reread $HARNESS_WORLD_CONTEXT and "
+            "$HARNESS_PROGRESS_FILE, then continue from updated state. "
+            "Treat Internet access as optional and non-essential; solve from benchmark targets "
+            "and local tools first."
+        )
+
+        return task.objective.description + protocol
+
+    def _pi_args(
+        self,
+        task: TaskSpec,
+        *,
+        gateway_enabled: bool,
+        mode: str = "json",
+        include_prompt: bool = True,
+    ) -> list[str]:
+        args = [*self.pi.launcher_args, "--mode", mode, "--no-session"]
         args.append("--approve" if self.pi.approve_project else "--no-approve")
         for enabled, flag in (
             (self.pi.context_files, "--no-context-files"),
@@ -273,29 +305,20 @@ class PiAdapter:
         if self.pi.thinking:
             args.extend(["--thinking", self.pi.thinking])
         args.extend(self.pi.extra_args)
-        world_protocol = (
-            "\n\nHarness solver protocol:\n"
-            "Read $HARNESS_WORLD_CONTEXT and $HARNESS_PROGRESS_FILE before acting. "
-            "$HARNESS_EVENT_FILE is the untrusted Agent ACI channel; write only typed solver events there. "
-            "Before a meaningful action append action.intent with data containing description, "
-            "optional tool/subgoal_id, expected_observations, success_conditions, and "
-            "replan_conditions. When you learn durable semantic state append world.observe "
-            "with data {type, summary, content, confidence}; use world.hypothesis, "
-            "world.capability, world.artifact, or world.failure for those kinds. "
-            "Include the current action_id on world.observe when reporting an action result. "
-            "Harness validates typed events and writes canonical World state. "
-            "Never write world.db, world.events.jsonl, world.snapshot.json, or progress.json. "
-            "Benchmark submissions are interactive: after appending a candidate to "
-            "$HARNESS_SUBMISSION_INBOX, keep the process alive and read new records from "
-            "$HARNESS_FEEDBACK_FILE before deciding the next action. A rejected candidate is "
-            "evidence to revise the current hypothesis or path; do not resubmit the same value. "
-            "When feedback requests replanning, reread $HARNESS_WORLD_CONTEXT and "
-            "$HARNESS_PROGRESS_FILE, then continue from updated state. "
-            "Treat Internet access as optional and non-essential; solve from benchmark targets "
-            "and local tools first."
-        )
-        args.append(task.objective.description + world_protocol)
+        if include_prompt:
+            args.append(self._solver_prompt(task))
         return args
+
+    def _rpc_command(self, task: TaskSpec, *, gateway_enabled: bool) -> list[str]:
+        return [
+            self.pi.binary,
+            *self._pi_args(
+                task,
+                gateway_enabled=gateway_enabled,
+                mode="rpc",
+                include_prompt=False,
+            ),
+        ]
 
     def _create_command(
         self,
