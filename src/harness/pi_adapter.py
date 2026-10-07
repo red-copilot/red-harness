@@ -276,7 +276,7 @@ class PiAdapter:
             "\n\nRed Harness state protocol:\n"
             "Read $HARNESS_WORLD_CONTEXT and $HARNESS_PROGRESS_FILE before acting. "
             "When you discover durable, task-relevant state, append one JSON object per line to "
-            "$HARNESS_WORLD_INBOX. Use schema_version harness.world.submit/v1 and one of "
+            "$HARNESS_WORLD_INBOX. Use schema_version harness/world-submission/v1 and one of "
             "entity, relation, observation, artifact, capability, hypothesis, goal, action, "
             "constraint, or failure. Prefer high-value state changes over verbose narration. "
             "When your current subgoal, hypothesis, expected observation, actual observation, "
@@ -405,7 +405,7 @@ class PiAdapter:
             gateway_token=gateway_token,
         )
 
-        container_name = ("rh_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
+        container_name = ("harness_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
         command = self._create_command(
             task,
             task_dir=task_dir,
