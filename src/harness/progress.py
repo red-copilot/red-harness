@@ -163,6 +163,8 @@ class ProgressLedger(BaseModel):
         if accepted:
             self.accepted_submissions += 1
             self.no_progress_count = 0
+            if "benchmark_negative_feedback" in self.replan_reasons:
+                self.replan_reasons.remove("benchmark_negative_feedback")
         else:
             self.rejected_submissions += 1
             self.failure_count += 1
