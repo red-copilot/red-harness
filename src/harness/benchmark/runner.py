@@ -286,8 +286,6 @@ class BenchmarkRunner:
                             break
                     if completed_online:
                         break
-                solver_loop.finish_ingest()
-
                 agent_result = await agent_session.result()
             else:
                 agent_result = adapter_instance.run(**run_kwargs)
