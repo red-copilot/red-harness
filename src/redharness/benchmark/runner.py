@@ -14,7 +14,7 @@ from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..progress import ProgressLedger
 from ..session import AgentObservation
 from ..trace import TraceRecorder
-from ..world import Entity, FileWorldRepository, Goal, WorldContextBuilder
+from ..world import Entity, Goal, SQLiteWorldRepository, WorldContextBuilder
 from ..world.live import WorldInboxCursor
 from .base import BenchmarkAdapter, BenchmarkCase, Submission
 from .protocol import SubmissionInbox
@@ -56,7 +56,7 @@ class BenchmarkRunner:
                 data={"error_type": type(exc).__name__, "message": str(exc)},
             )
             raise
-        world = FileWorldRepository(run_dir / "world.events.jsonl")
+        world = SQLiteWorldRepository(run_dir / "world.events.jsonl")
         context_builder = WorldContextBuilder()
         started = time.monotonic()
 
