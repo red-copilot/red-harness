@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 
-run_dir = Path(os.environ["REDHARNESS_RUN_DIR"])
+run_dir = Path(os.environ["HARNESS_RUN_DIR"])
 proof = run_dir / "proof.txt"
 success = proof.is_file() and proof.read_text(encoding="utf-8").strip() == "red-harness-ok"
 

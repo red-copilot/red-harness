@@ -50,6 +50,6 @@ RUN apt-get update \
 ENV PI_TELEMETRY=0 \
     PI_SKIP_VERSION_CHECK=1
 
-WORKDIR /run/redharness
+WORKDIR /run/harness
 
 CMD ["pi", "--version"]
