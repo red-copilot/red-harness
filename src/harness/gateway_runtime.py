@@ -143,11 +143,12 @@ class DockerGatewaySidecarRuntime:
         safe_id = run_id.lower().replace("-", "_")
         self.config = config
         self.run_dir = run_dir
+        self.control_dir = control_dir(run_dir)
         self.task_dir = task_dir
         self.trace = trace
         self.token = secrets.token_urlsafe(32)
-        self.container_name = f"rh_gateway_{safe_id}"[:63]
-        self.network_name = f"rh_gateway_net_{safe_id}"[:63]
+        self.container_name = f"harness_gateway_{safe_id}"[:63]
+        self.network_name = f"harness_gateway_net_{safe_id}"[:63]
         self.url = "http://harness-gateway:8765"
 
     @staticmethod
