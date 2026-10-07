@@ -35,11 +35,13 @@ class FileWorldRepository:
         if not self.event_path.exists():
             return []
         events: list[WorldEvent] = []
+        sequence = 0
         with self.event_path.open("r", encoding="utf-8") as handle:
             for number, line in enumerate(handle, start=1):
-                if after_sequence is not None and number <= after_sequence:
-                    continue
                 if not line.strip():
+                    continue
+                sequence += 1
+                if after_sequence is not None and sequence <= after_sequence:
                     continue
                 try:
                     events.append(WorldEvent.model_validate_json(line))
