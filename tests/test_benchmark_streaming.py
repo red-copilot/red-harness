@@ -55,6 +55,8 @@ class FakeSession:
     async def events(self):
         yield AgentEvent(
             type="action.intent",
+            source="agent",
+            trusted=False,
             data={
                 "action_id": "action-probe-admin",
                 "description": "probe admin endpoint",
@@ -65,6 +67,8 @@ class FakeSession:
         )
         yield AgentEvent(
             type="world.observe",
+            source="agent",
+            trusted=False,
             data={
                 "id": "obs-live",
                 "type": "web.endpoint",
