@@ -140,3 +140,42 @@ def test_pi_rpc_observe_steers_active_session(tmp_path: Path) -> None:
     assert command["streamingBehavior"] == "steer"
     assert "solver.verification" in command["message"]
     assert '"action_id": "action-1"' in command["message"]
+
+
+
+def test_pi_rpc_close_aborts_and_kills_container(monkeypatch, tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("harness.pi_rpc.subprocess.run", fake_run)
+
+    async def scenario() -> tuple[ContainerPiRpcSession, _FakeProcess]:
+        process = _FakeProcess()
+        trace = TraceRecorder(tmp_path / "trace-close.jsonl", "run-rpc", "task-rpc")
+        adapter = SimpleNamespace(trace=trace, spec=_spec())
+        session = ContainerPiRpcSession(
+            adapter,
+            run_kwargs={"task": _task()},
+            run_dir=tmp_path,
+            process=process,
+            container_name="harness_pi_test",
+            stderr_handle=io.BytesIO(),
+            gateway_enabled=False,
+        )
+        await session.close("objective-complete")
+        return session, process
+
+    session, process = asyncio.run(scenario())
+
+    commands = [
+        json.loads(line)
+        for line in process.stdin.buffer.getvalue().decode("utf-8").splitlines()
+    ]
+    assert commands[-1]["type"] == "abort"
+    assert calls == [["docker", "kill", "harness_pi_test"]]
+    control = (tmp_path / "agent.control.jsonl").read_text(encoding="utf-8")
+    assert "objective-complete" in control
+    assert session._closed is True
