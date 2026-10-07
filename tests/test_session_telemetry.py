@@ -186,6 +186,6 @@ def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path)
     )
     asyncio.run(session.close("objective-complete"))
 
-    assert calls == [["docker", "kill", "rh_pi_run_demo"]]
+    assert calls == [["docker", "kill", "harness_pi_run_demo"]]
     control = (tmp_path / "run_demo" / "agent.control.jsonl")
     assert "objective-complete" in control.read_text(encoding="utf-8")
