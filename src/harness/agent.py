@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .budget import BudgetMonitor, UsageMetrics
 from .models import AgentSpec, TaskSpec
+from .runtime_paths import runtime_event_path
 from .trace import TraceRecorder
 
 
@@ -48,7 +49,7 @@ def _run_monitored(
     task: TaskSpec,
     trace: TraceRecorder,
 ) -> AgentResult:
-    event_file = run_dir / "runtime.events.jsonl"
+    event_file = runtime_event_path(run_dir)
     event_file.write_text("", encoding="utf-8")
     stdout_path = run_dir / "agent.stdout.log"
     stderr_path = run_dir / "agent.stderr.log"
@@ -132,6 +133,7 @@ class CLIAdapter:
                 "HARNESS_OBJECTIVE": task.objective.description,
                 "HARNESS_ENV_PROJECT": environment_project or "",
                 "HARNESS_EVENT_FILE": str(run_dir / "agent.events.jsonl"),
+                "HARNESS_RUNTIME_EVENT_FILE": str(runtime_event_path(run_dir)),
                 "HARNESS_WORLD_INBOX": str(run_dir / "world.inbox.jsonl"),
                 "HARNESS_WORLD_CONTEXT": str(run_dir / "world.context.txt"),
                 "HARNESS_SUBMISSION_INBOX": str(run_dir / "submission.inbox.jsonl"),
