@@ -1,4 +1,3 @@
-# ruff: noqa: I001
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +11,7 @@ from typing import Any
 from .agent import AgentError, AgentResult
 from .budget import BudgetMonitor
 from .runtime_paths import runtime_event_path
-from .session import AgentEvent, AgentObservation, OneShotAgentSession
+from .session import AgentObservation, OneShotAgentSession
 
 
 class ContainerPiRpcSession(OneShotAgentSession):
@@ -24,7 +23,7 @@ class ContainerPiRpcSession(OneShotAgentSession):
         *,
         run_kwargs: dict[str, Any],
         run_dir: Path,
-        process: subprocess.Popen[bytes],
+        process: asyncio.subprocess.Process,
         container_name: str,
         stderr_handle: Any,
         gateway_enabled: bool,
@@ -160,13 +159,14 @@ class ContainerPiRpcSession(OneShotAgentSession):
 
         stderr_handle = None
         try:
-            adapter._docker(create_command, cwd=task_dir)
+            await asyncio.to_thread(adapter._docker, create_command, cwd=task_dir)
             if (
                 sidecar_gateway
                 and environment_network
                 and environment_network != gateway_network
             ):
-                adapter._docker(
+                await asyncio.to_thread(
+                    adapter._docker,
                     [
                         "docker",
                         "network",
@@ -178,14 +178,16 @@ class ContainerPiRpcSession(OneShotAgentSession):
                 )
 
             stderr_handle = stderr_path.open("wb")
-            process = subprocess.Popen(
-                ["docker", "start", "-a", "-i", container_name],
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "start",
+                "-a",
+                "-i",
+                container_name,
                 cwd=task_dir,
-                env=None,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
                 stderr=stderr_handle,
-                start_new_session=True,
             )
             session = cls(
                 adapter,
@@ -208,7 +210,8 @@ class ContainerPiRpcSession(OneShotAgentSession):
         except Exception:
             if stderr_handle is not None:
                 stderr_handle.close()
-            subprocess.run(
+            await asyncio.to_thread(
+                subprocess.run,
                 ["docker", "rm", "-f", container_name],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -217,7 +220,7 @@ class ContainerPiRpcSession(OneShotAgentSession):
             raise
 
     async def _send_rpc(self, command: dict[str, Any]) -> None:
-        if self.process.poll() is not None:
+        if self.process.returncode is not None:
             raise AgentError("Pi RPC process is not running")
         if self.process.stdin is None:
             raise AgentError("Pi RPC stdin is unavailable")
@@ -225,15 +228,10 @@ class ContainerPiRpcSession(OneShotAgentSession):
             json.dumps(command, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             + b"\n"
         )
-
-        def write() -> None:
-            assert self.process.stdin is not None
-            self.process.stdin.write(payload)
-            self.process.stdin.flush()
-
         async with self._rpc_lock:
             self._settled.clear()
-            await asyncio.to_thread(write)
+            self.process.stdin.write(payload)
+            await self.process.stdin.drain()
 
     async def _reader_loop(self) -> None:
         if self.process.stdout is None:
@@ -243,7 +241,7 @@ class ContainerPiRpcSession(OneShotAgentSession):
 
         with self.raw_path.open("ab") as raw_handle:
             while True:
-                line = await asyncio.to_thread(self.process.stdout.readline)
+                line = await self.process.stdout.readline()
                 if not line:
                     break
                 raw_handle.write(line)
@@ -321,7 +319,6 @@ class ContainerPiRpcSession(OneShotAgentSession):
                 break
 
             if self._settled.is_set():
-                # One final scheduling turn lets the reader flush all records preceding settled.
                 await asyncio.sleep(0)
                 final_runtime, self._runtime_event_offset, runtime_remainder = self._poll_path(
                     self.runtime_event_path,
@@ -342,13 +339,13 @@ class ContainerPiRpcSession(OneShotAgentSession):
                 if self._settled.is_set():
                     break
 
-            if self.process.poll() is not None:
+            if self.process.returncode is not None:
                 break
             await asyncio.sleep(self.poll_interval)
 
     async def observe(self, observation: AgentObservation) -> None:
         await super().observe(observation)
-        if self._closed or self.process.poll() is not None:
+        if self._closed or self.process.returncode is not None:
             return
         message = (
             f"[Harness observation: {observation.type}]\n"
@@ -367,7 +364,7 @@ class ContainerPiRpcSession(OneShotAgentSession):
         if self._closed:
             return
         await super().close(reason)
-        if self.process.poll() is None:
+        if self.process.returncode is None:
             try:
                 await self._send_rpc(
                     {
@@ -375,7 +372,7 @@ class ContainerPiRpcSession(OneShotAgentSession):
                         "type": "abort",
                     }
                 )
-            except (AgentError, BrokenPipeError, OSError):
+            except (AgentError, BrokenPipeError, ConnectionError, OSError):
                 pass
             await asyncio.to_thread(
                 subprocess.run,
@@ -389,17 +386,21 @@ class ContainerPiRpcSession(OneShotAgentSession):
         if self._result_cache is not None:
             return self._result_cache
 
-        if self.process.poll() is None and not self._closed:
-            if self.process.stdin is not None:
-                try:
-                    self.process.stdin.close()
-                except OSError:
-                    pass
-
-        if self.process.poll() is None:
+        if (
+            self.process.returncode is None
+            and not self._closed
+            and self.process.stdin is not None
+        ):
+            self.process.stdin.close()
             try:
-                await asyncio.to_thread(self.process.wait, 5)
-            except subprocess.TimeoutExpired:
+                await self.process.stdin.wait_closed()
+            except (AttributeError, BrokenPipeError, ConnectionError):
+                pass
+
+        if self.process.returncode is None:
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=5)
+            except TimeoutError:
                 await asyncio.to_thread(
                     subprocess.run,
                     ["docker", "kill", self.container_name],
@@ -407,14 +408,15 @@ class ContainerPiRpcSession(OneShotAgentSession):
                     stderr=subprocess.DEVNULL,
                     check=False,
                 )
-                await asyncio.to_thread(self.process.wait)
+                await self.process.wait()
 
         if self._reader_task is not None:
             await self._reader_task
 
         self.monitor.finish()
         self.stderr_handle.close()
-        subprocess.run(
+        await asyncio.to_thread(
+            subprocess.run,
             ["docker", "rm", "-f", self.container_name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
