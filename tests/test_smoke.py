@@ -4,8 +4,8 @@ from pathlib import Path
 from redharness.agent import AgentResult
 from redharness.budget import UsageMetrics
 from redharness.models import load_agent, load_task
-from redharness.session import AgentEvent
 from redharness.orchestrator import Orchestrator
+from redharness.session import AgentEvent
 
 
 def test_smoke_run(tmp_path: Path) -> None:
