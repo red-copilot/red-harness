@@ -15,7 +15,14 @@ from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..progress import ProgressLedger
 from ..session import AgentObservation
 from ..trace import TraceRecorder
-from ..world import Entity, Goal, SQLiteWorldRepository, WorldContextBuilder
+from ..world import (
+    Entity,
+    Failure,
+    Goal,
+    Observation,
+    SQLiteWorldRepository,
+    WorldContextBuilder,
+)
 from ..world.live import WorldInboxCursor
 from .base import BenchmarkAdapter, BenchmarkCase, Submission
 from .protocol import SubmissionInbox
@@ -162,23 +169,87 @@ class BenchmarkRunner:
                 completed=submitted.completed,
             )
             progress.write(progress_path)
+            submission_digest = _submission_hash(submission.value)
             data = submitted.model_dump()
-            data["value_sha256"] = _submission_hash(submission.value)
+            data["value_sha256"] = submission_digest
             submission_results.append(data)
             trace.emit("benchmark.submission.result", data=data)
+
+            revision_before_feedback = world.snapshot.revision
+            feedback_id = f"benchmark-feedback:{submission_digest[:16]}"
+            world.upsert(
+                "observation",
+                Observation(
+                    id=feedback_id,
+                    type="benchmark.submission.feedback",
+                    content={
+                        "submission_type": submission.type,
+                        "value_sha256": submission_digest,
+                        "accepted": submitted.accepted,
+                        "score_delta": submitted.score_delta,
+                        "completed": submitted.completed,
+                        "metadata": submitted.metadata,
+                    },
+                    confidence=1.0,
+                    source=session.benchmark,
+                ),
+                actor=f"benchmark:{session.benchmark}",
+            )
+            if not submitted.accepted:
+                world.upsert(
+                    "failure",
+                    Failure(
+                        id=f"benchmark-rejection:{submission_digest[:16]}",
+                        type="benchmark.candidate_rejected",
+                        message="Benchmark rejected submitted candidate",
+                        recoverable=True,
+                        attributes={
+                            "submission_type": submission.type,
+                            "value_sha256": submission_digest,
+                        },
+                    ),
+                    actor=f"benchmark:{session.benchmark}",
+                )
+            revision_after_feedback = world.snapshot.revision
+            (run_dir / "world.context.txt").write_text(
+                context_builder.render(
+                    world.snapshot,
+                    query=session.objective.description,
+                ),
+                encoding="utf-8",
+            )
+
+            feedback_data = {
+                "submission_type": submission.type,
+                "accepted": submitted.accepted,
+                "score_delta": submitted.score_delta,
+                "completed": submitted.completed,
+                "metadata": submitted.metadata,
+                "value_sha256": submission_digest,
+                "world_revision": revision_after_feedback,
+                "replan_required": "benchmark_negative_feedback"
+                in progress.replan_reasons,
+                "replan_reasons": list(progress.replan_reasons),
+            }
             if agent_session is not None:
                 await agent_session.observe(
                     AgentObservation(
                         type="benchmark.feedback",
-                        data={
-                            "submission_type": submission.type,
-                            "accepted": submitted.accepted,
-                            "score_delta": submitted.score_delta,
-                            "completed": submitted.completed,
-                            "metadata": submitted.metadata,
-                        },
+                        data=feedback_data,
                     )
                 )
+                if revision_after_feedback != revision_before_feedback:
+                    await agent_session.observe(
+                        AgentObservation(
+                            type="world.state.updated",
+                            data={
+                                "revision_before": revision_before_feedback,
+                                "revision_after": revision_after_feedback,
+                                "context_path": "world.context.txt",
+                                "cause": "benchmark.feedback",
+                            },
+                        )
+                    )
             return submitted.completed
 
         try:
