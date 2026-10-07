@@ -20,8 +20,8 @@ class SkillSpec(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    api_version: Literal["redharness/skill/v1"] = Field(
-        default="redharness/skill/v1",
+    api_version: Literal["harness/skill/v1"] = Field(
+        default="harness/skill/v1",
         alias="apiVersion",
     )
     id: str = Field(min_length=1)

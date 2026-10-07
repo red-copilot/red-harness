@@ -18,7 +18,7 @@ class GatewayJobSpec(BaseModel):
     sidecar_image: str | None = None
     sidecar_runtime: str | None = None
     model_upstream: str | None = None
-    model_api_key_env: str = "REDHARNESS_MODEL_API_KEY"
+    model_api_key_env: str = "HARNESS_MODEL_API_KEY"
     input_price_per_million_usd: float = Field(default=0.0, ge=0)
     output_price_per_million_usd: float = Field(default=0.0, ge=0)
 
@@ -26,7 +26,7 @@ class GatewayJobSpec(BaseModel):
 class JobPayload(BaseModel):
     task_path: str
     agent_path: str
-    runs_root: str = ".redharness/runs"
+    runs_root: str = ".harness/runs"
     allow_host_agent: bool = False
     seed: int = Field(default=0, ge=0)
     gateway: GatewayJobSpec = Field(default_factory=GatewayJobSpec)
