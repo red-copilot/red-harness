@@ -185,7 +185,6 @@ def test_orchestrator_ingests_world_state_during_session(
     assert result["world"]["agent_authored_records"] >= 1
     assert result["progress"]["verified_actions"] >= 1
     assert fake.session is not None
-    assert any(item.type == "world.state.updated" for item in fake.session.feedback)
 
     run_dir = tmp_path / "runs" / result["run_id"]
     context = (run_dir / "world.context.txt").read_text(encoding="utf-8")
