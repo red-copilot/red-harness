@@ -2,8 +2,8 @@ import json
 import os
 import urllib.request
 
-url = os.environ["REDHARNESS_GATEWAY_URL"] + "/v1/tools/call"
-token = os.environ["REDHARNESS_GATEWAY_TOKEN"]
+url = os.environ["HARNESS_GATEWAY_URL"] + "/v1/tools/call"
+token = os.environ["HARNESS_GATEWAY_TOKEN"]
 body = json.dumps(
     {
         "name": "file.write",

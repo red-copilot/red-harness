@@ -58,7 +58,7 @@ Pi requires Node.js 22.19 or newer. See [`docs/pi.md`](docs/pi.md) for the full 
 ## Local run
 
 ```bash
-redharness run benchmarks/examples/hello/task.yaml \
+harness run benchmarks/examples/hello/task.yaml \
   --agent agents/examples/demo.yaml \
   --allow-host-agent \
   --seed 42
@@ -67,7 +67,7 @@ redharness run benchmarks/examples/hello/task.yaml \
 Parallel suite:
 
 ```bash
-redharness suite benchmarks/examples/smoke-suite.yaml \
+harness suite benchmarks/examples/smoke-suite.yaml \
   --agent agents/examples/demo.yaml \
   --allow-host-agent \
   --workers 2
@@ -76,7 +76,7 @@ redharness suite benchmarks/examples/smoke-suite.yaml \
 A suite may declare:
 
 ```yaml
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: web-suite
 repeat: 5
 base_seed: 1000
@@ -103,7 +103,7 @@ Domain aggregation is based on each task's `category`.
 Example `agents/examples/pi.yaml`:
 
 ```yaml
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: pi-openai-sol
 type: pi
 
@@ -127,7 +127,7 @@ Direct-provider mode uses the provider's normal environment credential:
 ```bash
 export OPENAI_API_KEY="..."
 
-redharness run benchmark/task.yaml \
+harness run benchmark/task.yaml \
   --agent agents/examples/pi.yaml \
   --allow-host-agent
 ```
@@ -152,9 +152,9 @@ By default, Pi runs in Docker with a read-only root filesystem, dropped Linux ca
 Pi can be forced through the Harness OpenAI-compatible model proxy:
 
 ```bash
-export REDHARNESS_MODEL_API_KEY="real-provider-key"
+export HARNESS_MODEL_API_KEY="real-provider-key"
 
-redharness run benchmark/task.yaml \
+harness run benchmark/task.yaml \
   --agent agents/examples/pi.yaml \
   --allow-host-agent \
   --gateway \
@@ -163,7 +163,7 @@ redharness run benchmark/task.yaml \
   --output-price-per-million 10.0
 ```
 
-For that run Harness creates an isolated Pi `models.json` with a `redharness` provider whose API key is the one-time `REDHARNESS_GATEWAY_TOKEN`. The real upstream credential remains inside the Gateway process. Gateway model events are authoritative in this mode, so Pi's copy of model usage is not counted twice.
+For that run Harness creates an isolated Pi `models.json` with a `harness` provider whose API key is the one-time `HARNESS_GATEWAY_TOKEN`. The real upstream credential remains inside the Gateway process. Gateway model events are authoritative in this mode, so Pi's copy of model usage is not counted twice.
 
 The Pi adapter is containerized and supports both host Gateway mode and Docker sidecar Gateway mode. For VPN-backed benchmarks such as TSec, `network: host` is available on Linux workers; sidecar Gateway mode is intentionally incompatible with `network: host` because the Agent must join the private Gateway network.
 
@@ -173,16 +173,16 @@ Install the optional SDK dependency and build the Pi/Kali image:
 
 ```bash
 python -m pip install -e ".[tsec]"
-docker build -t redharness/pi-kali:local docker/pi-kali
+docker build -t harness/pi-kali:local docker/pi-kali
 ```
 
 Set `BENCHMARK_BASE_URL` and `BENCHMARK_TOKEN` only on the Harness worker. Run one challenge with:
 
 ```bash
-redharness tsec --agent agents/examples/pi-tsec.yaml
+harness tsec --agent agents/examples/pi-tsec.yaml
 ```
 
-Use `--challenge WEB-001` for a specific challenge or `--all` for every unfinished challenge. Harness performs the SDK lifecycle and never passes the Benchmark token into Pi. Pi receives only the challenge description and target addresses and emits candidates as `REDHARNESS_FLAG=<flag>`. Candidate plaintext is submitted through the SDK; trace records only the SHA256 of each candidate. Challenge close is always executed in `finally`.
+Use `--challenge WEB-001` for a specific challenge or `--all` for every unfinished challenge. Harness performs the SDK lifecycle and never passes the Benchmark token into Pi. Pi receives only the challenge description and target addresses and emits candidates as `HARNESS_FLAG=<flag>`. Candidate plaintext is submitted through the SDK; trace records only the SHA256 of each candidate. Challenge close is always executed in `finally`.
 
 For VPN-backed targets, `agents/examples/pi-tsec.yaml` uses `network: host` so the Kali container shares the Linux worker's VPN routes. See [`docs/tsec.md`](docs/tsec.md).
 
@@ -193,11 +193,11 @@ The reference control plane uses SQLite for durable job state and leases. Worker
 Set an authentication token and start the control plane:
 
 ```bash
-export REDHARNESS_CONTROL_TOKEN="replace-with-a-random-secret"
+export HARNESS_CONTROL_TOKEN="replace-with-a-random-secret"
 
-redharness serve \
-  --queue-db .redharness/control.db \
-  --runs-root .redharness/runs \
+harness serve \
+  --queue-db .harness/control.db \
+  --runs-root .harness/runs \
   --benchmarks-root benchmarks \
   --host 0.0.0.0 \
   --port 8780
@@ -206,19 +206,19 @@ redharness serve \
 Submit a job using worker-visible repository-relative paths:
 
 ```bash
-redharness submit benchmarks/examples/hello/task.yaml \
+harness submit benchmarks/examples/hello/task.yaml \
   --agent agents/examples/demo.yaml \
   --control-url http://control-plane:8780 \
-  --runs-root .redharness/runs \
+  --runs-root .harness/runs \
   --seed 100
 ```
 
 Start a worker:
 
 ```bash
-export REDHARNESS_CONTROL_TOKEN="replace-with-a-random-secret"
+export HARNESS_CONTROL_TOKEN="replace-with-a-random-secret"
 
-redharness worker \
+harness worker \
   --control-url http://control-plane:8780 \
   --workspace-root /srv/red-harness
 ```
@@ -242,7 +242,7 @@ When a Worker claims a job it receives a time-limited lease. It heartbeats while
 
 The SQLite backend is the single-control-plane reference implementation. The queue API is intentionally separated from Orchestrator so a PostgreSQL/Redis backend can replace it without changing Worker execution semantics.
 
-Provider API keys are never placed in queue payloads. Jobs store only the environment-variable name, such as `REDHARNESS_MODEL_API_KEY`; the Worker resolves the actual secret locally.
+Provider API keys are never placed in queue payloads. Jobs store only the environment-variable name, such as `HARNESS_MODEL_API_KEY`; the Worker resolves the actual secret locally.
 
 ## Control-plane API
 
@@ -317,7 +317,7 @@ GET /v1/runs/{run_id}/otel
 Local export:
 
 ```bash
-redharness otel-export .redharness/runs/run_... \
+harness otel-export .harness/runs/run_... \
   --output trace.otlp.json
 ```
 
@@ -330,7 +330,7 @@ Each Red Harness event becomes a span carrying run/task/actor/event attributes p
 Useful for trusted local development and the first-class Pi adapter:
 
 ```bash
-redharness run benchmarks/examples/hello/task.yaml \
+harness run benchmarks/examples/hello/task.yaml \
   --agent agents/examples/gateway-demo.yaml \
   --allow-host-agent \
   --gateway \
@@ -343,13 +343,13 @@ The Agent receives only a one-time Gateway token. Real provider credentials rema
 
 ```bash
 docker build -f docker/gateway/Dockerfile \
-  -t redharness-gateway:local .
+  -t harness-gateway:local .
 
-redharness run benchmarks/examples/hello/task.yaml \
+harness run benchmarks/examples/hello/task.yaml \
   --agent agents/examples/docker-gateway.yaml \
   --gateway \
   --gateway-mode sidecar \
-  --gateway-image redharness-gateway:local \
+  --gateway-image harness-gateway:local \
   --gateway-policy examples/gateway-policy.yaml
 ```
 
@@ -383,7 +383,7 @@ Pi built-in tools do not pass through this Tool Gateway in v0.8; they are observ
 Docker Agent:
 
 ```yaml
-apiVersion: redharness/v1
+apiVersion: harness/v1
 id: isolated-agent
 type: docker
 image: my-agent:latest
@@ -406,7 +406,7 @@ verification:
 Check local support:
 
 ```bash
-redharness capabilities
+harness capabilities
 ```
 
 Output reports availability of:
@@ -438,7 +438,7 @@ budgets:
   max_cost_usd: 20
 ```
 
-Each run is stored beneath `.redharness/runs/<run_id>/`:
+Each run is stored beneath `.harness/runs/<run_id>/`:
 
 ```text
 result.json
@@ -487,7 +487,7 @@ For Pi runs, `agent.stdout.log` is the raw Pi JSON event stream.
               Trace API / OTLP
 ```
 
-World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md). Reusable technique metadata uses `redharness/skill/v1`; skills describe state preconditions and possible outcomes but are not executable code. The core state schema is domain-neutral and does not require a DAG; graph and timeline representations are derived views over the event-sourced state.
+World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md). Reusable technique metadata uses `harness/skill/v1`; skills describe state preconditions and possible outcomes but are not executable code. The core state schema is domain-neutral and does not require a DAG; graph and timeline representations are derived views over the event-sourced state.
 
 Core separation rule:
 
@@ -526,7 +526,7 @@ Agent adapter, ingests world-state submissions, sends benchmark submissions, rec
 and always tears the external session down.
 
 TSecBench is implemented through this contract. Its SDK token stays in the Harness process and is
-never passed to the Agent. `REDHARNESS_FLAG=<flag>` remains a compatibility submission extractor;
+never passed to the Agent. `HARNESS_FLAG=<flag>` remains a compatibility submission extractor;
 submission values are hashed in normalized traces.
 
 
@@ -537,11 +537,11 @@ boundary while retaining the legacy `run()` API. Sessions expose normalized even
 observations, checkpoints, close requests, and the eventual `AgentResult`.
 
 Externally evaluated benchmarks may accept structured submissions through
-`REDHARNESS_SUBMISSION_INBOX` and write trusted evaluator feedback to
-`REDHARNESS_FEEDBACK_FILE`. TSec uses this path for online flag feedback while retaining
-`REDHARNESS_FLAG=<flag>` as a compatibility fallback.
+`HARNESS_SUBMISSION_INBOX` and write trusted evaluator feedback to
+`HARNESS_FEEDBACK_FILE`. TSec uses this path for online flag feedback while retaining
+`HARNESS_FLAG=<flag>` as a compatibility fallback.
 
-Each benchmark run also maintains `progress.json` (`redharness.progress/v1`) separately from
+Each benchmark run also maintains `progress.json` (`harness.progress/v1`) separately from
 World State. It tracks active solver progress, recent action status, no-progress/failure counters,
 submission outcomes, and objective completion. Containerized Pi sessions can be actively stopped
 when the evaluator reports objective completion.
