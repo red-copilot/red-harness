@@ -13,7 +13,7 @@ from .tsec_adapter import TSecBenchmarkAdapter
 from .tsec_client import TSecAdapterError, TSecClientAdapter, TSecConfig, load_tsec_config
 
 
-_FLAG_RE = re.compile(r"REDHARNESS_FLAG=([^\s]+)")
+_FLAG_RE = re.compile(r"HARNESS_FLAG=([^\s]+)")
 
 
 def _is_sdk_error(exc: Exception, name: str) -> bool:

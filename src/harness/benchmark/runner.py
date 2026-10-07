@@ -98,7 +98,7 @@ class BenchmarkRunner:
         )
 
         task = TaskSpec(
-            apiVersion="redharness/v1",
+            apiVersion="harness/v1",
             id=session.case_id,
             name=session.case_id,
             category=session.benchmark,
