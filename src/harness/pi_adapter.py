@@ -230,10 +230,10 @@ class PiAdapter:
         if gateway_url and gateway_token:
             models = {
                 "providers": {
-                    "redharness": {
+                    "harness": {
                         "baseUrl": f"{gateway_url}/v1",
                         "api": "openai-completions",
-                        "apiKey": "$REDHARNESS_GATEWAY_TOKEN",
+                        "apiKey": "$HARNESS_GATEWAY_TOKEN",
                         "models": [{"id": self.pi.model}],
                     }
                 }
@@ -264,7 +264,7 @@ class PiAdapter:
         else:
             args.append("--no-tools")
         if gateway_enabled:
-            args.extend(["--provider", "redharness", "--model", self.pi.model])
+            args.extend(["--provider", "harness", "--model", self.pi.model])
         else:
             if self.pi.provider:
                 args.extend(["--provider", self.pi.provider])
@@ -274,14 +274,14 @@ class PiAdapter:
         args.extend(self.pi.extra_args)
         world_protocol = (
             "\n\nRed Harness state protocol:\n"
-            "Read $REDHARNESS_WORLD_CONTEXT and $REDHARNESS_PROGRESS_FILE before acting. "
+            "Read $HARNESS_WORLD_CONTEXT and $HARNESS_PROGRESS_FILE before acting. "
             "When you discover durable, task-relevant state, append one JSON object per line to "
-            "$REDHARNESS_WORLD_INBOX. Use schema_version redharness.world.submit/v1 and one of "
+            "$HARNESS_WORLD_INBOX. Use schema_version harness.world.submit/v1 and one of "
             "entity, relation, observation, artifact, capability, hypothesis, goal, action, "
             "constraint, or failure. Prefer high-value state changes over verbose narration. "
             "When your current subgoal, hypothesis, expected observation, actual observation, "
             "or replan reason changes, append a compact progress.updated JSON event to "
-            "$REDHARNESS_EVENT_FILE with those fields under data. Do not write to "
+            "$HARNESS_EVENT_FILE with those fields under data. Do not write to "
             "world.events.jsonl, world.snapshot.json, or progress.json directly."
         )
         args.append(task.objective.description + world_protocol)
@@ -322,23 +322,23 @@ class PiAdapter:
         command.extend(
             [
                 "-v", f"{task_dir.resolve()}:/task:ro",
-                "-v", f"{run_dir.resolve()}:/run/redharness:rw",
-                "-w", "/run/redharness",
-                "-e", f"REDHARNESS_TASK_ID={task.id}",
-                "-e", "REDHARNESS_TASK_DIR=/task",
-                "-e", "REDHARNESS_RUN_DIR=/run/redharness",
-                "-e", "REDHARNESS_WORLD_INBOX=/run/redharness/world.inbox.jsonl",
+                "-v", f"{run_dir.resolve()}:/run/harness:rw",
+                "-w", "/run/harness",
+                "-e", f"HARNESS_TASK_ID={task.id}",
+                "-e", "HARNESS_TASK_DIR=/task",
+                "-e", "HARNESS_RUN_DIR=/run/harness",
+                "-e", "HARNESS_WORLD_INBOX=/run/harness/world.inbox.jsonl",
                 "-e",
-                "REDHARNESS_WORLD_CONTEXT=/run/redharness/world.context.txt",
+                "HARNESS_WORLD_CONTEXT=/run/harness/world.context.txt",
                 "-e",
-                "REDHARNESS_SUBMISSION_INBOX=/run/redharness/submission.inbox.jsonl",
+                "HARNESS_SUBMISSION_INBOX=/run/harness/submission.inbox.jsonl",
                 "-e",
-                "REDHARNESS_FEEDBACK_FILE=/run/redharness/agent.feedback.jsonl",
+                "HARNESS_FEEDBACK_FILE=/run/harness/agent.feedback.jsonl",
                 "-e",
-                "REDHARNESS_PROGRESS_FILE=/run/redharness/progress.json",
-                "-e", f"REDHARNESS_SEED={seed}",
-                "-e", "PI_CODING_AGENT_DIR=/run/redharness/pi-agent",
-                "-e", "PI_CODING_AGENT_SESSION_DIR=/run/redharness/pi-sessions",
+                "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
+                "-e", f"HARNESS_SEED={seed}",
+                "-e", "PI_CODING_AGENT_DIR=/run/harness/pi-agent",
+                "-e", "PI_CODING_AGENT_SESSION_DIR=/run/harness/pi-sessions",
                 "-e", "PI_TELEMETRY=0",
                 "-e", "PI_SKIP_VERSION_CHECK=1",
             ]
@@ -354,8 +354,8 @@ class PiAdapter:
         if gateway_url and gateway_token:
             command.extend(
                 [
-                    "-e", f"REDHARNESS_GATEWAY_URL={gateway_url}",
-                    "-e", f"REDHARNESS_GATEWAY_TOKEN={gateway_token}",
+                    "-e", f"HARNESS_GATEWAY_URL={gateway_url}",
+                    "-e", f"HARNESS_GATEWAY_TOKEN={gateway_token}",
                     "-e", f"OPENAI_BASE_URL={gateway_url}/v1",
                     "-e", f"OPENAI_API_KEY={gateway_token}",
                 ]
@@ -427,7 +427,7 @@ class PiAdapter:
                 "network": primary_network,
                 "runtime": self.spec.runtime,
                 "model": self.pi.model,
-                "provider": "redharness" if gateway_enabled else self.pi.provider,
+                "provider": "harness" if gateway_enabled else self.pi.provider,
                 "tools": self.pi.tools,
             },
         )

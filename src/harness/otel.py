@@ -27,15 +27,15 @@ def _value(value: Any) -> dict[str, Any]:
 
 def _attributes(event: dict[str, Any]) -> list[dict[str, Any]]:
     attrs: dict[str, Any] = {
-        "redharness.run_id": event.get("run_id"),
-        "redharness.task_id": event.get("task_id"),
-        "redharness.actor": event.get("actor"),
-        "redharness.event_type": event.get("type"),
+        "harness.run_id": event.get("run_id"),
+        "harness.task_id": event.get("task_id"),
+        "harness.actor": event.get("actor"),
+        "harness.event_type": event.get("type"),
     }
     data = event.get("data", {})
     if isinstance(data, dict):
         for key, value in data.items():
-            attrs[f"redharness.data.{key}"] = value
+            attrs[f"harness.data.{key}"] = value
     return [{"key": key, "value": _value(value)} for key, value in attrs.items()]
 
 
@@ -59,7 +59,7 @@ def trace_to_otlp_json(trace_path: str | Path) -> dict[str, Any]:
             {
                 "traceId": trace_id,
                 "spanId": span_id,
-                "name": str(event.get("type", "redharness.event")),
+                "name": str(event.get("type", "harness.event")),
                 "kind": 1,
                 "startTimeUnixNano": str(start),
                 "endTimeUnixNano": str(start + 1),
@@ -73,13 +73,13 @@ def trace_to_otlp_json(trace_path: str | Path) -> dict[str, Any]:
             {
                 "resource": {
                     "attributes": [
-                        {"key": "service.name", "value": {"stringValue": "redharness"}},
-                        {"key": "redharness.run_id", "value": {"stringValue": run_id}},
+                        {"key": "service.name", "value": {"stringValue": "harness"}},
+                        {"key": "harness.run_id", "value": {"stringValue": run_id}},
                     ]
                 },
                 "scopeSpans": [
                     {
-                        "scope": {"name": "redharness.trace", "version": "0.6.0"},
+                        "scope": {"name": "harness.trace", "version": "0.6.0"},
                         "spans": spans,
                     }
                 ],
