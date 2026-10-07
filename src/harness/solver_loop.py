@@ -27,7 +27,6 @@ class SolverLoopStats:
 class SolverLoop:
     """Shared state/verification loop for interactive AgentSession execution."""
 
-    VERIFY_EVENTS = {"tool.result", "progress.updated", "world.observe"}
 
     def __init__(
         self,
@@ -169,22 +168,34 @@ class SolverLoop:
                 )
             )
 
-        if event.type in self.VERIFY_EVENTS:
+        should_verify = (
+            event.type == "world.observe"
+            or (
+                event.type == "progress.updated"
+                and isinstance(event.data.get("actual_observation"), str)
+                and bool(event.data.get("actual_observation"))
+            )
+        )
+        if should_verify:
             verification = self.action_verifier.verify(
                 self.progress,
-                planned_world_revision=self.planned_world_revision,
-                current_world_revision=self.world.snapshot.revision,
+                planned_world_revision=self.progress.intent_world_revision,
+                current_world_revision=(
+                    before_revision
+                    if event.type == "world.observe"
+                    else self.world.snapshot.revision
+                ),
             )
             if verification is None:
                 self.progress.skipped_verifications += 1
             else:
+                action_id = (self.progress.action_intent or {}).get("action_id")
                 verification_key = (
+                    action_id,
                     verification.status,
                     verification.expected_observation,
                     verification.actual_observation,
                     tuple(verification.replan_reasons),
-                    (self.progress.last_action or {}).get("tool_call_id"),
-                    (self.progress.last_action or {}).get("status"),
                 )
                 if verification_key != self.stats.last_verification_key:
                     self.stats.last_verification_key = verification_key
@@ -192,12 +203,16 @@ class SolverLoop:
                     self.trace.emit(
                         "action.verified",
                         actor="harness",
+                        action_id=action_id if isinstance(action_id, str) else None,
                         data=verification.model_dump(mode="json"),
                     )
                     await session.observe(
                         AgentObservation(
                             type="solver.verification",
-                            data=verification.model_dump(mode="json"),
+                            data={
+                                **verification.model_dump(mode="json"),
+                                "action_id": action_id,
+                            },
                         )
                     )
 
