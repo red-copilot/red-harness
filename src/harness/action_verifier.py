@@ -13,7 +13,7 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9]{3,}")
 
 
 class ActionVerification(BaseModel):
-    status: Literal["verified", "contradicted", "inconclusive"]
+    status: Literal["verified", "contradicted", "pending"]
     expected_observation: str | None = None
     actual_observation: str | None = None
     evidence: list[str] = Field(default_factory=list)
@@ -36,7 +36,7 @@ class ActionVerifier:
         *,
         planned_world_revision: int | None = None,
         current_world_revision: int | None = None,
-    ) -> ActionVerification:
+    ) -> ActionVerification | None:
         expected = progress.expected_observation
         actual = progress.actual_observation
         last_action = progress.last_action or {}
@@ -63,18 +63,12 @@ class ActionVerifier:
             reasons.append("world_revision_changed")
 
         if expected is None:
-            return ActionVerification(
-                status="inconclusive",
-                actual_observation=actual,
-                evidence=["no expected observation declared"],
-                replan_required=bool(reasons),
-                replan_reasons=reasons,
-            )
+            return None
 
         if actual is None:
             reasons.append("expected_observation_missing")
             return ActionVerification(
-                status="inconclusive",
+                status="pending",
                 expected_observation=expected,
                 evidence=["expected observation has no actual observation yet"],
                 replan_required=True,
@@ -85,17 +79,6 @@ class ActionVerifier:
         actual_tokens = self._tokens(actual)
         overlap = expected_tokens & actual_tokens
         coverage = len(overlap) / max(1, len(expected_tokens))
-
-        if expected.lower() in actual.lower() or coverage >= 0.6:
-            evidence.append(f"token_coverage={coverage:.2f}")
-            return ActionVerification(
-                status="verified",
-                expected_observation=expected,
-                actual_observation=actual,
-                evidence=evidence,
-                replan_required=bool(reasons),
-                replan_reasons=reasons,
-            )
 
         explicit_negative = any(
             token in actual.lower()
@@ -113,10 +96,21 @@ class ActionVerifier:
                 replan_reasons=reasons,
             )
 
-        reasons.append("expected_observation_missing")
+        if expected.lower() in actual.lower() or coverage >= 0.6:
+            evidence.append(f"token_coverage={coverage:.2f}")
+            return ActionVerification(
+                status="verified",
+                expected_observation=expected,
+                actual_observation=actual,
+                evidence=evidence,
+                replan_required=bool(reasons),
+                replan_reasons=reasons,
+            )
+
+        reasons.append("expected_observation_not_evidenced")
         evidence.append(f"token_coverage={coverage:.2f}")
         return ActionVerification(
-            status="inconclusive",
+            status="pending",
             expected_observation=expected,
             actual_observation=actual,
             evidence=evidence,
