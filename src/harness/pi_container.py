@@ -11,6 +11,7 @@ from .agent import AgentError, AgentResult, _terminate_process
 from .budget import BudgetMonitor
 from .models import AgentSpec, TaskSpec
 from .pi_adapter import PiAdapter
+from .pi_rpc import ContainerPiRpcSession as ContainerPiSession
 from .runtime_paths import runtime_event_path
 from .trace import TraceRecorder
 
