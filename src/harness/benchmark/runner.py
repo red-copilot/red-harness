@@ -11,6 +11,7 @@ from pathlib import Path
 from ..agent import AgentResult, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..progress import ProgressLedger
+from ..skills import load_skills
 from ..solver_loop import SolverLoop
 from ..session import AgentObservation
 from ..trace import TraceRecorder
@@ -36,8 +37,14 @@ def _submission_hash(value: str) -> str:
 class BenchmarkRunner:
     """Generic lifecycle for externally provisioned and evaluated benchmarks."""
 
-    def __init__(self, *, runs_root: str | Path) -> None:
+    def __init__(
+        self,
+        *,
+        runs_root: str | Path,
+        skills_root: str | Path = "skills",
+    ) -> None:
         self.runs_root = Path(runs_root)
+        self.skills_root = Path(skills_root)
 
     async def run_case(
         self,
@@ -142,6 +149,7 @@ class BenchmarkRunner:
             context_query=session.objective.description,
             planned_world_revision=world.snapshot.revision,
             context_builder=context_builder,
+            skills=load_skills(self.skills_root),
         )
 
         async def submit_candidate(submission: Submission, agent_session=None) -> bool:
@@ -244,6 +252,7 @@ class BenchmarkRunner:
                             },
                         )
                     )
+                    await solver_loop.maybe_replan(agent_session)
                 if revision_after_feedback != revision_before_feedback:
                     await agent_session.observe(
                         AgentObservation(
@@ -277,6 +286,7 @@ class BenchmarkRunner:
             completed_online = False
             if callable(start_session):
                 agent_session = await start_session(**run_kwargs)
+                await solver_loop.maybe_replan(agent_session, force=True)
                 async for event in agent_session.events():
                     await solver_loop.process_event(agent_session, event)
                     for submission in submission_inbox.poll():
