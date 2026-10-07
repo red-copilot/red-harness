@@ -178,6 +178,9 @@ class RollingHorizonPlanner:
                 replan_triggers.append("no_progress_threshold")
             if progress.hypotheses:
                 replan_triggers.append("hypothesis_contradicted")
+            for reason in progress.replan_reasons:
+                if reason not in replan_triggers:
+                    replan_triggers.append(reason)
 
             actions.append(
                 PlannedAction(
