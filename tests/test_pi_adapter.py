@@ -88,6 +88,8 @@ def test_pi_container_command_is_restricted_and_passes_direct_secret(
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert "NET_RAW" in command
     assert "FAKE_PROVIDER_KEY=secret" in command
+    assert "HARNESS_EVENT_FILE=/run/harness/events.jsonl" in command
+    assert "HARNESS_NETWORK_PROFILE=unrestricted" in command
     assert "harness-pi-kali:test" in command
 
 
@@ -168,3 +170,32 @@ def test_pi_json_protocol_normalizes_model_and_tool_events(monkeypatch, tmp_path
         "model.usage",
         "pi.agent_settled",
     ]
+
+
+
+def test_pi_offline_network_profile_forces_none(monkeypatch, tmp_path: Path) -> None:
+    spec = _pi_spec().model_copy(update={"network_profile": "offline"})
+    monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
+    adapter = ContainerPiAdapter(
+        spec,
+        allow_host=False,
+        trace=TraceRecorder(tmp_path / "trace.jsonl", "run_test", "task_test"),
+    )
+    task = load_task(Path("benchmarks/examples/hello/task.yaml"))
+    run_dir = tmp_path / "run-offline"
+    run_dir.mkdir()
+
+    command = adapter._container_command(
+        task,
+        task_dir=Path("benchmarks/examples/hello").resolve(),
+        run_dir=run_dir,
+        container_name="pi-offline",
+        network="none",
+        environment_project=None,
+        seed=1,
+        gateway_url=None,
+        gateway_token=None,
+        host_gateway=False,
+    )
+    assert command[command.index("--network") + 1] == "none"
+    assert "HARNESS_NETWORK_PROFILE=offline" in command
