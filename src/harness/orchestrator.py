@@ -18,6 +18,7 @@ from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .progress import ProgressLedger
+from .skills import load_skills
 from .solver_loop import SolverLoop
 from .trace import TraceRecorder
 from .verifier import run_verifier
@@ -44,9 +45,11 @@ class Orchestrator:
         runs_root: str | Path = ".harness/runs",
         *,
         world_repository_factory: Callable[[Path], WorldRepository] = SQLiteWorldRepository,
+        skills_root: str | Path = "skills",
     ) -> None:
         self.runs_root = Path(runs_root)
         self.world_repository_factory = world_repository_factory
+        self.skills_root = Path(skills_root)
 
     def run(
         self,
@@ -104,6 +107,7 @@ class Orchestrator:
             context_query=task.objective.description,
             planned_world_revision=world.snapshot.revision,
             context_builder=context_builder,
+            skills=load_skills(self.skills_root),
         )
         started = time.monotonic()
         status = "running"
@@ -160,6 +164,7 @@ class Orchestrator:
             }
             async def run_session():
                 agent_session = await adapter.start_session(**run_kwargs)
+                await solver_loop.maybe_replan(agent_session, force=True)
                 async for event in agent_session.events():
                     await solver_loop.process_event(agent_session, event)
                 return await agent_session.result()
