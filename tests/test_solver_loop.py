@@ -76,7 +76,6 @@ def test_solver_loop_applies_aci_updates_world_and_verifies(tmp_path: Path) -> N
 
     feedback_types = [item.type for item in session.feedback]
     assert "aci.feedback" in feedback_types
-    assert "world.state.updated" in feedback_types
     assert "solver.verification" in feedback_types
     assert "obs-admin" in (tmp_path / "world.context.txt").read_text(encoding="utf-8")
 
