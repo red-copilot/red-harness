@@ -112,3 +112,46 @@ def test_typed_aci_rejects_spoofed_runtime_events_from_agent(tmp_path) -> None:
             progress=progress,
             actor="agent:test",
         )
+
+
+
+def test_semantic_observation_only_updates_matching_action_progress(tmp_path) -> None:
+    world = SQLiteWorldRepository(tmp_path / "world.db")
+    progress = ProgressLedger()
+    aci = TypedACI()
+
+    aci.apply(
+        AgentEvent(
+            type="action.intent",
+            source="agent",
+            trusted=False,
+            data={
+                "action_id": "action-current",
+                "description": "probe admin",
+                "expected_observations": ["admin endpoint exists"],
+            },
+        ),
+        world=world,
+        progress=progress,
+        actor="agent:test",
+    )
+    aci.apply(
+        AgentEvent(
+            type="world.observe",
+            source="agent",
+            trusted=False,
+            data={
+                "action_id": "action-other",
+                "type": "web.endpoint",
+                "summary": "admin endpoint exists",
+                "content": {"path": "/admin"},
+            },
+        ),
+        world=world,
+        progress=progress,
+        actor="agent:test",
+    )
+
+    assert "action-other" in world.snapshot.observations[next(iter(world.snapshot.observations))].content.values()
+    assert progress.actual_observation is None
+    assert progress.actual_observation_action_id is None
