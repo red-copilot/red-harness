@@ -26,7 +26,6 @@ from .world import (
     SQLiteWorldRepository,
     WorldContextBuilder,
     WorldRepository,
-    ingest_world_inbox,
 )
 
 
@@ -163,7 +162,6 @@ class Orchestrator:
                 agent_session = await adapter.start_session(**run_kwargs)
                 async for event in agent_session.events():
                     await solver_loop.process_event(agent_session, event)
-                solver_loop.finish_ingest()
                 return await agent_session.result()
 
             start_session = getattr(adapter, "start_session", None)
@@ -235,10 +233,7 @@ class Orchestrator:
                     data={"error_type": type(exc).__name__, "message": str(exc)},
                 )
 
-        if "solver_loop" in locals():
-            solver_loop.finish_ingest()
-        else:
-            ingest_world_inbox(run_dir / "world.inbox.jsonl", world, actor="agent")
+        solver_loop.finish_ingest()
 
         duration_ms = int((time.monotonic() - started) * 1000)
         metrics = {"duration_ms": duration_ms, **usage.as_dict()}
