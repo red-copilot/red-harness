@@ -1,4 +1,4 @@
-apiVersion: redharness/skill/v1
+apiVersion: harness/skill/v1
 id: network.service-discovery
 domain: network
 description: Discover reachable network services and record observations.
