@@ -152,6 +152,12 @@ class HeuristicSkillPlanner:
         limit: int = 5,
     ) -> list[PlanCandidate]:
         progress = progress or ProgressLedger()
+        if not goal_text:
+            goal_text = " ".join(
+                goal.description
+                for goal in snapshot.goals.values()
+                if goal.status in {"active", "pending"} and goal.is_valid_at()
+            )
         candidates: list[PlanCandidate] = []
         for skill in skills:
             if not all(_selector_matches(snapshot, selector) for selector in skill.requires):
