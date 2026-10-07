@@ -50,6 +50,9 @@ class TypedACI:
 
         if event.type == "world.observe":
             data = event.data
+            summary = data.get("summary")
+            if isinstance(summary, str) and summary:
+                progress.actual_observation = summary
             world.upsert(
                 "observation",
                 Observation(
