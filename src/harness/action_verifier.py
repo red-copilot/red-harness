@@ -55,18 +55,23 @@ class ActionVerifier:
                 replan_reasons=reasons,
             )
 
-        if (
+        world_revision_changed = (
             planned_world_revision is not None
             and current_world_revision is not None
             and planned_world_revision != current_world_revision
-        ):
-            reasons.append("world_revision_changed")
+        )
+        if world_revision_changed:
+            evidence.append(
+                f"world_revision={planned_world_revision}->{current_world_revision}"
+            )
 
         if expected is None:
             return None
 
         if actual is None:
             reasons.append("expected_observation_missing")
+            if world_revision_changed:
+                reasons.append("world_revision_changed")
             return ActionVerification(
                 status="pending",
                 expected_observation=expected,
@@ -108,6 +113,8 @@ class ActionVerifier:
             )
 
         reasons.append("expected_observation_not_evidenced")
+        if world_revision_changed:
+            reasons.append("world_revision_changed")
         evidence.append(f"token_coverage={coverage:.2f}")
         return ActionVerification(
             status="pending",
