@@ -344,7 +344,7 @@ class PiAdapter:
                 "HARNESS_FEEDBACK_FILE=/run/harness/agent.feedback.jsonl",
                 "-e",
                 "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
-                "-e", "HARNESS_EVENT_FILE=/run/harness/events.jsonl",
+                "-e", "HARNESS_EVENT_FILE=/run/harness/agent.events.jsonl",
                 "-e", f"HARNESS_NETWORK_PROFILE={self.spec.network_profile}",
                 "-e", f"HARNESS_SEED={seed}",
                 "-e", "PI_CODING_AGENT_DIR=/run/harness/pi-agent",
@@ -405,7 +405,7 @@ class PiAdapter:
         else:
             primary_network = "none"
 
-        event_file = run_dir / "events.jsonl"
+        event_file = run_dir / "runtime.events.jsonl"
         event_file.write_text("", encoding="utf-8")
         raw_path = run_dir / "agent.stdout.log"
         stderr_path = run_dir / "agent.stderr.log"
