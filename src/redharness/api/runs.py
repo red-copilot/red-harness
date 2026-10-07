@@ -75,6 +75,8 @@ def build_runs_router(
         if callable(sequenced):
             records = sequenced(limit=limit, after_sequence=after_sequence)
             if not records:
+                if after_sequence is not None:
+                    return []
                 raise HTTPException(status_code=404, detail="world event log not found")
             return [
                 {"sequence": sequence, **event.model_dump(mode="json")}
@@ -83,6 +85,8 @@ def build_runs_router(
 
         events = repository.events(limit=limit, after_sequence=after_sequence)
         if not events:
+            if after_sequence is not None:
+                return []
             raise HTTPException(status_code=404, detail="world event log not found")
         start = after_sequence or 0
         return [
