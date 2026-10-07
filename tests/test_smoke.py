@@ -109,6 +109,8 @@ class _LiveWorldSession:
         (self.run_dir / "proof.txt").write_text("red-harness-ok", encoding="utf-8")
         yield AgentEvent(
             type="action.intent",
+            source="agent",
+            trusted=False,
             data={
                 "action_id": "local-proof",
                 "description": "write proof",
@@ -117,6 +119,8 @@ class _LiveWorldSession:
         )
         yield AgentEvent(
             type="world.observe",
+            source="agent",
+            trusted=False,
             data={
                 "id": "obs-live-local",
                 "type": "task.progress",
