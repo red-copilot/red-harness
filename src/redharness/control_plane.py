@@ -11,7 +11,7 @@ from .api.registry import build_registry_router
 from .api.runs import build_runs_router
 from .coordination import CoordinationStore
 from .queue import SQLiteQueue
-from .world import FileWorldRepository, WorldRepository
+from .world import SQLiteWorldRepository, WorldRepository
 
 
 def create_control_plane(
@@ -21,7 +21,7 @@ def create_control_plane(
     benchmarks_root: Path | None = None,
     skills_root: Path | None = None,
     token: str | None = None,
-    world_repository_factory: Callable[[Path], WorldRepository] = FileWorldRepository,
+    world_repository_factory: Callable[[Path], WorldRepository] = SQLiteWorldRepository,
 ) -> FastAPI:
     app = FastAPI(title="Red Harness Control Plane", version="0.6.0")
 
