@@ -190,6 +190,13 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     assert [item["sequence"] for item in incremental] == [2]
     assert incremental[0]["kind"] == "capability"
 
+    exhausted = client.get(
+        "/v1/runs/run_test/world/events?after_sequence=2",
+        headers=headers,
+    )
+    assert exhausted.status_code == 200
+    assert exhausted.json() == []
+
     plan = client.get("/v1/runs/run_test/plan", headers=headers).json()
     assert plan["planner"] == "heuristic-skill-v1"
     assert plan["candidates"][0]["skill_id"] == "network.service-discovery"
