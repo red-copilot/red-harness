@@ -26,7 +26,7 @@ from .suite import SuiteRunner
 from .worker import Worker
 
 app = typer.Typer(
-    name="redharness",
+    name="harness",
     help="Reproducible evaluation runtime for security agents.",
     no_args_is_help=True,
 )
@@ -117,7 +117,7 @@ def validate_suite(
 def run(
     task: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
-    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".redharness/runs"),
+    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".harness/runs"),
     repeat: Annotated[int, typer.Option("--repeat", min=1)] = 1,
     seed: Annotated[int, typer.Option("--seed", min=0)] = 0,
     gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
@@ -130,7 +130,7 @@ def run(
     gateway_runtime: Annotated[str | None, typer.Option("--gateway-runtime")] = None,
     model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
     model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
-        "REDHARNESS_MODEL_API_KEY"
+        "HARNESS_MODEL_API_KEY"
     ),
     input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
     output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
@@ -193,8 +193,8 @@ def run(
 def run_suite(
     suite: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
-    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".redharness/runs"),
-    suites_root: Annotated[Path, typer.Option("--suites-root")] = Path(".redharness/suites"),
+    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".harness/runs"),
+    suites_root: Annotated[Path, typer.Option("--suites-root")] = Path(".harness/suites"),
     workers: Annotated[int | None, typer.Option("--workers", min=1, max=64)] = None,
     gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
     gateway_policy: Annotated[
@@ -206,7 +206,7 @@ def run_suite(
     gateway_runtime: Annotated[str | None, typer.Option("--gateway-runtime")] = None,
     model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
     model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
-        "REDHARNESS_MODEL_API_KEY"
+        "HARNESS_MODEL_API_KEY"
     ),
     input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
     output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
@@ -248,7 +248,7 @@ def tsec(
     agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
     challenge: Annotated[str | None, typer.Option("--challenge")] = None,
     run_all: Annotated[bool, typer.Option("--all")] = False,
-    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".redharness/tsec-runs"),
+    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".harness/tsec-runs"),
     base_url_env: Annotated[str, typer.Option("--base-url-env")] = "BENCHMARK_BASE_URL",
     token_env: Annotated[str, typer.Option("--benchmark-token-env")] = "BENCHMARK_TOKEN",
     seed: Annotated[int, typer.Option("--seed", min=0)] = 0,
@@ -300,13 +300,13 @@ def tsec(
 
 @app.command("serve")
 def serve(
-    queue_db: Annotated[Path, typer.Option("--queue-db")] = Path(".redharness/control.db"),
-    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".redharness/runs"),
+    queue_db: Annotated[Path, typer.Option("--queue-db")] = Path(".harness/control.db"),
+    runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".harness/runs"),
     benchmarks_root: Annotated[Path, typer.Option("--benchmarks-root")] = Path("benchmarks"),
     skills_root: Annotated[Path, typer.Option("--skills-root")] = Path("skills"),
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8780,
-    token_env: Annotated[str, typer.Option("--token-env")] = "REDHARNESS_CONTROL_TOKEN",
+    token_env: Annotated[str, typer.Option("--token-env")] = "HARNESS_CONTROL_TOKEN",
 ) -> None:
     """Serve the authenticated queue, leaderboard, registry, and trace-viewer API."""
     token = _required_env(token_env)
@@ -325,7 +325,7 @@ def submit(
     task: Annotated[str, typer.Argument(help="Worker-visible task path")],
     agent: Annotated[str, typer.Option("--agent", help="Worker-visible agent path")],
     control_url: Annotated[str, typer.Option("--control-url")],
-    runs_root: Annotated[str, typer.Option("--runs-root")] = ".redharness/runs",
+    runs_root: Annotated[str, typer.Option("--runs-root")] = ".harness/runs",
     seed: Annotated[int, typer.Option("--seed", min=0)] = 0,
     allow_host_agent: Annotated[bool, typer.Option("--allow-host-agent")] = False,
     gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
@@ -335,11 +335,11 @@ def submit(
     gateway_runtime: Annotated[str | None, typer.Option("--gateway-runtime")] = None,
     model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
     model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
-        "REDHARNESS_MODEL_API_KEY"
+        "HARNESS_MODEL_API_KEY"
     ),
     input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
     output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
-    token_env: Annotated[str, typer.Option("--token-env")] = "REDHARNESS_CONTROL_TOKEN",
+    token_env: Annotated[str, typer.Option("--token-env")] = "HARNESS_CONTROL_TOKEN",
 ) -> None:
     """Submit one run to a Red Harness control plane."""
     if gateway_mode not in {"host", "sidecar"}:
@@ -385,7 +385,7 @@ def worker(
     poll_interval: Annotated[float, typer.Option("--poll-interval", min=0.1)] = 2.0,
     once: Annotated[bool, typer.Option("--once")] = False,
     allow_host_jobs: Annotated[bool, typer.Option("--allow-host-jobs")] = False,
-    token_env: Annotated[str, typer.Option("--token-env")] = "REDHARNESS_CONTROL_TOKEN",
+    token_env: Annotated[str, typer.Option("--token-env")] = "HARNESS_CONTROL_TOKEN",
 ) -> None:
     """Claim and execute leased jobs from a control plane."""
     instance = Worker(
@@ -430,7 +430,7 @@ def capabilities() -> None:
 @app.command("gateway")
 def gateway(
     event_file: Annotated[Path, typer.Option("--event-file")] = Path(
-        ".redharness/gateway/events.jsonl"
+        ".harness/gateway/events.jsonl"
     ),
     workspace: Annotated[Path, typer.Option("--workspace", file_okay=False)] = Path("."),
     task_dir: Annotated[Path, typer.Option("--task-dir", file_okay=False)] = Path("."),
@@ -439,10 +439,10 @@ def gateway(
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8765,
     model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
     gateway_token_env: Annotated[str, typer.Option("--gateway-token-env")] = (
-        "REDHARNESS_GATEWAY_TOKEN"
+        "HARNESS_GATEWAY_TOKEN"
     ),
     model_api_key_env: Annotated[str, typer.Option("--model-api-key-env")] = (
-        "REDHARNESS_MODEL_API_KEY"
+        "HARNESS_MODEL_API_KEY"
     ),
     input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
     output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
