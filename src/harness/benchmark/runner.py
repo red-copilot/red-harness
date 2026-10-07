@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from ..aci import TypedACI
 from ..action_verifier import ActionVerifier
 from ..agent import AgentResult, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
@@ -62,6 +63,7 @@ class BenchmarkRunner:
 
         progress = ProgressLedger(active_goal=f"goal:{session.case_id}:objective")
         action_verifier = ActionVerifier()
+        typed_aci = TypedACI()
         last_verification_key: tuple | None = None
         progress_path = run_dir / "progress.json"
         progress.write(progress_path)
@@ -195,10 +197,61 @@ class BenchmarkRunner:
                 agent_session = await start_session(**run_kwargs)
                 async for event in agent_session.events():
                     progress.record_event(event)
-
                     before_revision = world.snapshot.revision
+                    try:
+                        aci_mutations = typed_aci.apply(
+                            event,
+                            world=world,
+                            progress=progress,
+                            actor=f"agent:{agent.id}",
+                        )
+                    except Exception as exc:
+                        aci_mutations = 0
+                        trace.emit(
+                            "aci.rejected",
+                            actor="harness",
+                            data={
+                                "event_type": event.type,
+                                "error_type": type(exc).__name__,
+                                "message": str(exc),
+                            },
+                        )
+                        await agent_session.observe(
+                            AgentObservation(
+                                type="aci.feedback",
+                                data={
+                                    "accepted": False,
+                                    "event_type": event.type,
+                                    "message": str(exc),
+                                },
+                            )
+                        )
+                    else:
+                        if event.type.startswith(("world.", "action.")):
+                            await agent_session.observe(
+                                AgentObservation(
+                                    type="aci.feedback",
+                                    data={
+                                        "accepted": True,
+                                        "event_type": event.type,
+                                        "world_mutations": aci_mutations,
+                                    },
+                                )
+                            )
+
                     live_ingest = world_inbox.poll()
                     after_revision = world.snapshot.revision
+                    if aci_mutations:
+                        trace.emit(
+                            "aci.applied",
+                            actor="harness",
+                            data={
+                                "event_type": event.type,
+                                "mutations": aci_mutations,
+                                "revision_before": before_revision,
+                                "revision_after": after_revision,
+                            },
+                        )
                     if live_ingest.accepted or live_ingest.rejected:
                         trace.emit(
                             "world.ingested",
@@ -240,34 +293,37 @@ class BenchmarkRunner:
                             )
                         )
 
-                    if event.type in {"tool.result", "progress.updated"}:
+                    if event.type in {"tool.result", "progress.updated", "world.observe"}:
                         verification = action_verifier.verify(
                             progress,
                             planned_world_revision=planned_world_revision,
                             current_world_revision=world.snapshot.revision,
                         )
-                        verification_key = (
-                            verification.status,
-                            verification.expected_observation,
-                            verification.actual_observation,
-                            tuple(verification.replan_reasons),
-                            (progress.last_action or {}).get("tool_call_id"),
-                            (progress.last_action or {}).get("status"),
-                        )
-                        if verification_key != last_verification_key:
-                            last_verification_key = verification_key
-                            progress.record_verification(verification)
-                            trace.emit(
-                                "action.verified",
-                                actor="harness",
-                                data=verification.model_dump(mode="json"),
+                        if verification is None:
+                            progress.skipped_verifications += 1
+                        else:
+                            verification_key = (
+                                verification.status,
+                                verification.expected_observation,
+                                verification.actual_observation,
+                                tuple(verification.replan_reasons),
+                                (progress.last_action or {}).get("tool_call_id"),
+                                (progress.last_action or {}).get("status"),
                             )
-                            await agent_session.observe(
-                                AgentObservation(
-                                    type="solver.verification",
+                            if verification_key != last_verification_key:
+                                last_verification_key = verification_key
+                                progress.record_verification(verification)
+                                trace.emit(
+                                    "action.verified",
+                                    actor="harness",
                                     data=verification.model_dump(mode="json"),
                                 )
-                            )
+                                await agent_session.observe(
+                                    AgentObservation(
+                                        type="solver.verification",
+                                        data=verification.model_dump(mode="json"),
+                                    )
+                                )
 
                     progress.write(progress_path)
                     for submission in submission_inbox.poll():
