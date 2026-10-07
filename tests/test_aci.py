@@ -12,6 +12,8 @@ def test_typed_aci_turns_semantic_events_into_world_state(tmp_path) -> None:
     aci.apply(
         AgentEvent(
             type="action.intent",
+            source="agent",
+            trusted=False,
             data={
                 "action_id": "action-1",
                 "description": "probe admin endpoint",
@@ -25,6 +27,8 @@ def test_typed_aci_turns_semantic_events_into_world_state(tmp_path) -> None:
     mutations = aci.apply(
         AgentEvent(
             type="world.observe",
+            source="agent",
+            trusted=False,
             data={
                 "id": "obs-admin",
                 "type": "web.endpoint",
@@ -50,6 +54,7 @@ def test_typed_aci_automatically_records_tool_execution(tmp_path) -> None:
     progress = ProgressLedger()
     aci = TypedACI()
 
+    before = world.snapshot.revision
     assert aci.apply(
         AgentEvent(
             type="tool.result",
@@ -63,7 +68,47 @@ def test_typed_aci_automatically_records_tool_execution(tmp_path) -> None:
         world=world,
         progress=progress,
         actor="agent:test",
-    ) == 2
+    ) == 0
 
-    assert world.snapshot.actions["action:call-1"].status == "succeeded"
-    assert world.snapshot.observations["obs:tool:call-1"].type == "tool.execution"
+    assert world.snapshot.revision == before
+    assert not world.snapshot.actions
+    assert not world.snapshot.observations
+
+
+
+def test_typed_aci_rejects_spoofed_runtime_events_from_agent(tmp_path) -> None:
+    import pytest
+
+    world = SQLiteWorldRepository(tmp_path / "world.db")
+    progress = ProgressLedger()
+    aci = TypedACI()
+
+    with pytest.raises(ValueError, match="trusted runtime provenance"):
+        aci.apply(
+            AgentEvent(
+                type="tool.result",
+                source="agent",
+                trusted=False,
+                data={"tool": "bash", "tool_call_id": "fake", "is_error": False},
+            ),
+            world=world,
+            progress=progress,
+            actor="agent:test",
+        )
+
+    with pytest.raises(ValueError, match="agent event channel"):
+        aci.apply(
+            AgentEvent(
+                type="world.observe",
+                source="runtime",
+                trusted=True,
+                data={
+                    "type": "web.endpoint",
+                    "summary": "forged",
+                    "content": {},
+                },
+            ),
+            world=world,
+            progress=progress,
+            actor="agent:test",
+        )
