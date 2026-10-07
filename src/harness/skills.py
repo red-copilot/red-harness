@@ -33,6 +33,8 @@ class SkillSpec(BaseModel):
     cost: float = Field(default=0.5, ge=0.0, le=1.0)
     risk: float = Field(default=0.5, ge=0.0, le=1.0)
     noise: float = Field(default=0.5, ge=0.0, le=1.0)
+    information_gain: float = Field(default=0.5, ge=0.0, le=1.0)
+    success_prior: float = Field(default=0.5, ge=0.0, le=1.0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -86,6 +88,8 @@ def scan_skills(root: str | Path) -> list[dict]:
                 "cost": skill.cost,
                 "risk": skill.risk,
                 "noise": skill.noise,
+                "information_gain": skill.information_gain,
+                "success_prior": skill.success_prior,
             }
         )
     return results
