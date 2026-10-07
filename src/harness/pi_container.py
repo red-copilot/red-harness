@@ -1,7 +1,6 @@
 # ruff: noqa: I001
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 import subprocess
@@ -13,33 +12,10 @@ from .budget import BudgetMonitor
 from .models import AgentSpec, TaskSpec
 from .pi_adapter import PiAdapter
 from .runtime_paths import runtime_event_path
-from .session import OneShotAgentSession
 from .trace import TraceRecorder
 
 
 
-
-class ContainerPiSession(OneShotAgentSession):
-    """Session wrapper that can actively terminate the running Pi container."""
-
-    def __init__(self, adapter, *, run_kwargs, run_dir, poll_interval=0.05) -> None:
-        super().__init__(
-            adapter,
-            run_kwargs=run_kwargs,
-            run_dir=run_dir,
-            poll_interval=poll_interval,
-        )
-        self.container_name = ("harness_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
-
-    async def close(self, reason: str) -> None:
-        await super().close(reason)
-        await asyncio.to_thread(
-            subprocess.run,
-            ["docker", "kill", self.container_name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
 
 class ContainerPiAdapter(PiAdapter):
     """Run Pi inside a restricted Docker container while reusing Pi JSON parsing."""
@@ -89,10 +65,12 @@ class ContainerPiAdapter(PiAdapter):
         gateway_url: str | None,
         gateway_token: str | None,
         host_gateway: bool,
+        rpc: bool = False,
     ) -> list[str]:
         command = [
             "docker",
             "create",
+            *(["-i"] if rpc else []),
             "--rm",
             "--pull=never",
             "--name",
@@ -193,7 +171,20 @@ class ContainerPiAdapter(PiAdapter):
                 command.extend(["-e", f"{key}={os.environ[key]}"])
 
         command.append(str(self.spec.image))
-        command.extend(self._command(task, gateway_enabled=bool(gateway_url and gateway_token)))
+        if rpc:
+            command.extend(
+                self._rpc_command(
+                    task,
+                    gateway_enabled=bool(gateway_url and gateway_token),
+                )
+            )
+        else:
+            command.extend(
+                self._command(
+                    task,
+                    gateway_enabled=bool(gateway_url and gateway_token),
+                )
+            )
         return command
 
     async def start_session(
@@ -208,8 +199,10 @@ class ContainerPiAdapter(PiAdapter):
         gateway_url: str | None = None,
         gateway_token: str | None = None,
         gateway_network: str | None = None,
-    ) -> ContainerPiSession:
-        return await ContainerPiSession.start(
+    ):
+        from .pi_rpc import ContainerPiRpcSession
+
+        return await ContainerPiRpcSession.start(
             self,
             run_dir=run_dir,
             run_kwargs={
