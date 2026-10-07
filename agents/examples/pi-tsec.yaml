@@ -3,6 +3,7 @@ id: pi-kali-tsec
 type: pi
 image: harness/pi-kali:local
 network: host
+network_profile: benchmark-only
 env: {}
 pi:
   provider: openai
