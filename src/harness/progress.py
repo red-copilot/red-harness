@@ -149,8 +149,9 @@ class ProgressLedger(BaseModel):
             self.no_progress_count = 0
         elif status == "contradicted":
             self.contradicted_actions += 1
-            self.failure_count += 1
-            self.no_progress_count += 1
+            if (self.last_action or {}).get("status") != "failed":
+                self.failure_count += 1
+                self.no_progress_count += 1
         elif status == "pending":
             self.pending_actions += 1
 
