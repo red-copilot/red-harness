@@ -47,6 +47,11 @@ def test_pi_command_uses_safe_noninteractive_defaults(monkeypatch, tmp_path: Pat
     assert "--no-mcp" in command
     assert command[command.index("--provider") + 1] == "fake"
     assert command[command.index("--model") + 1] == "fake-model"
+    prompt = command[-1]
+    assert "$HARNESS_SUBMISSION_INBOX" in prompt
+    assert "$HARNESS_FEEDBACK_FILE" in prompt
+    assert "rejected candidate" in prompt
+    assert "reread $HARNESS_WORLD_CONTEXT" in prompt
 
 
 def test_pi_gateway_writes_container_visible_provider(monkeypatch, tmp_path: Path) -> None:

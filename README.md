@@ -27,8 +27,8 @@ Version 0.8 provides:
 - benchmark registry scanning
 - persisted result/trace viewer API
 - event-sourced universal world-state runtime with materialized snapshots
-- domain-neutral skill metadata registry for future planners and domain extensions
-- optional read-only heuristic planner over World State + Skill metadata
+- domain-neutral skill metadata registry for planner and domain extensions
+- rolling-horizon planner integrated with the interactive SolverLoop
 - leased coordination blackboard for explicit multi-agent work distribution
 - leaderboard aggregation
 - OTLP/HTTP JSON-compatible trace export
@@ -560,8 +560,11 @@ It combines the current World Snapshot, Skill Registry, and `progress.json` to r
 and explicit replan triggers such as action failure, missing expected observations, changed world
 revision, repeated no-progress, or contradicted hypotheses.
 
-This endpoint is advisory. Planner output is never executed automatically. Work still enters the
-Coordination Plane only through an explicit publish step.
+The rolling planner is also used by the interactive SolverLoop. A session receives an initial
+`solver.plan.updated` observation and receives a new plan when verification, repeated no-progress,
+or benchmark feedback requests replanning. Plans are persisted to `plan.json` and guide the Agent;
+the Harness still does not execute Skill metadata directly as commands. Coordination-plane work
+publication remains explicit.
 
 
 ### SQLite World State

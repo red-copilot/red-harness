@@ -8,15 +8,21 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from ..aci import TypedACI
-from ..action_verifier import ActionVerifier
 from ..agent import AgentResult, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..progress import ProgressLedger
 from ..session import AgentObservation
+from ..skills import load_skills
+from ..solver_loop import SolverLoop
 from ..trace import TraceRecorder
-from ..world import Entity, Goal, SQLiteWorldRepository, WorldContextBuilder
-from ..world.live import WorldInboxCursor
+from ..world import (
+    Entity,
+    Failure,
+    Goal,
+    Observation,
+    SQLiteWorldRepository,
+    WorldContextBuilder,
+)
 from .base import BenchmarkAdapter, BenchmarkCase, Submission
 from .protocol import SubmissionInbox
 
@@ -31,8 +37,14 @@ def _submission_hash(value: str) -> str:
 class BenchmarkRunner:
     """Generic lifecycle for externally provisioned and evaluated benchmarks."""
 
-    def __init__(self, *, runs_root: str | Path) -> None:
+    def __init__(
+        self,
+        *,
+        runs_root: str | Path,
+        skills_root: str | Path = "skills",
+    ) -> None:
         self.runs_root = Path(runs_root)
+        self.skills_root = Path(skills_root)
 
     async def run_case(
         self,
@@ -62,14 +74,6 @@ class BenchmarkRunner:
         started = time.monotonic()
 
         progress = ProgressLedger(active_goal=f"goal:{session.case_id}:objective")
-        action_verifier = ActionVerifier()
-        typed_aci = TypedACI()
-        last_verification_key: tuple | None = None
-        aci_accepted = 0
-        aci_rejected = 0
-        aci_world_mutations = 0
-        inbox_accepted = 0
-        inbox_rejected = 0
         progress_path = run_dir / "progress.json"
         progress.write(progress_path)
 
@@ -136,12 +140,17 @@ class BenchmarkRunner:
         submitted_keys: set[tuple[str, str]] = set()
         teardown_error: str | None = None
         submission_inbox = SubmissionInbox(run_dir / "submission.inbox.jsonl")
-        world_inbox = WorldInboxCursor(
-            run_dir / "world.inbox.jsonl",
-            world,
+        solver_loop = SolverLoop(
+            world=world,
+            progress=progress,
+            run_dir=run_dir,
+            trace=trace,
             actor=f"agent:{agent.id}",
+            context_query=session.objective.description,
+            planned_world_revision=world.snapshot.revision,
+            context_builder=context_builder,
+            skills=load_skills(self.skills_root),
         )
-        planned_world_revision = world.snapshot.revision
 
         async def submit_candidate(submission: Submission, agent_session=None) -> bool:
             key = (submission.type, submission.value)
@@ -162,23 +171,100 @@ class BenchmarkRunner:
                 completed=submitted.completed,
             )
             progress.write(progress_path)
+            submission_digest = _submission_hash(submission.value)
             data = submitted.model_dump()
-            data["value_sha256"] = _submission_hash(submission.value)
+            data["value_sha256"] = submission_digest
             submission_results.append(data)
             trace.emit("benchmark.submission.result", data=data)
+
+            revision_before_feedback = world.snapshot.revision
+            feedback_id = f"benchmark-feedback:{submission_digest[:16]}"
+            world.upsert(
+                "observation",
+                Observation(
+                    id=feedback_id,
+                    type="benchmark.submission.feedback",
+                    content={
+                        "submission_type": submission.type,
+                        "value_sha256": submission_digest,
+                        "accepted": submitted.accepted,
+                        "score_delta": submitted.score_delta,
+                        "completed": submitted.completed,
+                        "metadata": submitted.metadata,
+                    },
+                    confidence=1.0,
+                    source=session.benchmark,
+                ),
+                actor=f"benchmark:{session.benchmark}",
+            )
+            if not submitted.accepted:
+                world.upsert(
+                    "failure",
+                    Failure(
+                        id=f"benchmark-rejection:{submission_digest[:16]}",
+                        type="benchmark.candidate_rejected",
+                        message="Benchmark rejected submitted candidate",
+                        recoverable=True,
+                        attributes={
+                            "submission_type": submission.type,
+                            "value_sha256": submission_digest,
+                        },
+                    ),
+                    actor=f"benchmark:{session.benchmark}",
+                )
+            revision_after_feedback = world.snapshot.revision
+            (run_dir / "world.context.txt").write_text(
+                context_builder.render(
+                    world.snapshot,
+                    query=session.objective.description,
+                ),
+                encoding="utf-8",
+            )
+
+            feedback_data = {
+                "submission_type": submission.type,
+                "accepted": submitted.accepted,
+                "score_delta": submitted.score_delta,
+                "completed": submitted.completed,
+                "metadata": submitted.metadata,
+                "value_sha256": submission_digest,
+                "world_revision": revision_after_feedback,
+                "replan_required": "benchmark_negative_feedback"
+                in progress.replan_reasons,
+                "replan_reasons": list(progress.replan_reasons),
+            }
             if agent_session is not None:
                 await agent_session.observe(
                     AgentObservation(
                         type="benchmark.feedback",
-                        data={
-                            "submission_type": submission.type,
-                            "accepted": submitted.accepted,
-                            "score_delta": submitted.score_delta,
-                            "completed": submitted.completed,
-                            "metadata": submitted.metadata,
-                        },
+                        data=feedback_data,
                     )
                 )
+                if feedback_data["replan_required"]:
+                    await agent_session.observe(
+                        AgentObservation(
+                            type="solver.replan_requested",
+                            data={
+                                "reasons": feedback_data["replan_reasons"],
+                                "world_revision": revision_after_feedback,
+                                "context_path": "world.context.txt",
+                                "progress_path": "progress.json",
+                            },
+                        )
+                    )
+                    await solver_loop.maybe_replan(agent_session)
+                if revision_after_feedback != revision_before_feedback:
+                    await agent_session.observe(
+                        AgentObservation(
+                            type="world.state.updated",
+                            data={
+                                "revision_before": revision_before_feedback,
+                                "revision_after": revision_after_feedback,
+                                "context_path": "world.context.txt",
+                                "cause": "benchmark.feedback",
+                            },
+                        )
+                    )
             return submitted.completed
 
         try:
@@ -200,143 +286,9 @@ class BenchmarkRunner:
             completed_online = False
             if callable(start_session):
                 agent_session = await start_session(**run_kwargs)
+                await solver_loop.maybe_replan(agent_session, force=True)
                 async for event in agent_session.events():
-                    progress.record_event(event)
-                    before_revision = world.snapshot.revision
-                    try:
-                        aci_mutations = typed_aci.apply(
-                            event,
-                            world=world,
-                            progress=progress,
-                            actor=f"agent:{agent.id}",
-                        )
-                    except (KeyError, TypeError, ValueError) as exc:
-                        aci_mutations = 0
-                        aci_rejected += 1
-                        trace.emit(
-                            "aci.rejected",
-                            actor="harness",
-                            data={
-                                "event_type": event.type,
-                                "error_type": type(exc).__name__,
-                                "message": str(exc),
-                            },
-                        )
-                        await agent_session.observe(
-                            AgentObservation(
-                                type="aci.feedback",
-                                data={
-                                    "accepted": False,
-                                    "event_type": event.type,
-                                    "message": str(exc),
-                                },
-                            )
-                        )
-                    else:
-                        if event.type.startswith(("world.", "action.")):
-                            aci_accepted += 1
-                        aci_world_mutations += aci_mutations
-                        if event.type.startswith(("world.", "action.")):
-                            await agent_session.observe(
-                                AgentObservation(
-                                    type="aci.feedback",
-                                    data={
-                                        "accepted": True,
-                                        "event_type": event.type,
-                                        "world_mutations": aci_mutations,
-                                    },
-                                )
-                            )
-
-                    live_ingest = world_inbox.poll()
-                    after_revision = world.snapshot.revision
-                    if aci_mutations:
-                        trace.emit(
-                            "aci.applied",
-                            actor="harness",
-                            data={
-                                "event_type": event.type,
-                                "mutations": aci_mutations,
-                                "revision_before": before_revision,
-                                "revision_after": after_revision,
-                            },
-                        )
-                    inbox_accepted += live_ingest.accepted
-                    inbox_rejected += live_ingest.rejected
-                    if live_ingest.accepted or live_ingest.rejected:
-                        trace.emit(
-                            "world.ingested",
-                            data={
-                                "accepted": live_ingest.accepted,
-                                "rejected": live_ingest.rejected,
-                                "errors": [
-                                    error.model_dump()
-                                    for error in live_ingest.errors[:10]
-                                ],
-                                "revision_before": before_revision,
-                                "revision_after": after_revision,
-                                "live": True,
-                            },
-                        )
-                    if after_revision != before_revision:
-                        (run_dir / "world.context.txt").write_text(
-                            context_builder.render(
-                                world.snapshot,
-                                query=session.objective.description,
-                            ),
-                            encoding="utf-8",
-                        )
-                        trace.emit(
-                            "world.state.updated",
-                            data={
-                                "revision_before": before_revision,
-                                "revision_after": after_revision,
-                            },
-                        )
-                        await agent_session.observe(
-                            AgentObservation(
-                                type="world.state.updated",
-                                data={
-                                    "revision_before": before_revision,
-                                    "revision_after": after_revision,
-                                    "context_path": "world.context.txt",
-                                },
-                            )
-                        )
-
-                    if event.type in {"tool.result", "progress.updated", "world.observe"}:
-                        verification = action_verifier.verify(
-                            progress,
-                            planned_world_revision=planned_world_revision,
-                            current_world_revision=world.snapshot.revision,
-                        )
-                        if verification is None:
-                            progress.skipped_verifications += 1
-                        else:
-                            verification_key = (
-                                verification.status,
-                                verification.expected_observation,
-                                verification.actual_observation,
-                                tuple(verification.replan_reasons),
-                                (progress.last_action or {}).get("tool_call_id"),
-                                (progress.last_action or {}).get("status"),
-                            )
-                            if verification_key != last_verification_key:
-                                last_verification_key = verification_key
-                                progress.record_verification(verification)
-                                trace.emit(
-                                    "action.verified",
-                                    actor="harness",
-                                    data=verification.model_dump(mode="json"),
-                                )
-                                await agent_session.observe(
-                                    AgentObservation(
-                                        type="solver.verification",
-                                        data=verification.model_dump(mode="json"),
-                                    )
-                                )
-
-                    progress.write(progress_path)
+                    await solver_loop.process_event(agent_session, event)
                     for submission in submission_inbox.poll():
                         if await submit_candidate(submission, agent_session):
                             completed_online = True
@@ -348,17 +300,7 @@ class BenchmarkRunner:
             else:
                 agent_result = adapter_instance.run(**run_kwargs)
 
-            ingest_report = world_inbox.poll()
-            inbox_accepted += ingest_report.accepted
-            inbox_rejected += ingest_report.rejected
-            trace.emit(
-                "world.ingested",
-                data={
-                    "accepted": ingest_report.accepted,
-                    "rejected": ingest_report.rejected,
-                    "errors": [error.model_dump() for error in ingest_report.errors[:10]],
-                },
-            )
+            solver_loop.finish_ingest()
 
             if not completed_online:
                 for submission in submission_inbox.poll():
@@ -443,13 +385,13 @@ class BenchmarkRunner:
                     if event.actor == f"agent:{agent.id}"
                 ),
                 "aci": {
-                    "accepted_events": aci_accepted,
-                    "rejected_events": aci_rejected,
-                    "world_mutations": aci_world_mutations,
+                    "accepted_events": solver_loop.stats.aci_accepted,
+                    "rejected_events": solver_loop.stats.aci_rejected,
+                    "world_mutations": solver_loop.stats.aci_world_mutations,
                 },
                 "legacy_inbox": {
-                    "accepted": inbox_accepted,
-                    "rejected": inbox_rejected,
+                    "accepted": solver_loop.stats.inbox_accepted,
+                    "rejected": solver_loop.stats.inbox_rejected,
                 },
             },
             "network": {

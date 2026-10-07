@@ -155,6 +155,8 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     )
     assert benchmark_feedback.data["accepted"] is True
     assert benchmark_feedback.data["completed"] is True
+    assert benchmark_feedback.data["world_revision"] >= 1
+    assert benchmark_feedback.data["replan_required"] is False
     assert result["progress"]["verified_actions"] >= 1
     assert result["progress"]["skipped_verifications"] >= 0
     assert result["progress"]["last_verification"]["status"] == "verified"
@@ -165,3 +167,111 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
         encoding="utf-8"
     )
     assert "obs-live" in context
+    assert "benchmark.submission.feedback" in context
+
+
+class ReactiveBenchmarkAdapter(FakeBenchmarkAdapter):
+    async def submit(self, _session, submission):
+        self.submissions.append(submission.value)
+        accepted = submission.value == "flag{good}"
+        return SubmissionResult(
+            accepted=accepted,
+            score_delta=10 if accepted else 0,
+            completed=accepted,
+            metadata={"candidate": "accepted" if accepted else "rejected"},
+        )
+
+    async def evaluate(self, _session):
+        return EvaluationResult(
+            success="flag{good}" in self.submissions,
+            score=10 if "flag{good}" in self.submissions else 0,
+        )
+
+
+class ReactiveSession(FakeSession):
+    def __init__(self, run_dir: Path) -> None:
+        super().__init__(run_dir)
+        self.negative_feedback = asyncio.Event()
+
+    async def events(self):
+        path = self.run_dir / "submission.inbox.jsonl"
+        path.write_text(
+            json.dumps({"type": "flag", "value": "flag{bad}"}) + "\n",
+            encoding="utf-8",
+        )
+        yield AgentEvent(type="progress.updated", data={"step": 1, "made_progress": False})
+
+        await asyncio.wait_for(self.negative_feedback.wait(), timeout=2)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "flag", "value": "flag{good}"}) + "\n")
+        yield AgentEvent(type="progress.updated", data={"step": 2, "made_progress": True})
+
+    async def observe(self, observation):
+        await super().observe(observation)
+        if (
+            observation.type == "benchmark.feedback"
+            and observation.data.get("accepted") is False
+        ):
+            self.negative_feedback.set()
+
+
+class ReactiveAgentAdapter(FakeAgentAdapter):
+    async def start_session(self, *, run_dir: Path, **_kwargs):
+        self.session = ReactiveSession(run_dir)
+        return self.session
+
+
+def test_benchmark_runner_replans_after_negative_feedback(monkeypatch, tmp_path: Path) -> None:
+    import harness.benchmark.runner as runner_module
+
+    fake_agent = ReactiveAgentAdapter()
+    monkeypatch.setattr(
+        runner_module,
+        "build_agent_adapter",
+        lambda *_args, **_kwargs: fake_agent,
+    )
+    benchmark = ReactiveBenchmarkAdapter()
+    case = BenchmarkCase(id="CASE-REPLAN", benchmark="fake")
+    agent = AgentSpec.model_validate(
+        {
+            "apiVersion": "harness/v1",
+            "id": "demo",
+            "type": "cli",
+            "command": ["true"],
+        }
+    )
+
+    result = asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=benchmark,
+            case=case,
+            agent=agent,
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+            allow_host_agent=True,
+        )
+    )
+
+    assert result["success"] is True
+    assert benchmark.submissions == ["flag{bad}", "flag{good}"]
+    assert fake_agent.session is not None
+    feedback_types = [item.type for item in fake_agent.session.feedback]
+    assert "solver.replan_requested" in feedback_types
+    assert "solver.plan.updated" in feedback_types
+
+    negative_feedback = next(
+        item
+        for item in fake_agent.session.feedback
+        if item.type == "benchmark.feedback" and item.data["accepted"] is False
+    )
+    assert negative_feedback.data["replan_required"] is True
+    assert "benchmark_negative_feedback" in negative_feedback.data["replan_reasons"]
+
+    assert result["progress"]["rejected_submissions"] == 1
+    assert result["progress"]["accepted_submissions"] == 1
+    assert "benchmark_negative_feedback" not in result["progress"]["replan_reasons"]
+
+    run_dir = next(tmp_path.glob("fake_CASE-REPLAN_*"))
+    context = (run_dir / "world.context.txt").read_text(encoding="utf-8")
+    assert "benchmark.candidate_rejected" in context

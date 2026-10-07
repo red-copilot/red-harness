@@ -12,15 +12,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
-from .aci import TypedACI
-from .action_verifier import ActionVerifier
 from .agent import build_agent_adapter
 from .budget import UsageMetrics
 from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .progress import ProgressLedger
-from .session import AgentObservation
+from .skills import load_skills
+from .solver_loop import SolverLoop
 from .trace import TraceRecorder
 from .verifier import run_verifier
 from .world import (
@@ -28,9 +27,7 @@ from .world import (
     SQLiteWorldRepository,
     WorldContextBuilder,
     WorldRepository,
-    ingest_world_inbox,
 )
-from .world.live import WorldInboxCursor
 
 
 def _sha256(path: Path) -> str:
@@ -48,9 +45,11 @@ class Orchestrator:
         runs_root: str | Path = ".harness/runs",
         *,
         world_repository_factory: Callable[[Path], WorldRepository] = SQLiteWorldRepository,
+        skills_root: str | Path = "skills",
     ) -> None:
         self.runs_root = Path(runs_root)
         self.world_repository_factory = world_repository_factory
+        self.skills_root = Path(skills_root)
 
     def run(
         self,
@@ -99,17 +98,17 @@ class Orchestrator:
         progress = ProgressLedger(active_goal=root_goal.id)
         progress_path = run_dir / "progress.json"
         progress.write(progress_path)
-        typed_aci = TypedACI()
-        action_verifier = ActionVerifier()
-        solver_state = {
-            "last_verification_key": None,
-            "aci_accepted": 0,
-            "aci_rejected": 0,
-            "aci_world_mutations": 0,
-            "inbox_accepted": 0,
-            "inbox_rejected": 0,
-        }
-        planned_world_revision = world.snapshot.revision
+        solver_loop = SolverLoop(
+            world=world,
+            progress=progress,
+            run_dir=run_dir,
+            trace=trace,
+            actor=f"agent:{agent.id}",
+            context_query=task.objective.description,
+            planned_world_revision=world.snapshot.revision,
+            context_builder=context_builder,
+            skills=load_skills(self.skills_root),
+        )
         started = time.monotonic()
         status = "running"
         usage = UsageMetrics()
@@ -163,131 +162,11 @@ class Orchestrator:
                 "gateway_token": gateway_runtime.token if gateway_runtime else None,
                 "gateway_network": gateway_runtime.network_name if gateway_runtime else None,
             }
-            world_inbox = WorldInboxCursor(
-                run_dir / "world.inbox.jsonl",
-                world,
-                actor=f"agent:{agent.id}",
-            )
-
             async def run_session():
                 agent_session = await adapter.start_session(**run_kwargs)
+                await solver_loop.maybe_replan(agent_session, force=True)
                 async for event in agent_session.events():
-                    progress.record_event(event)
-                    before_revision = world.snapshot.revision
-                    try:
-                        aci_mutations = typed_aci.apply(
-                            event,
-                            world=world,
-                            progress=progress,
-                            actor=f"agent:{agent.id}",
-                        )
-                    except (KeyError, TypeError, ValueError) as exc:
-                        aci_mutations = 0
-                        solver_state["aci_rejected"] += 1
-                        trace.emit(
-                            "aci.rejected",
-                            actor="harness",
-                            data={
-                                "event_type": event.type,
-                                "error_type": type(exc).__name__,
-                                "message": str(exc),
-                            },
-                        )
-                        await agent_session.observe(
-                            AgentObservation(
-                                type="aci.feedback",
-                                data={
-                                    "accepted": False,
-                                    "event_type": event.type,
-                                    "message": str(exc),
-                                },
-                            )
-                        )
-                    else:
-                        if event.type.startswith(("world.", "action.")):
-                            solver_state["aci_accepted"] += 1
-                        solver_state["aci_world_mutations"] += aci_mutations
-
-                    live_ingest = world_inbox.poll()
-                    solver_state["inbox_accepted"] += live_ingest.accepted
-                    solver_state["inbox_rejected"] += live_ingest.rejected
-                    after_revision = world.snapshot.revision
-                    if live_ingest.accepted or live_ingest.rejected:
-                        trace.emit(
-                            "world.ingested",
-                            data={
-                                "accepted": live_ingest.accepted,
-                                "rejected": live_ingest.rejected,
-                                "errors": [
-                                    error.model_dump()
-                                    for error in live_ingest.errors[:10]
-                                ],
-                                "revision_before": before_revision,
-                                "revision_after": after_revision,
-                                "live": True,
-                            },
-                        )
-                    if after_revision != before_revision:
-                        (run_dir / "world.context.txt").write_text(
-                            context_builder.render(
-                                world.snapshot,
-                                query=task.objective.description,
-                            ),
-                            encoding="utf-8",
-                        )
-                        trace.emit(
-                            "world.state.updated",
-                            data={
-                                "revision_before": before_revision,
-                                "revision_after": after_revision,
-                            },
-                        )
-                        await agent_session.observe(
-                            AgentObservation(
-                                type="world.state.updated",
-                                data={
-                                    "revision_before": before_revision,
-                                    "revision_after": after_revision,
-                                    "context_path": "world.context.txt",
-                                },
-                            )
-                        )
-
-                    if event.type in {"tool.result", "progress.updated", "world.observe"}:
-                        verification = action_verifier.verify(
-                            progress,
-                            planned_world_revision=planned_world_revision,
-                            current_world_revision=world.snapshot.revision,
-                        )
-                        if verification is None:
-                            progress.skipped_verifications += 1
-                        else:
-                            verification_key = (
-                                verification.status,
-                                verification.expected_observation,
-                                verification.actual_observation,
-                                tuple(verification.replan_reasons),
-                                (progress.last_action or {}).get("tool_call_id"),
-                                (progress.last_action or {}).get("status"),
-                            )
-                            if verification_key != solver_state["last_verification_key"]:
-                                solver_state["last_verification_key"] = verification_key
-                                progress.record_verification(verification)
-                                trace.emit(
-                                    "action.verified",
-                                    actor="harness",
-                                    data=verification.model_dump(mode="json"),
-                                )
-                                await agent_session.observe(
-                                    AgentObservation(
-                                        type="solver.verification",
-                                        data=verification.model_dump(mode="json"),
-                                    )
-                                )
-                    progress.write(progress_path)
-                final_ingest = world_inbox.poll()
-                solver_state["inbox_accepted"] += final_ingest.accepted
-                solver_state["inbox_rejected"] += final_ingest.rejected
+                    await solver_loop.process_event(agent_session, event)
                 return await agent_session.result()
 
             start_session = getattr(adapter, "start_session", None)
@@ -359,21 +238,7 @@ class Orchestrator:
                     data={"error_type": type(exc).__name__, "message": str(exc)},
                 )
 
-        ingest_report = (
-            world_inbox.poll()
-            if "world_inbox" in locals()
-            else ingest_world_inbox(run_dir / "world.inbox.jsonl", world, actor="agent")
-        )
-        solver_state["inbox_accepted"] += ingest_report.accepted
-        solver_state["inbox_rejected"] += ingest_report.rejected
-        trace.emit(
-            "world.ingested",
-            data={
-                "accepted": ingest_report.accepted,
-                "rejected": ingest_report.rejected,
-                "errors": [error.model_dump() for error in ingest_report.errors[:10]],
-            },
-        )
+        solver_loop.finish_ingest()
 
         duration_ms = int((time.monotonic() - started) * 1000)
         metrics = {"duration_ms": duration_ms, **usage.as_dict()}
@@ -427,13 +292,13 @@ class Orchestrator:
                 1 for event in world.events() if event.actor == f"agent:{agent.id}"
             ),
             "aci": {
-                "accepted_events": solver_state["aci_accepted"],
-                "rejected_events": solver_state["aci_rejected"],
-                "world_mutations": solver_state["aci_world_mutations"],
+                "accepted_events": solver_loop.stats.aci_accepted,
+                "rejected_events": solver_loop.stats.aci_rejected,
+                "world_mutations": solver_loop.stats.aci_world_mutations,
             },
             "legacy_inbox": {
-                "accepted": solver_state["inbox_accepted"],
-                "rejected": solver_state["inbox_rejected"],
+                "accepted": solver_loop.stats.inbox_accepted,
+                "rejected": solver_loop.stats.inbox_rejected,
             },
         }
         (run_dir / "result.json").write_text(
