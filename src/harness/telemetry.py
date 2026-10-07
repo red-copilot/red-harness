@@ -7,8 +7,8 @@ from typing import Any
 
 
 def emit(event_type: str, **data: Any) -> None:
-    """Emit one agent telemetry event when running under Red Harness."""
-    target = os.environ.get("HARNESS_EVENT_FILE")
+    """Emit one telemetry event to the trusted runtime channel when available."""
+    target = os.environ.get("HARNESS_RUNTIME_EVENT_FILE") or os.environ.get("HARNESS_EVENT_FILE")
     if not target:
         return
     path = Path(target)
