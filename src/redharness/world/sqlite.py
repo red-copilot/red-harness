@@ -9,10 +9,7 @@ from pydantic import BaseModel
 
 from .models import WorldEvent, WorldObjectKind, WorldSnapshot
 from .reducer import WorldReducer
-
-
-class WorldConflictError(RuntimeError):
-    pass
+from .repository import WorldConflictError
 
 
 class SQLiteWorldRepository:
