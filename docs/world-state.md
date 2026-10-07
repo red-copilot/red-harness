@@ -85,9 +85,20 @@ Agent emits malformed or adversarial state.
 Pi receives a concise protocol instruction in its task prompt. Generic CLI/Docker agents can opt
 in simply by detecting `HARNESS_WORLD_INBOX`.
 
-## Planned evolution
+## Evolution status
 
-1. **Done:** validated Agent-facing state-event ingestion protocol.\n2. **Done:** compact context builder over persisted world state.\n3. **Done:** resume from a prior world event log using a fresh Agent session.\n4. Domain extension packages and skill metadata.\n5. Optional rolling-horizon planner.\n6. Shared blackboard for multi-agent execution.\n7. Derived graph/timeline views and transition-model research.\n
+1. **Done:** validated Agent-facing state-event ingestion protocol.
+2. **Done:** compact context builder over persisted world state.
+3. **Done:** resume from prior World State using a fresh Agent session.
+4. **Done:** domain-neutral Skill metadata registry.
+5. **Done:** rolling-horizon planner integrated with the interactive SolverLoop.
+6. **Done:** shared leased blackboard for explicit multi-agent coordination.
+7. **Research:** derived graph/timeline views, learned retrieval, and transition-model planning.
+
+The runtime loop now treats World State as durable knowledge, `progress.json` as ephemeral solver
+state, and `plan.json` as a derived short-horizon decision artifact. Replanning is triggered by
+verification failures, repeated no-progress, and benchmark feedback; Skill metadata remains
+non-executable and is used only to rank candidate next actions.
 
 ## Context and resume
 
