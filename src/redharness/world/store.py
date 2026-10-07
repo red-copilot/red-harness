@@ -64,6 +64,13 @@ class FileWorldRepository:
     ) -> WorldSnapshot:
         line = event.model_dump_json()
         with self._lock:
+            for existing in self.events():
+                if existing.id == event.id:
+                    if existing.model_dump_json() != line:
+                        raise ValueError(
+                            f"world event id {event.id} already exists with different payload"
+                        )
+                    return self.snapshot
             if (
                 expected_revision is not None
                 and expected_revision != self._snapshot.revision
@@ -72,13 +79,6 @@ class FileWorldRepository:
                     f"world revision conflict: expected {expected_revision}, "
                     f"current {self._snapshot.revision}"
                 )
-            for existing in self.events():
-                if existing.id == event.id:
-                    if existing.model_dump_json() != line:
-                        raise ValueError(
-                            f"world event id {event.id} already exists with different payload"
-                        )
-                    return self.snapshot
             candidate = self._snapshot.model_copy(deep=True)
             self._reducer.apply(candidate, event)
             with self.event_path.open("a", encoding="utf-8") as handle:
