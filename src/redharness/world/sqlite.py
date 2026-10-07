@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -42,43 +43,51 @@ class SQLiteWorldRepository:
         return connection
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS world_events (
-                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_id TEXT NOT NULL UNIQUE,
-                    schema_version TEXT NOT NULL,
-                    ts TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    op TEXT NOT NULL,
-                    object_id TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    actor TEXT NOT NULL,
-                    source_event_id TEXT
-                );
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                with self._connect() as connection:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    connection.executescript(
+                        """
+                        CREATE TABLE IF NOT EXISTS world_events (
+                            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                            event_id TEXT NOT NULL UNIQUE,
+                            schema_version TEXT NOT NULL,
+                            ts TEXT NOT NULL,
+                            kind TEXT NOT NULL,
+                            op TEXT NOT NULL,
+                            object_id TEXT NOT NULL,
+                            payload_json TEXT NOT NULL,
+                            actor TEXT NOT NULL,
+                            source_event_id TEXT
+                        );
 
-                CREATE INDEX IF NOT EXISTS idx_world_events_kind
-                    ON world_events(kind, sequence);
+                        CREATE INDEX IF NOT EXISTS idx_world_events_kind
+                            ON world_events(kind, sequence);
 
-                CREATE TABLE IF NOT EXISTS world_objects (
-                    kind TEXT NOT NULL,
-                    object_id TEXT NOT NULL,
-                    revision INTEGER NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    PRIMARY KEY (kind, object_id)
-                );
+                        CREATE TABLE IF NOT EXISTS world_objects (
+                            kind TEXT NOT NULL,
+                            object_id TEXT NOT NULL,
+                            revision INTEGER NOT NULL,
+                            payload_json TEXT NOT NULL,
+                            PRIMARY KEY (kind, object_id)
+                        );
 
-                CREATE TABLE IF NOT EXISTS world_meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
+                        CREATE TABLE IF NOT EXISTS world_meta (
+                            key TEXT PRIMARY KEY,
+                            value TEXT NOT NULL
+                        );
 
-                INSERT OR IGNORE INTO world_meta(key, value)
-                    VALUES ('revision', '0');
-                """
-            )
+                        INSERT OR IGNORE INTO world_meta(key, value)
+                            VALUES ('revision', '0');
+                        """
+                    )
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
 
     @property
     def snapshot(self) -> WorldSnapshot:
