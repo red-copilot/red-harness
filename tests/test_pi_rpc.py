@@ -13,14 +13,28 @@ from harness.session import AgentObservation
 from harness.trace import TraceRecorder
 
 
+class _FakeWriter:
+    def __init__(self) -> None:
+        self.buffer = io.BytesIO()
+
+    def write(self, data: bytes) -> None:
+        self.buffer.write(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    async def wait_closed(self) -> None:
+        return None
+
+
 class _FakeProcess:
     def __init__(self) -> None:
-        self.stdin = io.BytesIO()
-        self.stdout = io.BytesIO()
+        self.stdin = _FakeWriter()
+        self.stdout = None
         self.returncode = None
-
-    def poll(self):
-        return self.returncode
 
 
 def _spec() -> AgentSpec:
@@ -120,7 +134,7 @@ def test_pi_rpc_observe_steers_active_session(tmp_path: Path) -> None:
         )
     )
 
-    line = process.stdin.getvalue().decode("utf-8").strip()
+    line = process.stdin.buffer.getvalue().decode("utf-8").strip()
     command = json.loads(line)
     assert command["type"] == "prompt"
     assert command["streamingBehavior"] == "steer"
