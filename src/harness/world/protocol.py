@@ -12,7 +12,7 @@ from .repository import WorldRepository
 class WorldSubmission(BaseModel):
     """Untrusted Agent-to-Harness world-state submission."""
 
-    schema_version: Literal["redharness.world.submit/v1"] = "redharness.world.submit/v1"
+    schema_version: Literal["harness.world.submit/v1"] = "harness.world.submit/v1"
     kind: WorldObjectKind
     op: Literal["upsert", "remove"] = "upsert"
     object: dict

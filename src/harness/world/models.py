@@ -155,7 +155,7 @@ WorldObjectKind = Literal[
 
 
 class WorldEvent(BaseModel):
-    schema_version: Literal["redharness.world/v1"] = "redharness.world/v1"
+    schema_version: Literal["harness.world/v1"] = "harness.world/v1"
     id: str = Field(default_factory=lambda: _id("wevt"))
     ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
     kind: WorldObjectKind
@@ -166,7 +166,7 @@ class WorldEvent(BaseModel):
 
 
 class WorldSnapshot(BaseModel):
-    schema_version: Literal["redharness.world/v1"] = "redharness.world/v1"
+    schema_version: Literal["harness.world/v1"] = "harness.world/v1"
     revision: int = 0
     entities: dict[str, Entity] = Field(default_factory=dict)
     relations: dict[str, Relation] = Field(default_factory=dict)
