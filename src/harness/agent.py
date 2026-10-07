@@ -201,6 +201,14 @@ class CLIAdapter:
                 "gateway_url": gateway_url,
                 "gateway_token": gateway_token,
                 "gateway_network": gateway_network,
+                "network_profile": self.spec.network_profile,
+                "network_profile_enforcement": (
+                    "docker-none"
+                    if self.spec.network_profile == "offline"
+                    else "advisory"
+                    if self.spec.network_profile == "benchmark-only"
+                    else "unrestricted"
+                ),
             },
         )
 
@@ -357,14 +365,18 @@ class DockerAdapter:
         gateway_network: str | None = None,
     ) -> AgentResult:
         gateway_enabled = bool(gateway_url and gateway_token)
-        if gateway_enabled and self.spec.network == "none":
-            raise AgentError("Docker Agent network:none is incompatible with per-run Gateway")
+        if gateway_enabled and (
+            self.spec.network == "none" or self.spec.network_profile == "offline"
+        ):
+            raise AgentError("Docker Agent offline networking is incompatible with per-run Gateway")
 
         container_name = ("rh_agent_" + run_dir.name.lower()).replace("-", "_")[:63]
         sidecar_gateway = gateway_enabled and gateway_network is not None
         host_gateway = gateway_enabled and not sidecar_gateway and self.spec.network != "host"
 
-        if sidecar_gateway:
+        if self.spec.network_profile == "offline":
+            primary_network = "none"
+        elif sidecar_gateway:
             if self.spec.network == "host":
                 raise AgentError("Docker Agent network:host is incompatible with sidecar Gateway")
             primary_network = str(gateway_network)
