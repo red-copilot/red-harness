@@ -53,6 +53,22 @@ class FakeSession:
         self.closed_reason = None
 
     async def events(self):
+        world_path = self.run_dir / "world.inbox.jsonl"
+        world_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "redharness.world.submit/v1",
+                    "kind": "observation",
+                    "object": {
+                        "id": "obs-live",
+                        "type": "web.endpoint",
+                        "content": {"path": "/admin", "status": 200},
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         path = self.run_dir / "submission.inbox.jsonl"
         path.write_text(
             json.dumps({"type": "flag", "value": "flag{live}"}) + "\n",
@@ -132,6 +148,7 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert fake_agent.session is not None
     assert fake_agent.session.closed_reason == "objective-complete"
     feedback_types = [item.type for item in fake_agent.session.feedback]
+    assert "world.state.updated" in feedback_types
     assert "solver.verification" in feedback_types
     assert "benchmark.feedback" in feedback_types
     benchmark_feedback = next(
@@ -143,3 +160,8 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert result["progress"]["last_verification"]["status"] == "verified"
     assert result["progress"]["accepted_submissions"] == 1
     assert result["progress"]["objective_completed"] is True
+    assert result["world"]["revision"] >= 2
+    context = next(tmp_path.glob("fake_CASE-1_*/world.context.txt")).read_text(
+        encoding="utf-8"
+    )
+    assert "obs-live" in context
