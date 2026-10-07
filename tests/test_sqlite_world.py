@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -154,3 +155,25 @@ def test_sqlite_world_repository_imports_legacy_jsonl(tmp_path) -> None:
         if line
     ]
     assert [item["id"] for item in exported] == ["wevt-1", "wevt-2"]
+
+
+
+def test_sqlite_world_repository_serializes_concurrent_writers(tmp_path) -> None:
+    path = tmp_path / "world.db"
+
+    def write(index: int) -> None:
+        repository = SQLiteWorldRepository(path)
+        repository.upsert(
+            "goal",
+            {"id": f"goal-{index}", "description": f"goal {index}"},
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(write, range(8)))
+
+    repository = SQLiteWorldRepository(path)
+    assert repository.snapshot.revision == 8
+    assert len(repository.snapshot.goals) == 8
+    assert [sequence for sequence, _event in repository.sequenced_events()] == list(
+        range(1, 9)
+    )
