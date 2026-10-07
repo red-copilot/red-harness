@@ -192,7 +192,13 @@ class SolverLoop:
                 )
             )
 
-        should_verify = (
+        current_action_id = (self.progress.action_intent or {}).get("action_id")
+        has_bound_observation = (
+            isinstance(current_action_id, str)
+            and self.progress.actual_observation is not None
+            and self.progress.actual_observation_action_id == current_action_id
+        )
+        should_verify = has_bound_observation and (
             event.type == "world.observe"
             or (
                 event.type == "progress.updated"
