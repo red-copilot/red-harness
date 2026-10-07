@@ -12,6 +12,7 @@ from .agent import AgentError, AgentResult, _terminate_process
 from .budget import BudgetMonitor
 from .models import AgentSpec, TaskSpec
 from .pi_adapter import PiAdapter
+from .runtime_paths import runtime_event_path
 from .session import OneShotAgentSession
 from .trace import TraceRecorder
 
@@ -246,7 +247,7 @@ class ContainerPiAdapter(PiAdapter):
         if self.spec.network == "host" and gateway_url and gateway_network is None:
             gateway_url = gateway_url.replace("host.docker.internal", "127.0.0.1")
 
-        event_file = run_dir / "runtime.events.jsonl"
+        event_file = runtime_event_path(run_dir)
         event_file.write_text("", encoding="utf-8")
         raw_path = run_dir / "agent.stdout.log"
         stderr_path = run_dir / "agent.stderr.log"
