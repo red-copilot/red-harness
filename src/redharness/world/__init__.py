@@ -1,4 +1,5 @@
 from .context import WorldContextBuilder
+from .live import WorldInboxCursor
 from .models import (
     ActionRecord,
     Artifact,
@@ -37,6 +38,7 @@ __all__ = [
     "Relation",
     "WorldContextBuilder",
     "WorldEvent",
+    "WorldInboxCursor",
     "WorldRecord",
     "WorldReducer",
     "WorldRepository",
