@@ -174,6 +174,7 @@ def test_pi_json_protocol_normalizes_model_and_tool_events(monkeypatch, tmp_path
 
 
 def test_pi_offline_network_profile_forces_none(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("FAKE_PROVIDER_KEY", "secret")
     spec = _pi_spec().model_copy(update={"network_profile": "offline"})
     monkeypatch.setattr("harness.pi_container.shutil.which", lambda _: "/usr/bin/docker")
     adapter = ContainerPiAdapter(
