@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import shutil
@@ -15,6 +16,7 @@ from .budget import UsageMetrics
 from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
+from .session import AgentObservation
 from .trace import TraceRecorder
 from .verifier import run_verifier
 from .world import (
@@ -24,6 +26,7 @@ from .world import (
     WorldRepository,
     ingest_world_inbox,
 )
+from .world.live import WorldInboxCursor
 
 
 def _sha256(path: Path) -> str:
@@ -124,17 +127,77 @@ class Orchestrator:
                 allow_host_agent=allow_host_agent,
                 trace=trace,
             )
-            agent_result = adapter.run(
-                task,
-                task_dir=task_dir,
-                run_dir=run_dir,
-                environment_project=handle.project_name,
-                environment_network=handle.network_name,
-                seed=seed,
-                gateway_url=gateway_runtime.url if gateway_runtime else None,
-                gateway_token=gateway_runtime.token if gateway_runtime else None,
-                gateway_network=gateway_runtime.network_name if gateway_runtime else None,
+            run_kwargs = {
+                "task": task,
+                "task_dir": task_dir,
+                "run_dir": run_dir,
+                "environment_project": handle.project_name,
+                "environment_network": handle.network_name,
+                "seed": seed,
+                "gateway_url": gateway_runtime.url if gateway_runtime else None,
+                "gateway_token": gateway_runtime.token if gateway_runtime else None,
+                "gateway_network": gateway_runtime.network_name if gateway_runtime else None,
+            }
+            world_inbox = WorldInboxCursor(
+                run_dir / "world.inbox.jsonl",
+                world,
+                actor=f"agent:{agent.id}",
             )
+
+            async def run_session():
+                agent_session = await adapter.start_session(**run_kwargs)
+                async for _event in agent_session.events():
+                    before_revision = world.snapshot.revision
+                    live_ingest = world_inbox.poll()
+                    after_revision = world.snapshot.revision
+                    if live_ingest.accepted or live_ingest.rejected:
+                        trace.emit(
+                            "world.ingested",
+                            data={
+                                "accepted": live_ingest.accepted,
+                                "rejected": live_ingest.rejected,
+                                "errors": [
+                                    error.model_dump()
+                                    for error in live_ingest.errors[:10]
+                                ],
+                                "revision_before": before_revision,
+                                "revision_after": after_revision,
+                                "live": True,
+                            },
+                        )
+                    if after_revision != before_revision:
+                        (run_dir / "world.context.txt").write_text(
+                            context_builder.render(
+                                world.snapshot,
+                                query=task.objective.description,
+                            ),
+                            encoding="utf-8",
+                        )
+                        trace.emit(
+                            "world.state.updated",
+                            data={
+                                "revision_before": before_revision,
+                                "revision_after": after_revision,
+                            },
+                        )
+                        await agent_session.observe(
+                            AgentObservation(
+                                type="world.state.updated",
+                                data={
+                                    "revision_before": before_revision,
+                                    "revision_after": after_revision,
+                                    "context_path": "world.context.txt",
+                                },
+                            )
+                        )
+                world_inbox.poll()
+                return await agent_session.result()
+
+            start_session = getattr(adapter, "start_session", None)
+            if callable(start_session):
+                agent_result = asyncio.run(run_session())
+            else:
+                agent_result = adapter.run(**run_kwargs)
             usage = agent_result.metrics
 
             if agent_result.timed_out:
@@ -196,7 +259,11 @@ class Orchestrator:
                     data={"error_type": type(exc).__name__, "message": str(exc)},
                 )
 
-        ingest_report = ingest_world_inbox(run_dir / "world.inbox.jsonl", world, actor="agent")
+        ingest_report = (
+            world_inbox.poll()
+            if "world_inbox" in locals()
+            else ingest_world_inbox(run_dir / "world.inbox.jsonl", world, actor="agent")
+        )
         trace.emit(
             "world.ingested",
             data={
