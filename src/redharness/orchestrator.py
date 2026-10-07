@@ -20,7 +20,7 @@ from .session import AgentObservation
 from .trace import TraceRecorder
 from .verifier import run_verifier
 from .world import (
-    FileWorldRepository,
+    SQLiteWorldRepository,
     Goal,
     WorldContextBuilder,
     WorldRepository,
@@ -43,7 +43,7 @@ class Orchestrator:
         self,
         runs_root: str | Path = ".redharness/runs",
         *,
-        world_repository_factory: Callable[[Path], WorldRepository] = FileWorldRepository,
+        world_repository_factory: Callable[[Path], WorldRepository] = SQLiteWorldRepository,
     ) -> None:
         self.runs_root = Path(runs_root)
         self.world_repository_factory = world_repository_factory
@@ -66,11 +66,15 @@ class Orchestrator:
         task_dir = task_path.resolve().parent
         trace = TraceRecorder(run_dir / "trace.jsonl", run_id, task.id)
         world_event_path = run_dir / "world.events.jsonl"
+        world_db_path = run_dir / "world.db"
         if resume_world_events is not None:
             source = resume_world_events.resolve()
             if not source.is_file():
-                raise FileNotFoundError(f"resume world event log not found: {source}")
-            shutil.copyfile(source, world_event_path)
+                raise FileNotFoundError(f"resume world state not found: {source}")
+            if source.suffix == ".db":
+                shutil.copyfile(source, world_db_path)
+            else:
+                shutil.copyfile(source, world_event_path)
         world = self.world_repository_factory(world_event_path)
         root_goal = Goal(
             id=f"goal:{task.id}:objective",
