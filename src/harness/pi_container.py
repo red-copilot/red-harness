@@ -140,7 +140,7 @@ class ContainerPiAdapter(PiAdapter):
                 "-e",
                 f"HARNESS_ENV_PROJECT={environment_project or ''}",
                 "-e",
-                "HARNESS_EVENT_FILE=/run/harness/events.jsonl",
+                "HARNESS_EVENT_FILE=/run/harness/agent.events.jsonl",
                 "-e",
                 "HARNESS_WORLD_INBOX=/run/harness/world.inbox.jsonl",
                 "-e",
@@ -246,7 +246,7 @@ class ContainerPiAdapter(PiAdapter):
         if self.spec.network == "host" and gateway_url and gateway_network is None:
             gateway_url = gateway_url.replace("host.docker.internal", "127.0.0.1")
 
-        event_file = run_dir / "events.jsonl"
+        event_file = run_dir / "runtime.events.jsonl"
         event_file.write_text("", encoding="utf-8")
         raw_path = run_dir / "agent.stdout.log"
         stderr_path = run_dir / "agent.stderr.log"
