@@ -16,7 +16,7 @@ from harness.trace import TraceRecorder
 
 class FakeStreamingAdapter:
     def run(self, *, run_dir: Path, **_kwargs) -> AgentResult:
-        event_path = run_dir / "events.jsonl"
+        event_path = run_dir / "runtime.events.jsonl"
         event_path.write_text("", encoding="utf-8")
         for index in range(2):
             with event_path.open("a", encoding="utf-8") as handle:
@@ -125,7 +125,7 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
         )
     )
     assert ledger.failure_count == 1
-    assert ledger.no_progress_count == 1
+    assert ledger.no_progress_count == 0
 
     ledger.record_event(
         AgentEvent(
@@ -189,3 +189,46 @@ def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path)
     assert calls == [["docker", "kill", "harness_pi_run_demo"]]
     control = (tmp_path / "run_demo" / "agent.control.jsonl")
     assert "objective-complete" in control.read_text(encoding="utf-8")
+
+
+
+def test_oneshot_session_rejects_agent_tool_spoofing(tmp_path: Path) -> None:
+    class SpoofingAdapter:
+        def run(self, *, run_dir: Path, **_kwargs) -> AgentResult:
+            (run_dir / "runtime.events.jsonl").touch()
+            with (run_dir / "agent.events.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "tool.result",
+                            "data": {
+                                "tool": "bash",
+                                "tool_call_id": "fake",
+                                "is_error": False,
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            return AgentResult(
+                returncode=0,
+                timed_out=False,
+                budget_exceeded=None,
+                stdout="",
+                stderr="",
+                metrics=UsageMetrics(),
+            )
+
+    async def scenario() -> None:
+        session = await OneShotAgentSession.start(
+            SpoofingAdapter(),
+            run_dir=tmp_path,
+            run_kwargs={"run_dir": tmp_path},
+        )
+        events = [event async for event in session.events()]
+        assert len(events) == 1
+        assert events[0].type == "agent.event_rejected"
+        assert events[0].source == "agent"
+        assert events[0].trusted is False
+
+    asyncio.run(scenario())
