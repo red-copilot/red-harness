@@ -37,7 +37,6 @@ def build_runs_router(
         request: Request,
         run_id: str,
         limit: int = Query(default=1000, ge=1, le=5000),
-        after_sequence: int | None = Query(default=None, ge=0),
     ) -> list[dict]:
         authorize(request, token)
         directory = run_dir(run_root, run_id)
@@ -67,14 +66,29 @@ def build_runs_router(
         request: Request,
         run_id: str,
         limit: int = Query(default=1000, ge=1, le=5000),
+        after_sequence: int | None = Query(default=None, ge=0),
     ) -> list[dict]:
         authorize(request, token)
         directory = run_dir(run_root, run_id)
         repository = world_repository_factory(directory / "world.events.jsonl")
+        sequenced = getattr(repository, "sequenced_events", None)
+        if callable(sequenced):
+            records = sequenced(limit=limit, after_sequence=after_sequence)
+            if not records:
+                raise HTTPException(status_code=404, detail="world event log not found")
+            return [
+                {"sequence": sequence, **event.model_dump(mode="json")}
+                for sequence, event in records
+            ]
+
         events = repository.events(limit=limit, after_sequence=after_sequence)
         if not events:
             raise HTTPException(status_code=404, detail="world event log not found")
-        return [event.model_dump(mode="json") for event in events]
+        start = after_sequence or 0
+        return [
+            {"sequence": start + index, **event.model_dump(mode="json")}
+            for index, event in enumerate(events, start=1)
+        ]
 
     @router.get("/v1/runs/{run_id}/plan")
     async def run_plan(
