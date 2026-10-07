@@ -155,6 +155,8 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     )
     assert benchmark_feedback.data["accepted"] is True
     assert benchmark_feedback.data["completed"] is True
+    assert benchmark_feedback.data["world_revision"] >= 1
+    assert benchmark_feedback.data["replan_required"] is False
     assert result["progress"]["verified_actions"] >= 1
     assert result["progress"]["skipped_verifications"] >= 0
     assert result["progress"]["last_verification"]["status"] == "verified"
@@ -165,3 +167,4 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
         encoding="utf-8"
     )
     assert "obs-live" in context
+    assert "benchmark.submission.feedback" in context
