@@ -132,6 +132,11 @@ class CLIAdapter:
                 "REDHARNESS_OBJECTIVE": task.objective.description,
                 "REDHARNESS_ENV_PROJECT": environment_project or "",
                 "REDHARNESS_EVENT_FILE": str(run_dir / "events.jsonl"),
+                "REDHARNESS_WORLD_INBOX": str(run_dir / "world.inbox.jsonl"),
+                "REDHARNESS_WORLD_CONTEXT": str(run_dir / "world.context.txt"),
+                "REDHARNESS_SUBMISSION_INBOX": str(run_dir / "submission.inbox.jsonl"),
+                "REDHARNESS_FEEDBACK_FILE": str(run_dir / "agent.feedback.jsonl"),
+                "REDHARNESS_PROGRESS_FILE": str(run_dir / "progress.json"),
                 "REDHARNESS_SEED": str(seed),
             }
         )
@@ -165,6 +170,38 @@ class CLIAdapter:
         )
         self._finish_trace(result)
         return result
+
+
+    async def start_session(
+        self,
+        task: TaskSpec,
+        *,
+        task_dir: Path,
+        run_dir: Path,
+        environment_project: str | None,
+        environment_network: str | None,
+        seed: int,
+        gateway_url: str | None = None,
+        gateway_token: str | None = None,
+        gateway_network: str | None = None,
+    ):
+        from .session import OneShotAgentSession
+
+        return await OneShotAgentSession.start(
+            self,
+            run_dir=run_dir,
+            run_kwargs={
+                "task": task,
+                "task_dir": task_dir,
+                "run_dir": run_dir,
+                "environment_project": environment_project,
+                "environment_network": environment_network,
+                "seed": seed,
+                "gateway_url": gateway_url,
+                "gateway_token": gateway_token,
+                "gateway_network": gateway_network,
+            },
+        )
 
     def _finish_trace(self, result: AgentResult) -> None:
         self.trace.emit(
@@ -269,6 +306,16 @@ class DockerAdapter:
                 f"REDHARNESS_ENV_PROJECT={environment_project or ''}",
                 "-e",
                 "REDHARNESS_EVENT_FILE=/run/redharness/events.jsonl",
+                "-e",
+                "REDHARNESS_WORLD_INBOX=/run/redharness/world.inbox.jsonl",
+                "-e",
+                "REDHARNESS_WORLD_CONTEXT=/run/redharness/world.context.txt",
+                "-e",
+                "REDHARNESS_SUBMISSION_INBOX=/run/redharness/submission.inbox.jsonl",
+                "-e",
+                "REDHARNESS_FEEDBACK_FILE=/run/redharness/agent.feedback.jsonl",
+                "-e",
+                "REDHARNESS_PROGRESS_FILE=/run/redharness/progress.json",
                 "-e",
                 f"REDHARNESS_SEED={seed}",
             ]
@@ -398,6 +445,38 @@ class DockerAdapter:
             },
         )
         return result
+
+
+    async def start_session(
+        self,
+        task: TaskSpec,
+        *,
+        task_dir: Path,
+        run_dir: Path,
+        environment_project: str | None,
+        environment_network: str | None,
+        seed: int,
+        gateway_url: str | None = None,
+        gateway_token: str | None = None,
+        gateway_network: str | None = None,
+    ):
+        from .session import OneShotAgentSession
+
+        return await OneShotAgentSession.start(
+            self,
+            run_dir=run_dir,
+            run_kwargs={
+                "task": task,
+                "task_dir": task_dir,
+                "run_dir": run_dir,
+                "environment_project": environment_project,
+                "environment_network": environment_network,
+                "seed": seed,
+                "gateway_url": gateway_url,
+                "gateway_token": gateway_token,
+                "gateway_network": gateway_network,
+            },
+        )
 
 
 def build_agent_adapter(

@@ -28,6 +28,7 @@ class PiAdapter:
         self.spec = spec
         self.pi = spec.pi
         self.trace = trace
+        self._tool_started: dict[str, float] = {}
 
     @staticmethod
     def _append_event(path: Path, event_type: str, data: dict[str, Any]) -> None:
@@ -71,6 +72,9 @@ class PiAdapter:
             self._append_event(event_file, "pi.agent_settled", {})
             return
         if event_type == "tool_execution_start":
+            tool_call_id = str(event.get("toolCallId") or "")
+            if tool_call_id:
+                self._tool_started[tool_call_id] = time.monotonic()
             self._append_event(
                 event_file,
                 "tool.call",
@@ -82,6 +86,9 @@ class PiAdapter:
             )
             return
         if event_type == "tool_execution_end":
+            tool_call_id = str(event.get("toolCallId") or "")
+            started = self._tool_started.pop(tool_call_id, None) if tool_call_id else None
+            is_error = bool(event.get("isError", False))
             self._append_event(
                 event_file,
                 "tool.result",
@@ -89,7 +96,13 @@ class PiAdapter:
                     "tool": event.get("toolName", "unknown"),
                     "tool_call_id": event.get("toolCallId"),
                     "source": "pi",
-                    "is_error": bool(event.get("isError", False)),
+                    "is_error": is_error,
+                    "duration_ms": (
+                        int((time.monotonic() - started) * 1000)
+                        if started is not None
+                        else None
+                    ),
+                    "failure_class": "tool_error" if is_error else None,
                 },
             )
             return
@@ -141,6 +154,38 @@ class PiAdapter:
                 "cache_write_tokens": int(usage.get("cacheWrite", 0) or 0),
                 "reasoning_tokens": int(usage.get("reasoning", 0) or 0),
                 "cost_usd": float(cost.get("total", 0.0) or 0.0),
+            },
+        )
+
+
+    async def start_session(
+        self,
+        task: TaskSpec,
+        *,
+        task_dir: Path,
+        run_dir: Path,
+        environment_project: str | None,
+        environment_network: str | None,
+        seed: int,
+        gateway_url: str | None = None,
+        gateway_token: str | None = None,
+        gateway_network: str | None = None,
+    ):
+        from .session import OneShotAgentSession
+
+        return await OneShotAgentSession.start(
+            self,
+            run_dir=run_dir,
+            run_kwargs={
+                "task": task,
+                "task_dir": task_dir,
+                "run_dir": run_dir,
+                "environment_project": environment_project,
+                "environment_network": environment_network,
+                "seed": seed,
+                "gateway_url": gateway_url,
+                "gateway_token": gateway_token,
+                "gateway_network": gateway_network,
             },
         )
 
@@ -227,7 +272,19 @@ class PiAdapter:
         if self.pi.thinking:
             args.extend(["--thinking", self.pi.thinking])
         args.extend(self.pi.extra_args)
-        args.append(task.objective.description)
+        world_protocol = (
+            "\n\nRed Harness state protocol:\n"
+            "Read $REDHARNESS_WORLD_CONTEXT and $REDHARNESS_PROGRESS_FILE before acting. "
+            "When you discover durable, task-relevant state, append one JSON object per line to "
+            "$REDHARNESS_WORLD_INBOX. Use schema_version redharness.world.submit/v1 and one of "
+            "entity, relation, observation, artifact, capability, hypothesis, goal, action, "
+            "constraint, or failure. Prefer high-value state changes over verbose narration. "
+            "When your current subgoal, hypothesis, expected observation, actual observation, "
+            "or replan reason changes, append a compact progress.updated JSON event to "
+            "$REDHARNESS_EVENT_FILE with those fields under data. Do not write to "
+            "world.events.jsonl, world.snapshot.json, or progress.json directly."
+        )
+        args.append(task.objective.description + world_protocol)
         return args
 
     def _create_command(
@@ -270,6 +327,15 @@ class PiAdapter:
                 "-e", f"REDHARNESS_TASK_ID={task.id}",
                 "-e", "REDHARNESS_TASK_DIR=/task",
                 "-e", "REDHARNESS_RUN_DIR=/run/redharness",
+                "-e", "REDHARNESS_WORLD_INBOX=/run/redharness/world.inbox.jsonl",
+                "-e",
+                "REDHARNESS_WORLD_CONTEXT=/run/redharness/world.context.txt",
+                "-e",
+                "REDHARNESS_SUBMISSION_INBOX=/run/redharness/submission.inbox.jsonl",
+                "-e",
+                "REDHARNESS_FEEDBACK_FILE=/run/redharness/agent.feedback.jsonl",
+                "-e",
+                "REDHARNESS_PROGRESS_FILE=/run/redharness/progress.json",
                 "-e", f"REDHARNESS_SEED={seed}",
                 "-e", "PI_CODING_AGENT_DIR=/run/redharness/pi-agent",
                 "-e", "PI_CODING_AGENT_SESSION_DIR=/run/redharness/pi-sessions",

@@ -1,5 +1,7 @@
+# ruff: noqa: I001
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
@@ -10,8 +12,33 @@ from .agent import AgentError, AgentResult, _terminate_process
 from .budget import BudgetMonitor
 from .models import AgentSpec, TaskSpec
 from .pi_adapter import PiAdapter
+from .session import OneShotAgentSession
 from .trace import TraceRecorder
 
+
+
+
+class ContainerPiSession(OneShotAgentSession):
+    """Session wrapper that can actively terminate the running Pi container."""
+
+    def __init__(self, adapter, *, run_kwargs, run_dir, poll_interval=0.05) -> None:
+        super().__init__(
+            adapter,
+            run_kwargs=run_kwargs,
+            run_dir=run_dir,
+            poll_interval=poll_interval,
+        )
+        self.container_name = ("rh_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
+
+    async def close(self, reason: str) -> None:
+        await super().close(reason)
+        await asyncio.to_thread(
+            subprocess.run,
+            ["docker", "kill", self.container_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
 
 class ContainerPiAdapter(PiAdapter):
     """Run Pi inside a restricted Docker container while reusing Pi JSON parsing."""
@@ -27,6 +54,7 @@ class ContainerPiAdapter(PiAdapter):
         self.spec = spec
         self.pi = spec.pi
         self.trace = trace
+        self._tool_started: dict[str, float] = {}
 
     @staticmethod
     def _docker(
@@ -114,6 +142,16 @@ class ContainerPiAdapter(PiAdapter):
                 "-e",
                 "REDHARNESS_EVENT_FILE=/run/redharness/events.jsonl",
                 "-e",
+                "REDHARNESS_WORLD_INBOX=/run/redharness/world.inbox.jsonl",
+                "-e",
+                "REDHARNESS_WORLD_CONTEXT=/run/redharness/world.context.txt",
+                "-e",
+                "REDHARNESS_SUBMISSION_INBOX=/run/redharness/submission.inbox.jsonl",
+                "-e",
+                "REDHARNESS_FEEDBACK_FILE=/run/redharness/agent.feedback.jsonl",
+                "-e",
+                "REDHARNESS_PROGRESS_FILE=/run/redharness/progress.json",
+                "-e",
                 f"REDHARNESS_SEED={seed}",
                 "-e",
                 "PI_CODING_AGENT_DIR=/run/redharness/pi-agent",
@@ -154,6 +192,35 @@ class ContainerPiAdapter(PiAdapter):
         command.append(str(self.spec.image))
         command.extend(self._command(task, gateway_enabled=bool(gateway_url and gateway_token)))
         return command
+
+    async def start_session(
+        self,
+        task: TaskSpec,
+        *,
+        task_dir: Path,
+        run_dir: Path,
+        environment_project: str | None,
+        environment_network: str | None,
+        seed: int,
+        gateway_url: str | None = None,
+        gateway_token: str | None = None,
+        gateway_network: str | None = None,
+    ) -> ContainerPiSession:
+        return await ContainerPiSession.start(
+            self,
+            run_dir=run_dir,
+            run_kwargs={
+                "task": task,
+                "task_dir": task_dir,
+                "run_dir": run_dir,
+                "environment_project": environment_project,
+                "environment_network": environment_network,
+                "seed": seed,
+                "gateway_url": gateway_url,
+                "gateway_token": gateway_token,
+                "gateway_network": gateway_network,
+            },
+        )
 
     def run(
         self,

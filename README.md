@@ -9,7 +9,8 @@ Version 0.8 provides:
 - declarative task, agent, suite, policy, and distributed-job contracts
 - first-class [Pi](https://pi.dev/docs/latest) Agent Adapter running inside Kali Rolling Docker
 - Pi tool/model event normalization into Harness traces and budgets
-- Kali Rolling + `kali-linux-core` Pi image with curated security tools\n- isolated per-run Pi configuration and deterministic non-interactive defaults\n- TSec Benchmark SDK lifecycle adapter (`list/start/submit/close`) with Harness-owned benchmark credentials
+- Kali Rolling + `kali-linux-core` Pi image with curated security tools\n- isolated per-run Pi configuration and deterministic non-interactive defaults\n- generic Benchmark Adapter contracts (`discover/provision/submit/evaluate/teardown`)
+- TSec Benchmark adapter over the official SDK (`list/start/submit/close`) with Harness-owned benchmark credentials
 - optional Pi model routing through the Red Harness credential-isolating Gateway
 - Docker Compose or no-op benchmark environments
 - trusted CLI agents and restricted Docker agents
@@ -25,6 +26,10 @@ Version 0.8 provides:
 - worker-local provider secrets and workspace path resolution
 - benchmark registry scanning
 - persisted result/trace viewer API
+- event-sourced universal world-state runtime with materialized snapshots
+- domain-neutral skill metadata registry for future planners and domain extensions
+- optional read-only heuristic planner over World State + Skill metadata
+- leased coordination blackboard for explicit multi-agent work distribution
 - leaderboard aggregation
 - OTLP/HTTP JSON-compatible trace export
 - Firecracker capability detection and machine-profile contract
@@ -253,11 +258,23 @@ POST /v1/jobs/{job_id}/complete
 POST /v1/jobs/{job_id}/fail
 
 GET  /v1/benchmarks
+GET  /v1/skills
 GET  /v1/leaderboard
 GET  /v1/capabilities
 
 GET  /v1/runs/{run_id}
 GET  /v1/runs/{run_id}/trace
+GET  /v1/runs/{run_id}/world
+GET  /v1/runs/{run_id}/world/events
+GET  /v1/runs/{run_id}/plan
+POST /v1/runs/{run_id}/plan/publish
+GET  /v1/work
+POST /v1/work
+POST /v1/work/claim
+POST /v1/work/{work_id}/heartbeat
+POST /v1/work/{work_id}/complete
+POST /v1/work/{work_id}/fail
+POST /v1/work/{work_id}/release
 GET  /v1/runs/{run_id}/otel
 ```
 
@@ -427,6 +444,10 @@ Each run is stored beneath `.redharness/runs/<run_id>/`:
 result.json
 trace.jsonl
 events.jsonl
+world.db
+world.events.jsonl
+world.snapshot.json
+world.context.txt
 agent.stdout.log
 agent.stderr.log
 verifier.stdout.log
@@ -466,6 +487,8 @@ For Pi runs, `agent.stdout.log` is the raw Pi JSON event stream.
               Trace API / OTLP
 ```
 
+World-state design and extension guidance is documented in [`docs/world-state.md`](docs/world-state.md). Reusable technique metadata uses `redharness/skill/v1`; skills describe state preconditions and possible outcomes but are not executable code. The core state schema is domain-neutral and does not require a DAG; graph and timeline representations are derived views over the event-sourced state.
+
 Core separation rule:
 
 ```text
@@ -482,3 +505,76 @@ Task != Environment != Agent != Model != Tool != Verifier
 6. **Done:** authenticated control plane, leased distributed workers, benchmark registry, leaderboard, trace-viewer API, OTLP JSON export, Firecracker host/profile contract.
 7. **Done:** first-class Pi JSON adapter, Pi usage/tool normalization, isolated Pi config, Gateway model routing, Pi capability detection.
 8. PostgreSQL/Redis queue backend, containerized Pi adapter, KVM-enabled Firecracker lifecycle, snapshot pooling, OpenTelemetry collector delivery, browser trace UI, signed benchmark registry, and multi-tenant scheduling.
+
+
+### Benchmark adapters
+
+External benchmark platforms use a common contract:
+
+```text
+discover -> BenchmarkCase
+provision -> BenchmarkSession
+Agent run
+submit -> SubmissionResult
+evaluate -> EvaluationResult
+teardown
+```
+
+A `BenchmarkSession` contains a normalized objective, targets, and benchmark metadata. The generic
+`BenchmarkRunner` seeds targets into the World Model, builds `world.context.txt`, runs the selected
+Agent adapter, ingests world-state submissions, sends benchmark submissions, records evaluation,
+and always tears the external session down.
+
+TSecBench is implemented through this contract. Its SDK token stays in the Harness process and is
+never passed to the Agent. `REDHARNESS_FLAG=<flag>` remains a compatibility submission extractor;
+submission values are hashed in normalized traces.
+
+
+### Solver session runtime
+
+The benchmark runtime can now start Agents through a bidirectional `AgentSession` compatibility
+boundary while retaining the legacy `run()` API. Sessions expose normalized events, trusted
+observations, checkpoints, close requests, and the eventual `AgentResult`.
+
+Externally evaluated benchmarks may accept structured submissions through
+`REDHARNESS_SUBMISSION_INBOX` and write trusted evaluator feedback to
+`REDHARNESS_FEEDBACK_FILE`. TSec uses this path for online flag feedback while retaining
+`REDHARNESS_FLAG=<flag>` as a compatibility fallback.
+
+Each benchmark run also maintains `progress.json` (`redharness.progress/v1`) separately from
+World State. It tracks active solver progress, recent action status, no-progress/failure counters,
+submission outcomes, and objective completion. Containerized Pi sessions can be actively stopped
+when the evaluator reports objective completion.
+
+
+### Rolling-horizon planning
+
+The Harness exposes an optional short-horizon planner at:
+
+```text
+GET /v1/runs/{run_id}/plan/rolling?horizon=1..3
+```
+
+It combines the current World Snapshot, Skill Registry, and `progress.json` to return at most three
+`PlannedAction` records. Each action includes a skill, expected observations, a compact rationale,
+and explicit replan triggers such as action failure, missing expected observations, changed world
+revision, repeated no-progress, or contradicted hypotheses.
+
+This endpoint is advisory. Planner output is never executed automatically. Work still enters the
+Coordination Plane only through an explicit publish step.
+
+
+### SQLite World State
+
+SQLite is the default World State backend. `world.db` is authoritative; `world.events.jsonl` and
+`world.snapshot.json` are compatibility/debug exports. The database uses WAL mode, persistent event
+sequence numbers, event-id deduplication, and optional optimistic `expected_revision` checks.
+
+Incremental consumers can request:
+
+```text
+GET /v1/runs/{run_id}/world/events?after_sequence=<sequence>
+```
+
+Each returned event includes its persistent `sequence` cursor. Legacy JSONL state can still be
+passed to `--resume-world`; new runs may resume directly from a previous `world.db`.

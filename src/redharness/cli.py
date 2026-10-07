@@ -21,6 +21,7 @@ from .orchestrator import Orchestrator
 from .otel import export_otlp_json
 from .policy import load_policy
 from .queue import GatewayJobSpec, JobPayload
+from .skills import load_skill
 from .suite import SuiteRunner
 from .worker import Worker
 
@@ -86,6 +87,19 @@ def validate(
     typer.echo(f"valid: {spec.id} ({spec.api_version})")
 
 
+@app.command("validate-skill")
+def validate_skill(
+    skill: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+) -> None:
+    """Validate a skill metadata contract."""
+    try:
+        spec = load_skill(skill)
+    except (ValidationError, ValueError, TypeError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(f"valid skill: {spec.id} ({spec.domain})")
+
+
 @app.command("validate-suite")
 def validate_suite(
     suite: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
@@ -120,6 +134,10 @@ def run(
     ),
     input_price: Annotated[float, typer.Option("--input-price-per-million", min=0)] = 0.0,
     output_price: Annotated[float, typer.Option("--output-price-per-million", min=0)] = 0.0,
+    resume_world: Annotated[
+        Path | None,
+        typer.Option("--resume-world", exists=True, dir_okay=False),
+    ] = None,
     allow_host_agent: Annotated[
         bool,
         typer.Option(
@@ -152,6 +170,7 @@ def run(
             allow_host_agent=allow_host_agent,
             seed=seed + index,
             gateway_config=gateway_config,
+            resume_world_events=resume_world,
         )
         for index in range(repeat)
     ]
@@ -244,11 +263,16 @@ def tsec(
     ] = False,
     start_retries: Annotated[int, typer.Option("--start-retries", min=0, max=10)] = 2,
     retry_delay: Annotated[float, typer.Option("--retry-delay", min=0)] = 2.0,
+    allow_host_agent: Annotated[
+        bool,
+        typer.Option(
+            "--allow-host-agent",
+            help="Allow a trusted CLI agent to execute on the host.",
+        ),
+    ] = False,
 ) -> None:
-    """Run TSec Benchmark challenges with a containerized Pi agent."""
+    """Run TSec Benchmark challenges through the generic benchmark runtime."""
     spec = load_agent(agent)
-    if spec.type != "pi":
-        raise typer.BadParameter("TSec integration currently requires a type: pi agent")
     config = load_tsec_config(base_url_env=base_url_env, token_env=token_env)
     budgets = BudgetSpec(
         wall_time=wall_time,
@@ -268,6 +292,7 @@ def tsec(
             use_hint=use_hint,
             start_retries=start_retries,
             retry_delay=retry_delay,
+            allow_host_agent=allow_host_agent,
         )
     )
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
@@ -278,6 +303,7 @@ def serve(
     queue_db: Annotated[Path, typer.Option("--queue-db")] = Path(".redharness/control.db"),
     runs_root: Annotated[Path, typer.Option("--runs-root")] = Path(".redharness/runs"),
     benchmarks_root: Annotated[Path, typer.Option("--benchmarks-root")] = Path("benchmarks"),
+    skills_root: Annotated[Path, typer.Option("--skills-root")] = Path("skills"),
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8780,
     token_env: Annotated[str, typer.Option("--token-env")] = "REDHARNESS_CONTROL_TOKEN",
@@ -288,6 +314,7 @@ def serve(
         queue_db=queue_db.resolve(),
         runs_root=runs_root.resolve(),
         benchmarks_root=benchmarks_root.resolve(),
+        skills_root=skills_root.resolve(),
         token=token,
     )
     uvicorn.run(api, host=host, port=port, access_log=False)
