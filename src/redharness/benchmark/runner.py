@@ -14,7 +14,7 @@ from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..progress import ProgressLedger
 from ..session import AgentObservation
 from ..trace import TraceRecorder
-from ..world import Entity, FileWorldRepository, Goal, WorldContextBuilder, ingest_world_inbox
+from ..world import Entity, FileWorldRepository, Goal, WorldContextBuilder
 from ..world.live import WorldInboxCursor
 from .base import BenchmarkAdapter, BenchmarkCase, Submission
 from .protocol import SubmissionInbox
