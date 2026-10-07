@@ -283,6 +283,12 @@ class PiAdapter:
             "world.capability, world.artifact, or world.failure for those kinds. "
             "Harness validates typed events and writes canonical World state. "
             "Never write world.db, world.events.jsonl, world.snapshot.json, or progress.json. "
+            "Benchmark submissions are interactive: after appending a candidate to "
+            "$HARNESS_SUBMISSION_INBOX, keep the process alive and read new records from "
+            "$HARNESS_FEEDBACK_FILE before deciding the next action. A rejected candidate is "
+            "evidence to revise the current hypothesis or path; do not resubmit the same value. "
+            "When feedback requests replanning, reread $HARNESS_WORLD_CONTEXT and "
+            "$HARNESS_PROGRESS_FILE, then continue from updated state. "
             "Treat Internet access as optional and non-essential; solve from benchmark targets "
             "and local tools first."
         )
