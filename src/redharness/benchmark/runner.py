@@ -15,6 +15,7 @@ from ..progress import ProgressLedger
 from ..session import AgentObservation
 from ..trace import TraceRecorder
 from ..world import Entity, FileWorldRepository, Goal, WorldContextBuilder, ingest_world_inbox
+from ..world.live import WorldInboxCursor
 from .base import BenchmarkAdapter, BenchmarkCase, Submission
 from .protocol import SubmissionInbox
 
@@ -128,6 +129,12 @@ class BenchmarkRunner:
         submitted_keys: set[tuple[str, str]] = set()
         teardown_error: str | None = None
         submission_inbox = SubmissionInbox(run_dir / "submission.inbox.jsonl")
+        world_inbox = WorldInboxCursor(
+            run_dir / "world.inbox.jsonl",
+            world,
+            actor=f"agent:{agent.id}",
+        )
+        planned_world_revision = world.snapshot.revision
 
         async def submit_candidate(submission: Submission, agent_session=None) -> bool:
             key = (submission.type, submission.value)
@@ -189,8 +196,56 @@ class BenchmarkRunner:
                 async for event in agent_session.events():
                     progress.record_event(event)
 
+                    before_revision = world.snapshot.revision
+                    live_ingest = world_inbox.poll()
+                    after_revision = world.snapshot.revision
+                    if live_ingest.accepted or live_ingest.rejected:
+                        trace.emit(
+                            "world.ingested",
+                            data={
+                                "accepted": live_ingest.accepted,
+                                "rejected": live_ingest.rejected,
+                                "errors": [
+                                    error.model_dump()
+                                    for error in live_ingest.errors[:10]
+                                ],
+                                "revision_before": before_revision,
+                                "revision_after": after_revision,
+                                "live": True,
+                            },
+                        )
+                    if after_revision != before_revision:
+                        (run_dir / "world.context.txt").write_text(
+                            context_builder.render(
+                                world.snapshot,
+                                query=session.objective.description,
+                            ),
+                            encoding="utf-8",
+                        )
+                        trace.emit(
+                            "world.state.updated",
+                            data={
+                                "revision_before": before_revision,
+                                "revision_after": after_revision,
+                            },
+                        )
+                        await agent_session.observe(
+                            AgentObservation(
+                                type="world.state.updated",
+                                data={
+                                    "revision_before": before_revision,
+                                    "revision_after": after_revision,
+                                    "context_path": "world.context.txt",
+                                },
+                            )
+                        )
+
                     if event.type in {"tool.result", "progress.updated"}:
-                        verification = action_verifier.verify(progress)
+                        verification = action_verifier.verify(
+                            progress,
+                            planned_world_revision=planned_world_revision,
+                            current_world_revision=world.snapshot.revision,
+                        )
                         verification_key = (
                             verification.status,
                             verification.expected_observation,
@@ -226,11 +281,7 @@ class BenchmarkRunner:
             else:
                 agent_result = adapter_instance.run(**run_kwargs)
 
-            ingest_report = ingest_world_inbox(
-                run_dir / "world.inbox.jsonl",
-                world,
-                actor=f"agent:{agent.id}",
-            )
+            ingest_report = world_inbox.poll()
             trace.emit(
                 "world.ingested",
                 data={
