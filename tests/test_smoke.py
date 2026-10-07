@@ -21,6 +21,8 @@ def test_smoke_run(tmp_path: Path) -> None:
     )
     assert result["status"] == "finished"
     assert result["success"] is True
+    run_dir = tmp_path / "runs" / result["run_id"]
+    assert (run_dir / "world.db").is_file()
     assert result["score"] == 100
     assert result["seed"] == 42
     assert result["metrics"]["total_tokens"] == 12
