@@ -68,7 +68,6 @@ class ProgressLedger(BaseModel):
             }
             if failed:
                 self.failure_count += 1
-                self.no_progress_count += 1
         elif event.type == "progress.updated":
             self._record_progress_update(event.data)
         elif event.type in {"capability.acquired", "goal.completed"}:
