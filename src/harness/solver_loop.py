@@ -129,16 +129,6 @@ class SolverLoop:
         else:
             if event.type.startswith(("world.", "action.")):
                 self.stats.aci_accepted += 1
-                await session.observe(
-                    AgentObservation(
-                        type="aci.feedback",
-                        data={
-                            "accepted": True,
-                            "event_type": event.type,
-                            "world_mutations": aci_mutations,
-                        },
-                    )
-                )
             self.stats.aci_world_mutations += aci_mutations
             if aci_mutations:
                 self.trace.emit(
@@ -181,16 +171,21 @@ class SolverLoop:
                     "revision_after": after_revision,
                 },
             )
-            await session.observe(
-                AgentObservation(
-                    type="world.state.updated",
-                    data={
-                        "revision_before": before_revision,
-                        "revision_after": after_revision,
-                        "context_path": "world.context.txt",
-                    },
+            if not (
+                event.source == "agent"
+                and event.type.startswith("world.")
+                and aci_mutations
+            ):
+                await session.observe(
+                    AgentObservation(
+                        type="world.state.updated",
+                        data={
+                            "revision_before": before_revision,
+                            "revision_after": after_revision,
+                            "context_path": "world.context.txt",
+                        },
+                    )
                 )
-            )
 
         current_action_id = (self.progress.action_intent or {}).get("action_id")
         has_bound_observation = (
