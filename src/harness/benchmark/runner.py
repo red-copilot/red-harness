@@ -65,6 +65,11 @@ class BenchmarkRunner:
         action_verifier = ActionVerifier()
         typed_aci = TypedACI()
         last_verification_key: tuple | None = None
+        aci_accepted = 0
+        aci_rejected = 0
+        aci_world_mutations = 0
+        inbox_accepted = 0
+        inbox_rejected = 0
         progress_path = run_dir / "progress.json"
         progress.write(progress_path)
 
@@ -207,6 +212,7 @@ class BenchmarkRunner:
                         )
                     except (KeyError, TypeError, ValueError) as exc:
                         aci_mutations = 0
+                        aci_rejected += 1
                         trace.emit(
                             "aci.rejected",
                             actor="harness",
@@ -227,6 +233,9 @@ class BenchmarkRunner:
                             )
                         )
                     else:
+                        if event.type.startswith(("world.", "action.")):
+                            aci_accepted += 1
+                        aci_world_mutations += aci_mutations
                         if event.type.startswith(("world.", "action.")):
                             await agent_session.observe(
                                 AgentObservation(
@@ -252,6 +261,8 @@ class BenchmarkRunner:
                                 "revision_after": after_revision,
                             },
                         )
+                    inbox_accepted += live_ingest.accepted
+                    inbox_rejected += live_ingest.rejected
                     if live_ingest.accepted or live_ingest.rejected:
                         trace.emit(
                             "world.ingested",
@@ -338,6 +349,8 @@ class BenchmarkRunner:
                 agent_result = adapter_instance.run(**run_kwargs)
 
             ingest_report = world_inbox.poll()
+            inbox_accepted += ingest_report.accepted
+            inbox_rejected += ingest_report.rejected
             trace.emit(
                 "world.ingested",
                 data={
@@ -424,6 +437,30 @@ class BenchmarkRunner:
             },
             "world": {
                 "revision": world.snapshot.revision,
+                "agent_authored_records": sum(
+                    1
+                    for event in world.events()
+                    if event.actor == f"agent:{agent.id}"
+                ),
+                "aci": {
+                    "accepted_events": aci_accepted,
+                    "rejected_events": aci_rejected,
+                    "world_mutations": aci_world_mutations,
+                },
+                "legacy_inbox": {
+                    "accepted": inbox_accepted,
+                    "rejected": inbox_rejected,
+                },
+            },
+            "network": {
+                "profile": agent.network_profile,
+                "enforcement": (
+                    "docker-none"
+                    if agent.network_profile == "offline" and agent.type in {"docker", "pi"}
+                    else "advisory"
+                    if agent.network_profile == "benchmark-only"
+                    else "unrestricted"
+                ),
             },
             "progress": progress.model_dump(mode="json"),
             "metrics": {
