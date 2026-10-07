@@ -10,13 +10,14 @@ from harness.budget import UsageMetrics
 from harness.failures import FailureClass, classify_failure
 from harness.pi_container import ContainerPiSession
 from harness.progress import ProgressLedger
+from harness.runtime_paths import runtime_event_path
 from harness.session import AgentEvent, AgentObservation, OneShotAgentSession
 from harness.trace import TraceRecorder
 
 
 class FakeStreamingAdapter:
     def run(self, *, run_dir: Path, **_kwargs) -> AgentResult:
-        event_path = run_dir / "runtime.events.jsonl"
+        event_path = runtime_event_path(run_dir)
         event_path.write_text("", encoding="utf-8")
         for index in range(2):
             with event_path.open("a", encoding="utf-8") as handle:
@@ -127,10 +128,21 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
     assert ledger.failure_count == 1
     assert ledger.no_progress_count == 0
 
+    ledger.record_intent(
+        {
+            "action_id": "action-admin",
+            "description": "probe admin route",
+            "expected_observations": ["admin route exists"],
+        },
+        world_revision=0,
+    )
     ledger.record_event(
         AgentEvent(
             type="progress.updated",
+            source="agent",
+            trusted=False,
             data={
+                "action_id": "action-admin",
                 "current_subgoal": "enumerate web routes",
                 "completed_subgoal": "identify service",
                 "confirmed_fact": "http is reachable",
@@ -195,7 +207,7 @@ def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path)
 def test_oneshot_session_rejects_agent_tool_spoofing(tmp_path: Path) -> None:
     class SpoofingAdapter:
         def run(self, *, run_dir: Path, **_kwargs) -> AgentResult:
-            (run_dir / "runtime.events.jsonl").touch()
+            (runtime_event_path(run_dir)).touch()
             with (run_dir / "agent.events.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(
                     json.dumps(
