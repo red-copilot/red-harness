@@ -205,7 +205,7 @@ class BenchmarkRunner:
                             progress=progress,
                             actor=f"agent:{agent.id}",
                         )
-                    except Exception as exc:
+                    except (KeyError, TypeError, ValueError) as exc:
                         aci_mutations = 0
                         trace.emit(
                             "aci.rejected",
