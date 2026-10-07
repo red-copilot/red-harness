@@ -364,7 +364,7 @@ class DockerAdapter:
         ):
             raise AgentError("Docker Agent offline networking is incompatible with per-run Gateway")
 
-        container_name = ("rh_agent_" + run_dir.name.lower()).replace("-", "_")[:63]
+        container_name = ("harness_agent_" + run_dir.name.lower()).replace("-", "_")[:63]
         sidecar_gateway = gateway_enabled and gateway_network is not None
         host_gateway = gateway_enabled and not sidecar_gateway and self.spec.network != "host"
 
