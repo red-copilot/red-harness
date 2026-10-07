@@ -5,8 +5,7 @@ runtime adds durable, replayable state without requiring the Harness to own the 
 
 ## Design principles
 
-- **Events are authoritative.** `world.events.jsonl` is append-only.
-- **Snapshots are derived.** `world.snapshot.json` is rebuilt from events and is safe to discard.
+- **Events are authoritative.** The SQLite `world_events` stream in `world.db` is canonical.\n- **Projections are derived.** `world_objects`, `world.snapshot.json`, and JSONL exports can be rebuilt from events.
 - **Core defines mechanics, domains define semantics.** Core type strings are intentionally open.
 - **The world is not assumed to be a DAG.** Relations may form arbitrary directed graphs.
 - **Beliefs are not facts.** Observations and hypotheses may carry confidence and provenance.
@@ -61,8 +60,9 @@ materializes the current snapshot after each mutation.
 Every normal Harness run creates:
 
 ```text
-world.events.jsonl
-world.snapshot.json
+world.db                 # authoritative transactional state
+world.events.jsonl       # compatibility/debug export
+world.snapshot.json      # compatibility/debug export
 ```
 
 The task objective is seeded as the root Goal when the run starts and updated with the final
@@ -78,7 +78,7 @@ Example:
 {"schema_version":"redharness.world.submit/v1","kind":"capability","op":"upsert","object":{"id":"cap-shell","type":"host.shell","subject":"agent","scope":"host-1","attributes":{}}}
 ```
 
-Agents never write `world.events.jsonl` or `world.snapshot.json` directly. Invalid inbox lines are
+Agents never write `world.db`, `world.events.jsonl`, or `world.snapshot.json` directly. Invalid inbox lines are
 rejected and summarized in the Harness trace. This keeps the world log replayable even when an
 Agent emits malformed or adversarial state.
 
@@ -95,28 +95,29 @@ Each run materializes `world.context.txt` from the current snapshot and exposes 
 `REDHARNESS_WORLD_CONTEXT`. The projection prioritizes goals, capabilities, open hypotheses,
 artifacts, bounded observations, recent failures, and relations.
 
-A new run may continue from a previous authoritative event log:
+A new run may continue directly from a previous SQLite state database:
 
 ```bash
 redharness run benchmarks/examples/hello/task.yaml \
   --agent agents/examples/pi.yaml \
-  --resume-world .redharness/runs/<run-id>/world.events.jsonl
+  --resume-world .redharness/runs/<run-id>/world.db
 ```
 
-The new run copies and replays the prior world event log, re-activates the root task goal, builds a
-fresh context projection, and starts a new Agent session. It does not replay or depend on the old
-provider transcript.
+The new run copies the prior SQLite state database, re-activates the root task goal, builds a fresh
+context projection, and starts a new Agent session. Legacy `world.events.jsonl` files are still
+accepted and imported into SQLite on first open. Provider transcripts are never required.
 
 
 ## Repository boundary
 
 World-state consumers depend on the `WorldRepository` protocol rather than on JSONL paths. The
-current implementation is `FileWorldRepository`, which persists `world.events.jsonl` and a
-materialized snapshot. `WorldStore` remains as a compatibility alias.
+default implementation is `SQLiteWorldRepository`, backed by `world.db` with WAL, persistent
+event sequence numbers, event-id deduplication, optimistic `expected_revision` checks, and a
+materialized `world_objects` projection. `FileWorldRepository` and `WorldStore` remain available
+for compatibility and migration.
 
-Both the Orchestrator and State Plane API accept a repository factory. A future SQLite/PostgreSQL
-backend can therefore replace the file implementation without changing Agent, planner, or run
-semantics.
+Both the Orchestrator and State Plane API continue to accept a repository factory, so a future
+PostgreSQL implementation can replace SQLite without changing Agent, planner, or run semantics.
 
 The authoritative source remains the event stream. Snapshots are derived and must never contain
 state that cannot be reconstructed from repository events.
@@ -173,7 +174,7 @@ be treated as ground truth about the target.
 
 ## Live ingestion and single-writer semantics
 
-Agent processes never append directly to the canonical `world.events.jsonl`. They submit untrusted
+Agent processes never write the canonical `world.db` directly. They submit untrusted
 JSONL mutations to `world.inbox.jsonl`.
 
 `WorldInboxCursor` incrementally consumes only newly appended lines, validates each submission, and
@@ -196,6 +197,7 @@ Both external benchmark runs and ordinary Orchestrator runs use this session pat
 adapter exposes `start_session()`. Legacy one-shot adapters retain end-of-run ingestion as a
 compatibility fallback.
 
-The file-backed repository is still process-local/single-writer oriented. Multi-process agent
-writers must continue to submit through the Harness boundary rather than writing the canonical
-event log directly.
+SQLite is the default transactional backend. Multiple readers and multiple repository instances may
+share a run database; writes are serialized by SQLite and can use `expected_revision` for optimistic
+conflict detection. Agent processes must still submit through the Harness boundary rather than
+opening the canonical database directly.
