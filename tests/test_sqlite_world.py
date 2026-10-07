@@ -58,8 +58,8 @@ def test_sqlite_world_repository_deduplicates_event_ids(tmp_path) -> None:
         object={"id": "goal-1", "description": "demo"},
     )
 
-    first = repository.append(event)
-    second = repository.append(event)
+    first = repository.append(event, expected_revision=0)
+    second = repository.append(event, expected_revision=0)
 
     assert first.revision == 1
     assert second.revision == 1
