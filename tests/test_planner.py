@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
-from redharness.planner import HeuristicSkillPlanner, RollingHorizonPlanner
-from redharness.progress import ProgressLedger
-from redharness.skills import SkillSpec
-from redharness.world import Capability, Observation, WorldSnapshot
+from harness.planner import HeuristicSkillPlanner, RollingHorizonPlanner
+from harness.progress import ProgressLedger
+from harness.skills import SkillSpec
+from harness.world import Capability, Observation, WorldSnapshot
 
 
 def test_planner_filters_unmet_requirements() -> None:

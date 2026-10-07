@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from redharness.queue import JobPayload, SQLiteQueue
+from harness.queue import JobPayload, SQLiteQueue
 
 
 def test_queue_claim_heartbeat_complete_and_leaderboard(tmp_path: Path) -> None:
