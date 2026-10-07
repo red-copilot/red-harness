@@ -444,6 +444,7 @@ Each run is stored beneath `.redharness/runs/<run_id>/`:
 result.json
 trace.jsonl
 events.jsonl
+world.db
 world.events.jsonl
 world.snapshot.json
 world.context.txt
@@ -561,3 +562,19 @@ revision, repeated no-progress, or contradicted hypotheses.
 
 This endpoint is advisory. Planner output is never executed automatically. Work still enters the
 Coordination Plane only through an explicit publish step.
+
+
+### SQLite World State
+
+SQLite is the default World State backend. `world.db` is authoritative; `world.events.jsonl` and
+`world.snapshot.json` are compatibility/debug exports. The database uses WAL mode, persistent event
+sequence numbers, event-id deduplication, and optional optimistic `expected_revision` checks.
+
+Incremental consumers can request:
+
+```text
+GET /v1/runs/{run_id}/world/events?after_sequence=<sequence>
+```
+
+Each returned event includes its persistent `sequence` cursor. Legacy JSONL state can still be
+passed to `--resume-world`; new runs may resume directly from a previous `world.db`.
