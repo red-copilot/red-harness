@@ -238,6 +238,18 @@ class BenchmarkRunner:
                         data=feedback_data,
                     )
                 )
+                if feedback_data["replan_required"]:
+                    await agent_session.observe(
+                        AgentObservation(
+                            type="solver.replan_requested",
+                            data={
+                                "reasons": feedback_data["replan_reasons"],
+                                "world_revision": revision_after_feedback,
+                                "context_path": "world.context.txt",
+                                "progress_path": "progress.json",
+                            },
+                        )
+                    )
                 if revision_after_feedback != revision_before_feedback:
                     await agent_session.observe(
                         AgentObservation(
