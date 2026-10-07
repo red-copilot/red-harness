@@ -48,7 +48,7 @@ def _run_monitored(
     task: TaskSpec,
     trace: TraceRecorder,
 ) -> AgentResult:
-    event_file = run_dir / "events.jsonl"
+    event_file = run_dir / "runtime.events.jsonl"
     event_file.write_text("", encoding="utf-8")
     stdout_path = run_dir / "agent.stdout.log"
     stderr_path = run_dir / "agent.stderr.log"
@@ -131,7 +131,7 @@ class CLIAdapter:
                 "HARNESS_RUN_DIR": str(run_dir),
                 "HARNESS_OBJECTIVE": task.objective.description,
                 "HARNESS_ENV_PROJECT": environment_project or "",
-                "HARNESS_EVENT_FILE": str(run_dir / "events.jsonl"),
+                "HARNESS_EVENT_FILE": str(run_dir / "agent.events.jsonl"),
                 "HARNESS_WORLD_INBOX": str(run_dir / "world.inbox.jsonl"),
                 "HARNESS_WORLD_CONTEXT": str(run_dir / "world.context.txt"),
                 "HARNESS_SUBMISSION_INBOX": str(run_dir / "submission.inbox.jsonl"),
@@ -306,7 +306,7 @@ class DockerAdapter:
                 "-e",
                 f"HARNESS_ENV_PROJECT={environment_project or ''}",
                 "-e",
-                "HARNESS_EVENT_FILE=/run/harness/events.jsonl",
+                "HARNESS_EVENT_FILE=/run/harness/agent.events.jsonl",
                 "-e",
                 "HARNESS_WORLD_INBOX=/run/harness/world.inbox.jsonl",
                 "-e",
