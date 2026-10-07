@@ -28,10 +28,10 @@ dev = [
 ]
 
 [project.scripts]
-redharness = "redharness.cli:app"
+harness = "harness.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/redharness"]
+packages = ["src/harness"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
