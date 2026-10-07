@@ -221,14 +221,6 @@ class ContainerPiAdapter(PiAdapter):
                 "gateway_url": gateway_url,
                 "gateway_token": gateway_token,
                 "gateway_network": gateway_network,
-                "network_profile": self.spec.network_profile,
-                "network_profile_enforcement": (
-                    "docker-none"
-                    if self.spec.network_profile == "offline"
-                    else "advisory"
-                    if self.spec.network_profile == "benchmark-only"
-                    else "unrestricted"
-                ),
             },
         )
 
@@ -314,6 +306,14 @@ class ContainerPiAdapter(PiAdapter):
                 "tools": self.pi.tools,
                 "gateway_injected": gateway_enabled,
                 "gateway_network": gateway_network,
+                "network_profile": self.spec.network_profile,
+                "network_profile_enforcement": (
+                    "docker-none"
+                    if self.spec.network_profile == "offline"
+                    else "advisory"
+                    if self.spec.network_profile == "benchmark-only"
+                    else "unrestricted"
+                ),
             },
         )
 
