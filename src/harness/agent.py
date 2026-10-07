@@ -137,6 +137,7 @@ class CLIAdapter:
                 "HARNESS_SUBMISSION_INBOX": str(run_dir / "submission.inbox.jsonl"),
                 "HARNESS_FEEDBACK_FILE": str(run_dir / "agent.feedback.jsonl"),
                 "HARNESS_PROGRESS_FILE": str(run_dir / "progress.json"),
+                "HARNESS_NETWORK_PROFILE": self.spec.network_profile,
                 "HARNESS_SEED": str(seed),
             }
         )
@@ -316,6 +317,8 @@ class DockerAdapter:
                 "HARNESS_FEEDBACK_FILE=/run/harness/agent.feedback.jsonl",
                 "-e",
                 "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
+                "-e",
+                f"HARNESS_NETWORK_PROFILE={self.spec.network_profile}",
                 "-e",
                 f"HARNESS_SEED={seed}",
             ]
