@@ -38,6 +38,7 @@ class SQLiteWorldRepository:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA synchronous=NORMAL")
         return connection
 
     def _initialize(self) -> None:
@@ -191,15 +192,6 @@ class SQLiteWorldRepository:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 current_revision = self._current_revision(connection)
-                if (
-                    expected_revision is not None
-                    and expected_revision != current_revision
-                ):
-                    raise WorldConflictError(
-                        f"world revision conflict: expected {expected_revision}, "
-                        f"current {current_revision}"
-                    )
-
                 existing = connection.execute(
                     "SELECT payload_json FROM world_events WHERE event_id=?",
                     (event.id,),
@@ -211,6 +203,15 @@ class SQLiteWorldRepository:
                         )
                     connection.execute("COMMIT")
                     return self._load_snapshot(connection)
+
+                if (
+                    expected_revision is not None
+                    and expected_revision != current_revision
+                ):
+                    raise WorldConflictError(
+                        f"world revision conflict: expected {expected_revision}, "
+                        f"current {current_revision}"
+                    )
 
                 snapshot = self._load_snapshot(connection)
                 candidate = snapshot.model_copy(deep=True)
