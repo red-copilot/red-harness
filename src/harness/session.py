@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from .agent import AgentResult
+from .runtime_paths import runtime_event_path
 
 
 EventSource = Literal["runtime", "agent"]
@@ -74,7 +75,7 @@ class OneShotAgentSession:
         self.run_kwargs = run_kwargs
         self.run_dir = run_dir
         self.poll_interval = poll_interval
-        self.runtime_event_path = run_dir / "runtime.events.jsonl"
+        self.runtime_event_path = runtime_event_path(run_dir)
         self.agent_event_path = run_dir / "agent.events.jsonl"
         self.feedback_path = run_dir / "agent.feedback.jsonl"
         self.control_path = run_dir / "agent.control.jsonl"
