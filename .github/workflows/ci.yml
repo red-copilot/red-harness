@@ -18,6 +18,14 @@ jobs:
       - run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.0.4
       - run: pi --version
       - run: python -m pip install -e ".[dev]"
+      - name: enforce harness namespace
+        run: |
+          set -euo pipefail
+          if grep -R -nE 'redharness|REDHARNESS_|\.redharness|rh_pi_|harness\.(world|progress)' \
+            --exclude-dir=.git .; then
+            echo "legacy or non-standard harness namespace detected" >&2
+            exit 1
+          fi
       - run: ruff check .
       - run: pytest -q
       - run: harness validate benchmarks/examples/hello/task.yaml
