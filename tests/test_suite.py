@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from redharness.models import load_agent, load_suite
-from redharness.suite import SuiteRunner
+from harness.models import load_agent, load_suite
+from harness.suite import SuiteRunner
 
 
 def test_suite_parallel_pass_k_domain_and_seed(tmp_path: Path) -> None:

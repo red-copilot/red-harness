@@ -5,13 +5,13 @@ import json
 import time
 from pathlib import Path
 
-from redharness.agent import AgentResult
-from redharness.budget import UsageMetrics
-from redharness.failures import FailureClass, classify_failure
-from redharness.pi_container import ContainerPiSession
-from redharness.progress import ProgressLedger
-from redharness.session import AgentEvent, AgentObservation, OneShotAgentSession
-from redharness.trace import TraceRecorder
+from harness.agent import AgentResult
+from harness.budget import UsageMetrics
+from harness.failures import FailureClass, classify_failure
+from harness.pi_container import ContainerPiSession
+from harness.progress import ProgressLedger
+from harness.session import AgentEvent, AgentObservation, OneShotAgentSession
+from harness.trace import TraceRecorder
 
 
 class FakeStreamingAdapter:
@@ -176,7 +176,7 @@ def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path)
         calls.append(command)
         return type("Result", (), {"returncode": 0})()
 
-    monkeypatch.setattr("redharness.pi_container.subprocess.run", fake_run)
+    monkeypatch.setattr("harness.pi_container.subprocess.run", fake_run)
     run_dir = tmp_path / "run_demo"
     run_dir.mkdir()
     session = ContainerPiSession(

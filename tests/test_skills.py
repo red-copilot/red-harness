@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from redharness.skills import SkillSpec, load_skill, scan_skills
+from harness.skills import SkillSpec, load_skill, scan_skills
 
 
 def test_load_skill_contract() -> None:
@@ -16,7 +16,7 @@ def test_scan_skills_reports_invalid_files(tmp_path: Path) -> None:
     valid = tmp_path / "valid.yaml"
     valid.write_text(
         """
-apiVersion: redharness/skill/v1
+apiVersion: harness/skill/v1
 id: demo
 domain: general
 description: Demo skill

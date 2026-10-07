@@ -1,6 +1,6 @@
 import json
 
-from redharness.benchmark.tsec import extract_flags
+from harness.benchmark.tsec import extract_flags
 
 
 def test_extract_flags_from_pi_jsonl() -> None:
@@ -9,14 +9,14 @@ def test_extract_flags_from_pi_jsonl() -> None:
             "type": "message_end",
             "message": {
                 "role": "assistant",
-                "content": [{"type": "text", "text": "REDHARNESS_FLAG=flag{one}"}],
+                "content": [{"type": "text", "text": "HARNESS_FLAG=flag{one}"}],
             },
         },
         {
             "type": "message_end",
             "message": {
                 "role": "assistant",
-                "content": "REDHARNESS_FLAG=flag{two} REDHARNESS_FLAG=flag{one}",
+                "content": "HARNESS_FLAG=flag{two} HARNESS_FLAG=flag{one}",
             },
         },
     ]
