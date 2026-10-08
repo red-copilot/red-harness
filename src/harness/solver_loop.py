@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 from pathlib import Path
 
 from .aci import TypedACI
@@ -27,7 +28,7 @@ class SolverLoopStats:
 class SolverLoop:
     """Shared state/verification loop for interactive AgentSession execution."""
 
-    VERIFY_EVENTS = {"tool.result", "progress.updated", "world.observe"}
+    VERIFY_EVENTS: ClassVar[frozenset[str]] = frozenset({"tool.result", "progress.updated", "world.observe"})
 
     def __init__(
         self,
