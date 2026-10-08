@@ -17,6 +17,7 @@ from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .runtime import bootstrap_solver
+from .runtime.lifecycle import resolve_run_status
 from .runtime.projections import finalize_world_goal, network_result, world_result
 from .runtime.results import persist_run_result
 from .trace import TraceRecorder
@@ -164,7 +165,7 @@ class Orchestrator:
             usage = agent_result.metrics
 
             if agent_result.timed_out:
-                status = "timeout"
+                status = resolve_run_status(timed_out=True, budget_exceeded=False)
                 verification = {
                     "success": False,
                     "score": 0.0,
@@ -172,7 +173,7 @@ class Orchestrator:
                     "milestones": {},
                 }
             elif agent_result.budget_exceeded:
-                status = "budget_exceeded"
+                status = resolve_run_status(timed_out=False, budget_exceeded=True)
                 verification = {
                     "success": False,
                     "score": 0.0,
@@ -195,7 +196,7 @@ class Orchestrator:
                 if verified.success:
                     progress.objective_completed = True
                 progress.write(progress_path)
-                status = "finished"
+                status = resolve_run_status(timed_out=False, budget_exceeded=False)
         except Exception as exc:  # noqa: BLE001 - orchestrator boundary records all failures.
             status = "error"
             verification = {
