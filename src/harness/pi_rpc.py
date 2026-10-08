@@ -138,6 +138,7 @@ class ContainerPiRpcSession:
             gateway_url=gateway_url, gateway_token=gateway_token,
             host_gateway=gateway_enabled and not sidecar_gateway and network != "host",
         )
+        prompt = command.pop()  # CLI text is not a valid RPC prompt argument.
         # The Docker root mount is read-only; only explicit Agent-owned paths
         # are writable. No Docker socket or Harness state DB is mounted rw.
         root_mount = f"{run_dir.resolve()}:/run/harness:rw"
@@ -150,8 +151,12 @@ class ContainerPiRpcSession:
             ("home", "home"),
             ("workspace", "workspace"),
         ]
+        image_index = command.index(str(adapter.spec.image))
         for source, destination in mounts:
-            command.extend(["-v", f"{(run_dir / source).resolve()}:/run/harness/{destination}:rw"])
+            command[image_index:image_index] = [
+                "-v", f"{(run_dir / source).resolve()}:/run/harness/{destination}:rw",
+            ]
+            image_index += 2
         command[command.index("-w") + 1] = "/run/harness/workspace"
         for old, new in (
             ("HARNESS_EVENT_FILE=/run/harness/events.jsonl",
@@ -163,7 +168,6 @@ class ContainerPiRpcSession:
         ):
             assert old in command
             command[command.index(old)] = new
-        prompt = command.pop()  # CLI text is not a valid RPC prompt argument.
         command[command.index("--mode") + 1] = "rpc"
         command.insert(2, "-i")  # Keep container stdin open for RPC commands.
         adapter.trace.emit("agent.started", data={
