@@ -72,7 +72,7 @@ def test_recovery_restores_progress(tmp_path: Path) -> None:
     run_dir = tmp_path / "safe-run"
     run_dir.mkdir()
     FileCheckpointStore(run_dir / "checkpoint.json").save(
-        RunCheckpoint(run_id="safe-run", world_revision=2, event_offset=19)
+        RunCheckpoint(run_id="safe-run", world_revision=2, event_offset=19, feedback_offset=0)
     )
     ProgressLedger(verified_actions=2).write(run_dir / "progress.json")
     checkpoint, progress = load_recovery_state(run_dir)
@@ -84,7 +84,7 @@ def test_recovery_refuses_unresolved_actions(tmp_path: Path) -> None:
     run_dir = tmp_path / "interrupted-run"
     run_dir.mkdir()
     FileCheckpointStore(run_dir / "checkpoint.json").save(
-        RunCheckpoint(run_id="interrupted-run", world_revision=1,
+        RunCheckpoint(run_id="interrupted-run", world_revision=1, event_offset=0, feedback_offset=0,
                       pending_actions=[{"tool_call_id": "call-1", "status": "running"}])
     )
     ProgressLedger().write(run_dir / "progress.json")
@@ -96,7 +96,7 @@ def test_recovery_rejects_stale_world_revision(tmp_path: Path) -> None:
     run_dir = tmp_path / "revision-run"
     run_dir.mkdir()
     FileCheckpointStore(run_dir / "checkpoint.json").save(
-        RunCheckpoint(run_id="revision-run", world_revision=3)
+        RunCheckpoint(run_id="revision-run", world_revision=3, event_offset=0, feedback_offset=0)
     )
     ProgressLedger().write(run_dir / "progress.json")
     with pytest.raises(ValueError, match="world revision mismatch"):
