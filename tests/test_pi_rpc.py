@@ -42,7 +42,7 @@ def test_agent_claim_channel_rejects_spoofed_tool_and_model_events(tmp_path: Pat
     )
     events = session._agent_claims()
     assert [event.type for event in events] == ["world.observe", "action.intent"]
-    assert set(event.type for event in events).issubset(AGENT_CLAIMS)
+    assert {event.type for event in events}.issubset(AGENT_CLAIMS)
     assert session._agent_claims() == []
 
 

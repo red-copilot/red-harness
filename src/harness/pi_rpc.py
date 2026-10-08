@@ -219,7 +219,7 @@ class ContainerPiRpcSession:
                     self._budget._account(event.type, event.data)
                     self._budget._check()
                     self._events.put_nowait(event)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - transport boundary captures protocol failure.
             self._error = exc
         finally:
             for future in self._responses.values():
@@ -272,7 +272,7 @@ class ContainerPiRpcSession:
                     event = await asyncio.wait_for(
                         self._events.get(), timeout=min(0.1, remaining),
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
                 if event is None:
                     break
@@ -334,7 +334,7 @@ class ContainerPiRpcSession:
             self.process.stdin.close()
         try:
             await asyncio.wait_for(self.process.wait(), timeout=3)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self.process.kill()
             await self.process.wait()
         finally:
