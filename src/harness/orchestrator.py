@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import shutil
 import sqlite3
 import time
@@ -17,17 +16,13 @@ from .budget import UsageMetrics
 from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
-from .progress import ProgressLedger
-from .skills import load_skills
-from .solver_loop import SolverLoop
+from .runtime import bootstrap_solver
+from .runtime.lifecycle import resolve_run_status
+from .runtime.projections import finalize_world_goal, network_result, world_result
+from .runtime.results import persist_run_result
 from .trace import TraceRecorder
 from .verifier import run_verifier
-from .world import (
-    Goal,
-    SQLiteWorldRepository,
-    WorldContextBuilder,
-    WorldRepository,
-)
+from .world import Goal, SQLiteWorldRepository, WorldRepository
 
 
 def _sha256(path: Path) -> str:
@@ -81,7 +76,6 @@ class Orchestrator:
                     source_db.backup(target_db)
             else:
                 shutil.copyfile(source, world_event_path)
-        world = self.world_repository_factory(world_event_path)
         root_goal = Goal(
             id=f"goal:{task.id}:objective",
             description=task.objective.description,
@@ -89,26 +83,20 @@ class Orchestrator:
             priority=1.0,
             attributes={"task_id": task.id, "category": task.category},
         )
-        world.upsert("goal", root_goal)
-        context_builder = WorldContextBuilder()
-        (run_dir / "world.context.txt").write_text(
-            context_builder.render(world.snapshot, query=task.objective.description),
-            encoding="utf-8",
-        )
-        progress = ProgressLedger(active_goal=root_goal.id)
-        progress_path = run_dir / "progress.json"
-        progress.write(progress_path)
-        solver_loop = SolverLoop(
-            world=world,
-            progress=progress,
+        runtime = bootstrap_solver(
             run_dir=run_dir,
             trace=trace,
+            goal=root_goal,
             actor=f"agent:{agent.id}",
             context_query=task.objective.description,
-            planned_world_revision=world.snapshot.revision,
-            context_builder=context_builder,
-            skills=load_skills(self.skills_root),
+            skills_root=self.skills_root,
+            world_repository_factory=self.world_repository_factory,
         )
+        world = runtime.world
+        context_builder = runtime.context_builder
+        progress = runtime.progress
+        solver_loop = runtime.loop
+        progress_path = run_dir / "progress.json"
         started = time.monotonic()
         status = "running"
         usage = UsageMetrics()
@@ -177,7 +165,7 @@ class Orchestrator:
             usage = agent_result.metrics
 
             if agent_result.timed_out:
-                status = "timeout"
+                status = resolve_run_status(timed_out=True, budget_exceeded=False)
                 verification = {
                     "success": False,
                     "score": 0.0,
@@ -185,7 +173,7 @@ class Orchestrator:
                     "milestones": {},
                 }
             elif agent_result.budget_exceeded:
-                status = "budget_exceeded"
+                status = resolve_run_status(timed_out=False, budget_exceeded=True)
                 verification = {
                     "success": False,
                     "score": 0.0,
@@ -208,7 +196,7 @@ class Orchestrator:
                 if verified.success:
                     progress.objective_completed = True
                 progress.write(progress_path)
-                status = "finished"
+                status = resolve_run_status(timed_out=False, budget_exceeded=False)
         except Exception as exc:  # noqa: BLE001 - orchestrator boundary records all failures.
             status = "error"
             verification = {
@@ -260,58 +248,18 @@ class Orchestrator:
             },
             "metrics": metrics,
             "progress": progress.model_dump(mode="json"),
-            "network": {
-                "profile": agent.network_profile,
-                "enforcement": (
-                    "docker-none"
-                    if agent.network_profile == "offline" and agent.type in {"docker", "pi"}
-                    else "advisory"
-                    if agent.network_profile == "benchmark-only"
-                    else "unrestricted"
-                ),
-            },
+            "network": network_result(agent),
             "versions": {
                 "harness": __version__,
                 "task_sha256": _sha256(task_path),
                 "agent_sha256": _sha256(agent_path),
             },
         }
-        root_goal.status = "completed" if result["success"] else "failed"
-        root_goal.attributes.update(
-            {"run_status": status, "score": result["score"], "success": result["success"]}
+        finalize_world_goal(
+            world=world, goal=root_goal, context_builder=context_builder,
+            run_dir=run_dir, status=status, success=result["success"], score=result["score"],
         )
-        world.upsert("goal", root_goal)
-        (run_dir / "world.context.txt").write_text(
-            context_builder.render(world.snapshot),
-            encoding="utf-8",
-        )
-        result["world"] = {
-            "revision": world.snapshot.revision,
-            "resumed": resume_world_events is not None,
-            "agent_authored_records": sum(
-                1 for event in world.events() if event.actor == f"agent:{agent.id}"
-            ),
-            "aci": {
-                "accepted_events": solver_loop.stats.aci_accepted,
-                "rejected_events": solver_loop.stats.aci_rejected,
-                "world_mutations": solver_loop.stats.aci_world_mutations,
-            },
-            "legacy_inbox": {
-                "accepted": solver_loop.stats.inbox_accepted,
-                "rejected": solver_loop.stats.inbox_rejected,
-            },
-        }
-        (run_dir / "result.json").write_text(
-            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        trace.emit(
-            "run.finished",
-            data={
-                "status": status,
-                "success": result["success"],
-                "score": result["score"],
-                "metrics": metrics,
-            },
-        )
+        result["world"] = world_result(world=world, solver_loop=solver_loop, agent_id=agent.id)
+        result["world"]["resumed"] = resume_world_events is not None
+        persist_run_result(run_dir=run_dir, trace=trace, result=result)
         return result

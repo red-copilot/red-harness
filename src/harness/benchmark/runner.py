@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 import uuid
 from collections.abc import Callable
@@ -10,18 +9,17 @@ from pathlib import Path
 
 from ..agent import AgentResult, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
-from ..progress import ProgressLedger
 from ..session import AgentObservation
-from ..skills import load_skills
-from ..solver_loop import SolverLoop
 from ..trace import TraceRecorder
+from ..runtime import bootstrap_solver
+from ..runtime.lifecycle import resolve_run_status
+from ..runtime.projections import finalize_world_goal, network_result, world_result
+from ..runtime.results import persist_run_result
 from ..world import (
     Entity,
     Failure,
     Goal,
     Observation,
-    SQLiteWorldRepository,
-    WorldContextBuilder,
 )
 from .base import BenchmarkAdapter, BenchmarkCase, Submission
 from .protocol import SubmissionInbox
@@ -69,44 +67,37 @@ class BenchmarkRunner:
                 data={"error_type": type(exc).__name__, "message": str(exc)},
             )
             raise
-        world = SQLiteWorldRepository(run_dir / "world.events.jsonl")
-        context_builder = WorldContextBuilder()
         started = time.monotonic()
-
-        progress = ProgressLedger(active_goal=f"goal:{session.case_id}:objective")
-        progress_path = run_dir / "progress.json"
-        progress.write(progress_path)
-
         root_goal = Goal(
             id=f"goal:{session.case_id}:objective",
             description=session.objective.description,
             status="active",
             priority=1.0,
-            attributes={
-                "benchmark": session.benchmark,
-                "case_id": session.case_id,
-            },
+            attributes={"benchmark": session.benchmark, "case_id": session.case_id},
         )
-        world.upsert("goal", root_goal)
-
-        for target in session.targets:
-            world.upsert(
-                "entity",
-                Entity(
-                    id=target.id,
-                    type="benchmark.target",
-                    attributes={
-                        "address": target.address,
-                        **target.metadata,
-                    },
-                ),
-                actor=f"benchmark:{session.benchmark}",
+        targets = [
+            Entity(
+                id=target.id,
+                type="benchmark.target",
+                attributes={"address": target.address, **target.metadata},
             )
-
-        (run_dir / "world.context.txt").write_text(
-            context_builder.render(world.snapshot, query=session.objective.description),
-            encoding="utf-8",
+            for target in session.targets
+        ]
+        runtime = bootstrap_solver(
+            run_dir=run_dir,
+            trace=trace,
+            goal=root_goal,
+            actor=f"agent:{agent.id}",
+            context_query=session.objective.description,
+            skills_root=self.skills_root,
+            targets=targets,
+            target_actor=f"benchmark:{session.benchmark}",
         )
+        world = runtime.world
+        context_builder = runtime.context_builder
+        progress = runtime.progress
+        solver_loop = runtime.loop
+        progress_path = run_dir / "progress.json"
 
         task = TaskSpec(
             apiVersion="harness/v1",
@@ -140,18 +131,6 @@ class BenchmarkRunner:
         submitted_keys: set[tuple[str, str]] = set()
         teardown_error: str | None = None
         submission_inbox = SubmissionInbox(run_dir / "submission.inbox.jsonl")
-        solver_loop = SolverLoop(
-            world=world,
-            progress=progress,
-            run_dir=run_dir,
-            trace=trace,
-            actor=f"agent:{agent.id}",
-            context_query=session.objective.description,
-            planned_world_revision=world.snapshot.revision,
-            context_builder=context_builder,
-            skills=load_skills(self.skills_root),
-        )
-
         async def submit_candidate(submission: Submission, agent_session=None) -> bool:
             key = (submission.type, submission.value)
             if key in submitted_keys:
@@ -330,27 +309,14 @@ class BenchmarkRunner:
         if agent_result is None:
             raise RuntimeError("agent did not start")
 
-        status = (
-            "objective_completed"
-            if progress.objective_completed
-            else "timeout"
-            if agent_result.timed_out
-            else "budget_exceeded"
-            if agent_result.budget_exceeded
-            else "finished"
+        status = resolve_run_status(
+            objective_completed=progress.objective_completed,
+            timed_out=agent_result.timed_out,
+            budget_exceeded=bool(agent_result.budget_exceeded),
         )
-        root_goal.status = "completed" if evaluation.success else "failed"
-        root_goal.attributes.update(
-            {
-                "run_status": status,
-                "score": evaluation.score,
-                "success": evaluation.success,
-            }
-        )
-        world.upsert("goal", root_goal)
-        (run_dir / "world.context.txt").write_text(
-            context_builder.render(world.snapshot),
-            encoding="utf-8",
+        finalize_world_goal(
+            world=world, goal=root_goal, context_builder=context_builder,
+            run_dir=run_dir, status=status, success=evaluation.success, score=evaluation.score,
         )
 
         result = {
@@ -377,50 +343,13 @@ class BenchmarkRunner:
                 "ok": teardown_error is None,
                 "error": teardown_error,
             },
-            "world": {
-                "revision": world.snapshot.revision,
-                "agent_authored_records": sum(
-                    1
-                    for event in world.events()
-                    if event.actor == f"agent:{agent.id}"
-                ),
-                "aci": {
-                    "accepted_events": solver_loop.stats.aci_accepted,
-                    "rejected_events": solver_loop.stats.aci_rejected,
-                    "world_mutations": solver_loop.stats.aci_world_mutations,
-                },
-                "legacy_inbox": {
-                    "accepted": solver_loop.stats.inbox_accepted,
-                    "rejected": solver_loop.stats.inbox_rejected,
-                },
-            },
-            "network": {
-                "profile": agent.network_profile,
-                "enforcement": (
-                    "docker-none"
-                    if agent.network_profile == "offline" and agent.type in {"docker", "pi"}
-                    else "advisory"
-                    if agent.network_profile == "benchmark-only"
-                    else "unrestricted"
-                ),
-            },
+            "world": world_result(world=world, solver_loop=solver_loop, agent_id=agent.id),
+            "network": network_result(agent),
             "progress": progress.model_dump(mode="json"),
             "metrics": {
                 "duration_ms": int((time.monotonic() - started) * 1000),
                 **agent_result.metrics.as_dict(),
             },
         }
-        (run_dir / "result.json").write_text(
-            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        trace.emit(
-            "run.finished",
-            data={
-                "status": status,
-                "success": result["success"],
-                "score": result["score"],
-                "metrics": result["metrics"],
-            },
-        )
+        persist_run_result(run_dir=run_dir, trace=trace, result=result)
         return result
