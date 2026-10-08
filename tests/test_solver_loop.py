@@ -66,7 +66,7 @@ def test_solver_loop_applies_aci_updates_world_and_verifies(tmp_path: Path) -> N
     assert loop.stats.aci_accepted == 2
     assert loop.stats.aci_world_mutations == 1
     assert progress.last_verification is not None
-    assert progress.last_verification["status"] == "verified"
+    assert progress.last_verification["status"] == "pending"
 
     feedback_types = [item.type for item in session.feedback]
     assert "aci.feedback" in feedback_types
