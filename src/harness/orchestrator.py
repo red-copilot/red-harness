@@ -17,10 +17,10 @@ from .budget import UsageMetrics
 from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
+from .runtime import bootstrap_solver
 from .trace import TraceRecorder
 from .verifier import run_verifier
 from .world import Goal, SQLiteWorldRepository, WorldRepository
-from .runtime import bootstrap_solver
 
 
 def _sha256(path: Path) -> str:
