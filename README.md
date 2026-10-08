@@ -556,9 +556,11 @@ GET /v1/runs/{run_id}/plan/rolling?horizon=1..3
 ```
 
 It combines the current World Snapshot, Skill Registry, and `progress.json` to return at most three
-`PlannedAction` records. Each action includes a skill, expected observations, a compact rationale,
-and explicit replan triggers such as action failure, missing expected observations, changed world
-revision, repeated no-progress, or contradicted hypotheses.
+`PlannedAction` records. Planner v2 ranks applicable skills using goal relevance, expected
+information gain, novelty, declared and observed success prior, execution friction, repeated-use
+penalty, and per-skill failure history. Each action includes the resulting rationale and explicit
+replan triggers such as action failure, missing expected observations, changed world revision,
+repeated no-progress, or contradicted hypotheses.
 
 The rolling planner is also used by the interactive SolverLoop. A session receives an initial
 `solver.plan.updated` observation and receives a new plan when verification, repeated no-progress,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 from typing import Protocol
 
 from pydantic import BaseModel, Field
@@ -10,14 +11,20 @@ from .skills import SkillSpec, StateSelector
 from .world import WorldSnapshot
 
 
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]{3,}")
+
+
 class PlanCandidate(BaseModel):
     skill_id: str
     score: float = Field(ge=0.0, le=1.0)
     novelty: float = Field(ge=0.0, le=1.0)
+    goal_relevance: float = Field(ge=0.0, le=1.0)
+    information_gain: float = Field(ge=0.0, le=1.0)
+    success_prior: float = Field(ge=0.0, le=1.0)
+    repetition_penalty: float = Field(ge=0.0, le=1.0)
+    failure_penalty: float = Field(ge=0.0, le=1.0)
     matched_requirements: int = Field(ge=0)
     expected_outputs: list[StateSelector] = Field(default_factory=list)
-
-
 
 
 class PlannedAction(BaseModel):
@@ -31,7 +38,7 @@ class PlannedAction(BaseModel):
 
 
 class RollingPlan(BaseModel):
-    planner: str = "rolling-horizon-skill-v1"
+    planner: str = "rolling-horizon-skill-v2"
     world_revision: int
     horizon: int = Field(ge=1, le=3)
     current_subgoal: str | None = None
@@ -41,12 +48,15 @@ class RollingPlan(BaseModel):
     previous_verification_status: str | None = None
     actions: list[PlannedAction] = Field(default_factory=list)
 
+
 class Planner(Protocol):
     def propose(
         self,
         snapshot: WorldSnapshot,
         skills: list[SkillSpec],
         *,
+        progress: ProgressLedger | None = None,
+        goal_text: str | None = None,
         limit: int = 5,
     ) -> list[PlanCandidate]: ...
 
@@ -82,15 +92,72 @@ def _selector_matches(snapshot: WorldSnapshot, selector: StateSelector) -> bool:
 
 
 class HeuristicSkillPlanner:
-    """Reference planner that ranks applicable skills without executing them."""
+    """Deterministic skill ranker using goal, information value, and failure memory."""
+
+    @staticmethod
+    def _tokens(value: str | None) -> set[str]:
+        if not value:
+            return set()
+        return {token.lower() for token in _TOKEN_RE.findall(value)}
+
+    @classmethod
+    def _goal_relevance(
+        cls,
+        skill: SkillSpec,
+        *,
+        goal_text: str | None,
+        current_subgoal: str | None,
+    ) -> float:
+        query_tokens = cls._tokens(
+            " ".join(value for value in (goal_text, current_subgoal) if value)
+        )
+        if not query_tokens:
+            return 0.5
+        skill_text = " ".join(
+            [
+                skill.id,
+                skill.domain,
+                skill.description,
+                *skill.tags,
+                *(selector.type for selector in skill.requires),
+                *(selector.type for selector in skill.produces),
+            ]
+        )
+        skill_tokens = cls._tokens(skill_text)
+        if not skill_tokens:
+            return 0.0
+        overlap = len(query_tokens & skill_tokens)
+        return min(1.0, overlap / max(1, len(query_tokens)))
+
+    @staticmethod
+    def _observed_success_prior(
+        skill: SkillSpec,
+        *,
+        progress: ProgressLedger,
+    ) -> float:
+        attempts = progress.skill_attempts.get(skill.id, 0)
+        verified = progress.skill_verified.get(skill.id, 0)
+        if attempts <= 0:
+            return skill.success_prior
+        observed = (verified + 1.0) / (attempts + 2.0)
+        return 0.5 * skill.success_prior + 0.5 * observed
 
     def propose(
         self,
         snapshot: WorldSnapshot,
         skills: list[SkillSpec],
         *,
+        progress: ProgressLedger | None = None,
+        goal_text: str | None = None,
         limit: int = 5,
     ) -> list[PlanCandidate]:
+        progress = progress or ProgressLedger()
+        if not goal_text:
+            goal_text = " ".join(
+                goal.description
+                for goal in snapshot.goals.values()
+                if goal.status in {"active", "pending"} and goal.is_valid_at()
+            )
         candidates: list[PlanCandidate] = []
         for skill in skills:
             if not all(_selector_matches(snapshot, selector) for selector in skill.requires):
@@ -102,14 +169,40 @@ class HeuristicSkillPlanner:
                 if not _selector_matches(snapshot, selector)
             ]
             novelty = len(novel) / len(skill.produces) if skill.produces else 0.0
+            goal_relevance = self._goal_relevance(
+                skill,
+                goal_text=goal_text,
+                current_subgoal=progress.current_subgoal,
+            )
+            information_gain = 0.6 * novelty + 0.4 * skill.information_gain
+            success_prior = self._observed_success_prior(skill, progress=progress)
+            attempts = progress.skill_attempts.get(skill.id, 0)
+            failures = progress.skill_failures.get(skill.id, 0)
+            repetition_penalty = min(1.0, attempts / 3.0)
+            failure_penalty = min(1.0, failures / max(1, attempts))
             friction = (skill.cost + skill.risk + skill.noise) / 3.0
-            score = 0.65 * novelty + 0.35 * (1.0 - friction)
+
+            raw_score = (
+                0.30 * goal_relevance
+                + 0.25 * information_gain
+                + 0.20 * success_prior
+                + 0.15 * novelty
+                + 0.10 * (1.0 - friction)
+                - 0.15 * repetition_penalty
+                - 0.20 * failure_penalty
+            )
+            score = max(0.0, min(1.0, raw_score))
 
             candidates.append(
                 PlanCandidate(
                     skill_id=skill.id,
-                    score=max(0.0, min(1.0, score)),
+                    score=score,
                     novelty=novelty,
+                    goal_relevance=goal_relevance,
+                    information_gain=information_gain,
+                    success_prior=success_prior,
+                    repetition_penalty=repetition_penalty,
+                    failure_penalty=failure_penalty,
                     matched_requirements=len(skill.requires),
                     expected_outputs=skill.produces,
                 )
@@ -119,9 +212,8 @@ class HeuristicSkillPlanner:
         return candidates[:limit]
 
 
-
 class RollingHorizonPlanner:
-    """Build a short action horizon over the existing skill candidate ranker."""
+    """Build a short action horizon over goal-aware skill candidates."""
 
     def __init__(self, candidate_planner: HeuristicSkillPlanner | None = None) -> None:
         self.candidate_planner = candidate_planner or HeuristicSkillPlanner()
@@ -142,6 +234,7 @@ class RollingHorizonPlanner:
         skills: list[SkillSpec],
         *,
         progress: ProgressLedger | None = None,
+        goal_text: str | None = None,
         horizon: int = 3,
     ) -> RollingPlan:
         horizon = max(1, min(3, horizon))
@@ -150,6 +243,8 @@ class RollingHorizonPlanner:
         candidates = self.candidate_planner.propose(
             snapshot,
             skills,
+            progress=progress,
+            goal_text=goal_text,
             limit=max(horizon * 3, horizon),
         )
 
@@ -158,9 +253,13 @@ class RollingHorizonPlanner:
             skill = by_id[candidate.skill_id]
             expected = self._expected_observations(candidate)
             rationale_parts = [
+                f"goal={candidate.goal_relevance:.2f}",
+                f"info_gain={candidate.information_gain:.2f}",
+                f"success_prior={candidate.success_prior:.2f}",
                 f"novelty={candidate.novelty:.2f}",
+                f"repetition_penalty={candidate.repetition_penalty:.2f}",
+                f"failure_penalty={candidate.failure_penalty:.2f}",
                 f"score={candidate.score:.2f}",
-                f"matched_requirements={candidate.matched_requirements}",
             ]
             if progress.current_subgoal:
                 rationale_parts.append(f"subgoal={progress.current_subgoal}")

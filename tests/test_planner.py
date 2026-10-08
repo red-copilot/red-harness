@@ -217,3 +217,91 @@ def test_rejected_submission_becomes_planner_replan_signal() -> None:
     assert plan.replan_required is True
     assert "benchmark_negative_feedback" in plan.replan_reasons
     assert "benchmark_negative_feedback" in plan.actions[0].replan_triggers
+
+
+def test_planner_prefers_goal_relevant_skill() -> None:
+    snapshot = WorldSnapshot()
+    web_skill = SkillSpec(
+        id="web-admin-discovery",
+        domain="web",
+        description="Discover hidden admin endpoints",
+        tags=["admin", "endpoint", "discovery"],
+        produces=[{"kind": "observation", "type": "web.endpoint"}],
+        information_gain=0.6,
+        success_prior=0.5,
+    )
+    dns_skill = SkillSpec(
+        id="dns-enumeration",
+        domain="dns",
+        description="Enumerate DNS records",
+        tags=["dns", "records"],
+        produces=[{"kind": "observation", "type": "dns.record"}],
+        information_gain=0.6,
+        success_prior=0.5,
+    )
+
+    candidates = HeuristicSkillPlanner().propose(
+        snapshot,
+        [dns_skill, web_skill],
+        goal_text="find the hidden admin endpoint",
+    )
+
+    assert candidates[0].skill_id == "web-admin-discovery"
+    assert candidates[0].goal_relevance > candidates[1].goal_relevance
+
+
+def test_planner_penalizes_repeated_failed_skill() -> None:
+    snapshot = WorldSnapshot()
+    repeated = SkillSpec(
+        id="repeated-path",
+        description="Probe alternate endpoint",
+        produces=[{"kind": "observation", "type": "web.endpoint"}],
+        information_gain=0.8,
+        success_prior=0.6,
+    )
+    fresh = SkillSpec(
+        id="fresh-path",
+        description="Probe alternate endpoint",
+        produces=[{"kind": "observation", "type": "web.endpoint"}],
+        information_gain=0.8,
+        success_prior=0.6,
+    )
+    progress = ProgressLedger(
+        skill_attempts={"repeated-path": 3},
+        skill_failures={"repeated-path": 3},
+    )
+
+    candidates = HeuristicSkillPlanner().propose(
+        snapshot,
+        [repeated, fresh],
+        progress=progress,
+        goal_text="probe alternate endpoint",
+    )
+
+    assert candidates[0].skill_id == "fresh-path"
+    repeated_candidate = next(item for item in candidates if item.skill_id == "repeated-path")
+    assert repeated_candidate.repetition_penalty == 1.0
+    assert repeated_candidate.failure_penalty == 1.0
+
+
+def test_verification_updates_skill_history() -> None:
+    progress = ProgressLedger()
+    progress.record_intent(
+        {
+            "action_id": "a1",
+            "skill_id": "service-discovery",
+            "description": "discover services",
+            "expected_observations": ["service found"],
+        }
+    )
+    progress.record_verification(
+        {
+            "status": "contradicted",
+            "expected_observation": "service found",
+            "actual_observation": "service not found",
+            "replan_reasons": ["expected_observation_contradicted"],
+        }
+    )
+
+    assert progress.skill_attempts["service-discovery"] == 1
+    assert progress.skill_failures["service-discovery"] == 1

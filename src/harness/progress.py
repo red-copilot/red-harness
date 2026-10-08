@@ -25,6 +25,10 @@ class ProgressLedger(BaseModel):
     blocked_subgoals: list[str] = Field(default_factory=list)
     confirmed_facts: list[str] = Field(default_factory=list)
     current_subgoal: str | None = None
+    current_skill_id: str | None = None
+    skill_attempts: dict[str, int] = Field(default_factory=dict)
+    skill_verified: dict[str, int] = Field(default_factory=dict)
+    skill_failures: dict[str, int] = Field(default_factory=dict)
     hypotheses: dict[str, ProgressHypothesis] = Field(default_factory=dict)
     action_intent: dict[str, Any] | None = None
     expected_observation: str | None = None
@@ -86,6 +90,10 @@ class ProgressLedger(BaseModel):
         subgoal = data.get("subgoal_id")
         if isinstance(subgoal, str) and subgoal:
             self.current_subgoal = subgoal
+        skill_id = data.get("skill_id")
+        if isinstance(skill_id, str) and skill_id:
+            self.current_skill_id = skill_id
+            self.skill_attempts[skill_id] = self.skill_attempts.get(skill_id, 0) + 1
         expected = data.get("expected_observations") or []
         self.expected_observation = (
             str(expected[0]) if isinstance(expected, list) and expected else None
@@ -147,8 +155,14 @@ class ProgressLedger(BaseModel):
         if status == "verified":
             self.verified_actions += 1
             self.no_progress_count = 0
+            if self.current_skill_id:
+                skill_id = self.current_skill_id
+                self.skill_verified[skill_id] = self.skill_verified.get(skill_id, 0) + 1
         elif status == "contradicted":
             self.contradicted_actions += 1
+            if self.current_skill_id:
+                skill_id = self.current_skill_id
+                self.skill_failures[skill_id] = self.skill_failures.get(skill_id, 0) + 1
             if (self.last_action or {}).get("status") != "failed":
                 self.failure_count += 1
                 self.no_progress_count += 1
