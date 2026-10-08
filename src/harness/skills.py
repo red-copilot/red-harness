@@ -13,6 +13,7 @@ class StateSelector(BaseModel):
     kind: WorldObjectKind
     type: str = Field(min_length=1)
     scope: str | None = None
+    minimum_trust: Literal["claim", "evidence", "verified"] = "claim"
 
 
 class SkillSpec(BaseModel):

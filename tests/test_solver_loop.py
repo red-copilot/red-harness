@@ -142,8 +142,107 @@ def test_solver_loop_publishes_initial_and_replan_updates(tmp_path: Path) -> Non
     assert replanned is not None
     assert replanned.replan_required is True
     assert "benchmark_negative_feedback" in replanned.replan_reasons
+    assert progress.replan_reasons == []
 
     updates = [item for item in session.feedback if item.type == "solver.plan.updated"]
     assert len(updates) == 2
     assert updates[-1].data["actions"][0]["skill_id"] == "alternate-path"
     assert updates[-1].data["plan_path"] == "plan.json"
+
+
+def test_solver_loop_uses_separate_trusted_evidence_input(tmp_path: Path) -> None:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger()
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-verified", "task-verified")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="verify the service",
+        planned_world_revision=world.snapshot.revision,
+    )
+
+    async def run() -> None:
+        await loop.process_event(
+            session,
+            AgentEvent(
+                type="action.intent",
+                data={"expected_observations": ["service is reachable"]},
+            ),
+        )
+        await loop.process_event(
+            session,
+            AgentEvent(
+                type="tool.call",
+                data={"tool": "probe", "tool_call_id": "call-1"},
+            ),
+        )
+        await loop.process_event(
+            session,
+            AgentEvent(
+                type="tool.result",
+                data={"tool": "probe", "tool_call_id": "call-1", "is_error": False},
+            ),
+            trusted_evidence={
+                "source": "tool_adapter",
+                "verdict": "verified",
+                "action_id": "call-1",
+                "evidence_id": "probe-result-1",
+                "observation": "service answered the independent probe",
+            },
+        )
+
+    asyncio.run(run())
+
+    assert progress.last_verification["status"] == "verified"
+    assert progress.evidence_confirmed == 1
+    assert progress.no_progress_count == 0
+    assert "probe-result-1" in progress.last_verification["evidence"][0]
+    assert (
+        world.snapshot.observations["verified-action:call-1"].provenance.epistemic_status
+        == "verified"
+    )
+
+
+def test_solver_loop_deduplicates_identical_event_ids_and_rejects_conflicts(
+    tmp_path: Path,
+) -> None:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger()
+    trace = TraceRecorder(tmp_path / "trace.jsonl", "run-dedupe", "task-dedupe")
+    session = FakeSession()
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=trace,
+        actor="agent:test",
+        context_query="dedupe events",
+        planned_world_revision=world.snapshot.revision,
+    )
+    event = AgentEvent(
+        type="progress.updated",
+        data={"confirmed_fact": "the host is reachable"},
+        event_id="event-1",
+    )
+
+    async def run() -> None:
+        await loop.process_event(session, event)
+        await loop.process_event(session, event)
+        await loop.process_event(
+            session,
+            AgentEvent(
+                type="progress.updated",
+                data={"confirmed_fact": "a different claim"},
+                event_id="event-1",
+            ),
+        )
+
+    asyncio.run(run())
+
+    assert progress.claims == ["the host is reachable"]
+    assert loop.stats.duplicate_events == 1
+    assert loop.stats.conflicting_event_ids == 1

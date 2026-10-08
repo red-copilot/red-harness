@@ -44,119 +44,127 @@ class PiAdapter:
         event_file: Path,
         account_model: bool,
     ) -> None:
+        for event_type, data in self._normalize_line(line, account_model=account_model):
+            self._append_event(event_file, event_type, data)
+
+    def _normalize_line(
+        self,
+        line: str,
+        *,
+        account_model: bool,
+    ) -> list[tuple[str, dict[str, Any]]]:
         try:
             event = json.loads(line)
         except json.JSONDecodeError as exc:
-            self._append_event(
-                event_file,
-                "agent.telemetry_error",
-                {"source": "pi", "message": str(exc), "line": line[:500]},
-            )
-            return
+            return [
+                ("agent.telemetry_error", {"source": "pi", "message": str(exc), "line": line[:500]})
+            ]
         if not isinstance(event, dict):
-            return
+            return []
 
         event_type = event.get("type")
         if event_type == "session":
-            self._append_event(
-                event_file,
-                "pi.session",
-                {
-                    "session_id": event.get("id"),
-                    "version": event.get("version"),
-                    "cwd": event.get("cwd"),
-                },
-            )
-            return
+            return [
+                (
+                    "pi.session",
+                    {
+                        "session_id": event.get("id"),
+                        "version": event.get("version"),
+                        "cwd": event.get("cwd"),
+                    },
+                )
+            ]
         if event_type == "agent_settled":
-            self._append_event(event_file, "pi.agent_settled", {})
-            return
+            return [("pi.agent_settled", {})]
         if event_type == "tool_execution_start":
             tool_call_id = str(event.get("toolCallId") or "")
             if tool_call_id:
                 self._tool_started[tool_call_id] = time.monotonic()
-            self._append_event(
-                event_file,
-                "tool.call",
-                {
-                    "tool": event.get("toolName", "unknown"),
-                    "tool_call_id": event.get("toolCallId"),
-                    "source": "pi",
-                },
-            )
-            return
+            return [
+                (
+                    "tool.call",
+                    {
+                        "tool": event.get("toolName", "unknown"),
+                        "tool_call_id": event.get("toolCallId"),
+                        "source": "pi",
+                    },
+                )
+            ]
         if event_type == "tool_execution_end":
             tool_call_id = str(event.get("toolCallId") or "")
             started = self._tool_started.pop(tool_call_id, None) if tool_call_id else None
             is_error = bool(event.get("isError", False))
-            self._append_event(
-                event_file,
-                "tool.result",
-                {
-                    "tool": event.get("toolName", "unknown"),
-                    "tool_call_id": event.get("toolCallId"),
-                    "source": "pi",
-                    "is_error": is_error,
-                    "duration_ms": (
-                        int((time.monotonic() - started) * 1000)
-                        if started is not None
-                        else None
-                    ),
-                    "failure_class": "tool_error" if is_error else None,
-                },
-            )
-            return
+            return [
+                (
+                    "tool.result",
+                    {
+                        "tool": event.get("toolName", "unknown"),
+                        "tool_call_id": event.get("toolCallId"),
+                        "source": "pi",
+                        "is_error": is_error,
+                        "duration_ms": (
+                            int((time.monotonic() - started) * 1000)
+                            if started is not None
+                            else None
+                        ),
+                        "failure_class": "tool_error" if is_error else None,
+                    },
+                )
+            ]
         if not account_model:
-            return
+            return []
         if event_type == "message_start":
             message = event.get("message")
             if isinstance(message, dict) and message.get("role") == "assistant":
-                self._append_event(
-                    event_file,
-                    "model.request",
-                    {
-                        "source": "pi",
-                        "provider": message.get("provider"),
-                        "model": message.get("model", self.pi.model),
-                    },
-                )
-            return
+                return [
+                    (
+                        "model.request",
+                        {
+                            "source": "pi",
+                            "provider": message.get("provider"),
+                            "model": message.get("model", self.pi.model),
+                        },
+                    )
+                ]
+            return []
         if event_type != "message_end":
-            return
+            return []
         message = event.get("message")
         if not isinstance(message, dict) or message.get("role") != "assistant":
-            return
+            return []
         usage = message.get("usage")
-        self._append_event(
-            event_file,
-            "model.response",
-            {
-                "source": "pi",
-                "provider": message.get("provider"),
-                "model": message.get("model", self.pi.model),
-                "stop_reason": message.get("stopReason"),
-            },
-        )
+        normalized = [
+            (
+                "model.response",
+                {
+                    "source": "pi",
+                    "provider": message.get("provider"),
+                    "model": message.get("model", self.pi.model),
+                    "stop_reason": message.get("stopReason"),
+                },
+            )
+        ]
         if not isinstance(usage, dict):
-            return
+            return normalized
         cost = usage.get("cost") if isinstance(usage.get("cost"), dict) else {}
-        self._append_event(
-            event_file,
-            "model.usage",
-            {
-                "source": "pi",
-                "provider": message.get("provider"),
-                "model": message.get("model", self.pi.model),
-                "input_tokens": int(usage.get("input", 0) or 0),
-                "output_tokens": int(usage.get("output", 0) or 0),
-                "total_tokens": int(usage.get("totalTokens", 0) or 0),
-                "cache_read_tokens": int(usage.get("cacheRead", 0) or 0),
-                "cache_write_tokens": int(usage.get("cacheWrite", 0) or 0),
-                "reasoning_tokens": int(usage.get("reasoning", 0) or 0),
-                "cost_usd": float(cost.get("total", 0.0) or 0.0),
-            },
+        normalized.append(
+            (
+                "model.usage",
+                {
+                    "source": "pi",
+                    "provider": message.get("provider"),
+                    "model": message.get("model", self.pi.model),
+                    "input_tokens": int(usage.get("input", 0) or 0),
+                    "output_tokens": int(usage.get("output", 0) or 0),
+                    "total_tokens": int(usage.get("totalTokens", 0) or 0),
+                    "cache_read_tokens": int(usage.get("cacheRead", 0) or 0),
+                    "cache_write_tokens": int(usage.get("cacheWrite", 0) or 0),
+                    "reasoning_tokens": int(usage.get("reasoning", 0) or 0),
+                    "cost_usd": float(cost.get("total", 0.0) or 0.0),
+                },
+            )
         )
-
+        return normalized
 
     async def start_session(
         self,
@@ -245,7 +253,7 @@ class PiAdapter:
         return agent_dir
 
     def _pi_args(self, task: TaskSpec, *, gateway_enabled: bool) -> list[str]:
-        args = [*self.pi.launcher_args, "--mode", "json", "--no-session"]
+        args = [*self.pi.launcher_args, "--mode", self.pi.mode, "--no-session"]
         args.append("--approve" if self.pi.approve_project else "--no-approve")
         for enabled, flag in (
             (self.pi.context_files, "--no-context-files"),
@@ -272,16 +280,26 @@ class PiAdapter:
         if self.pi.thinking:
             args.extend(["--thinking", self.pi.thinking])
         args.extend(self.pi.extra_args)
+        if self.pi.mode == "json":
+            args.append(self._prompt_text(task))
+        elif any(argument.startswith("@") for argument in self.pi.extra_args):
+            raise AgentError("Pi RPC mode does not accept @file prompt arguments")
+        return args
+
+    @staticmethod
+    def _prompt_text(task: TaskSpec) -> str:
         world_protocol = (
             "\n\nHarness solver protocol:\n"
             "Read $HARNESS_WORLD_CONTEXT and $HARNESS_PROGRESS_FILE before acting. "
             "Use $HARNESS_EVENT_FILE for typed solver events; do not hand-write WorldSubmission. "
             "Before a meaningful action append action.intent with data containing description, "
-            "optional tool/subgoal_id, expected_observations, success_conditions, and "
+            "optional tool/subgoal_id/skill_id, expected_observations, success_conditions, and "
             "replan_conditions. When you learn durable semantic state append world.observe "
             "with data {type, summary, content, confidence}; use world.hypothesis, "
             "world.capability, world.artifact, or world.failure for those kinds. "
             "Harness validates typed events and writes canonical World state. "
+            "Your observations and confirmed_fact fields are claims until independent evidence "
+            "verifies them; a successful tool exit does not prove the objective is complete. "
             "Never write world.db, world.events.jsonl, world.snapshot.json, or progress.json. "
             "Benchmark submissions are interactive: after appending a candidate to "
             "$HARNESS_SUBMISSION_INBOX, keep the process alive and read new records from "
@@ -292,8 +310,7 @@ class PiAdapter:
             "Treat Internet access as optional and non-essential; solve from benchmark targets "
             "and local tools first."
         )
-        args.append(task.objective.description + world_protocol)
-        return args
+        return task.objective.description + world_protocol
 
     def _create_command(
         self,
@@ -309,17 +326,29 @@ class PiAdapter:
         host_gateway: bool,
     ) -> list[str]:
         command = [
-            "docker", "create", "--rm", "--pull=never",
-            "--name", container_name,
+            "docker",
+            "create",
+            "--rm",
+            "--pull=never",
+            "--name",
+            container_name,
             "--read-only",
-            "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges",
-            "--pids-limit", "1024",
-            "--memory", "8g",
-            "--cpus", "4",
-            "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g",
-            "--tmpfs", "/home/agent:rw,nosuid,nodev,size=512m,uid=1000,gid=1000",
-            "--network", network,
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "1024",
+            "--memory",
+            "8g",
+            "--cpus",
+            "4",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,size=1g",
+            "--tmpfs",
+            "/home/agent:rw,nosuid,nodev,size=512m,uid=1000,gid=1000",
+            "--network",
+            network,
         ]
         if self.spec.runtime:
             command.extend(["--runtime", self.spec.runtime])
@@ -329,13 +358,20 @@ class PiAdapter:
             command.extend(["--add-host", "host.docker.internal:host-gateway"])
         command.extend(
             [
-                "-v", f"{task_dir.resolve()}:/task:ro",
-                "-v", f"{run_dir.resolve()}:/run/harness:rw",
-                "-w", "/run/harness",
-                "-e", f"HARNESS_TASK_ID={task.id}",
-                "-e", "HARNESS_TASK_DIR=/task",
-                "-e", "HARNESS_RUN_DIR=/run/harness",
-                "-e", "HARNESS_WORLD_INBOX=/run/harness/world.inbox.jsonl",
+                "-v",
+                f"{task_dir.resolve()}:/task:ro",
+                "-v",
+                f"{run_dir.resolve()}:/run/harness:rw",
+                "-w",
+                "/run/harness",
+                "-e",
+                f"HARNESS_TASK_ID={task.id}",
+                "-e",
+                "HARNESS_TASK_DIR=/task",
+                "-e",
+                "HARNESS_RUN_DIR=/run/harness",
+                "-e",
+                "HARNESS_WORLD_INBOX=/run/harness/world.inbox.jsonl",
                 "-e",
                 "HARNESS_WORLD_CONTEXT=/run/harness/world.context.txt",
                 "-e",
@@ -344,13 +380,20 @@ class PiAdapter:
                 "HARNESS_FEEDBACK_FILE=/run/harness/agent.feedback.jsonl",
                 "-e",
                 "HARNESS_PROGRESS_FILE=/run/harness/progress.json",
-                "-e", "HARNESS_EVENT_FILE=/run/harness/events.jsonl",
-                "-e", f"HARNESS_NETWORK_PROFILE={self.spec.network_profile}",
-                "-e", f"HARNESS_SEED={seed}",
-                "-e", "PI_CODING_AGENT_DIR=/run/harness/pi-agent",
-                "-e", "PI_CODING_AGENT_SESSION_DIR=/run/harness/pi-sessions",
-                "-e", "PI_TELEMETRY=0",
-                "-e", "PI_SKIP_VERSION_CHECK=1",
+                "-e",
+                "HARNESS_EVENT_FILE=/run/harness/events.jsonl",
+                "-e",
+                f"HARNESS_NETWORK_PROFILE={self.spec.network_profile}",
+                "-e",
+                f"HARNESS_SEED={seed}",
+                "-e",
+                "PI_CODING_AGENT_DIR=/run/harness/pi-agent",
+                "-e",
+                "PI_CODING_AGENT_SESSION_DIR=/run/harness/pi-sessions",
+                "-e",
+                "PI_TELEMETRY=0",
+                "-e",
+                "PI_SKIP_VERSION_CHECK=1",
             ]
         )
         if self.pi.offline or self.spec.network_profile != "unrestricted":
@@ -364,13 +407,23 @@ class PiAdapter:
         if gateway_url and gateway_token:
             command.extend(
                 [
-                    "-e", f"HARNESS_GATEWAY_URL={gateway_url}",
-                    "-e", f"HARNESS_GATEWAY_TOKEN={gateway_token}",
-                    "-e", f"OPENAI_BASE_URL={gateway_url}/v1",
-                    "-e", f"OPENAI_API_KEY={gateway_token}",
+                    "-e",
+                    f"HARNESS_GATEWAY_URL={gateway_url}",
+                    "-e",
+                    f"HARNESS_GATEWAY_TOKEN={gateway_token}",
+                    "-e",
+                    f"OPENAI_BASE_URL={gateway_url}/v1",
+                    "-e",
+                    f"OPENAI_API_KEY={gateway_token}",
                 ]
             )
-        command.extend([str(self.spec.image), self.pi.binary, *self._pi_args(task, gateway_enabled=bool(gateway_url and gateway_token))])
+        command.extend(
+            [
+                str(self.spec.image),
+                self.pi.binary,
+                *self._pi_args(task, gateway_enabled=bool(gateway_url and gateway_token)),
+            ]
+        )
         return command
 
     def run(
@@ -481,13 +534,17 @@ class PiAdapter:
                     )
                     if monitor.poll():
                         _terminate_process(proc)
-                        subprocess.run(["docker", "kill", container_name], capture_output=True, check=False)
+                        subprocess.run(
+                            ["docker", "kill", container_name], capture_output=True, check=False
+                        )
                         break
                     if time.monotonic() - started > task.budgets.wall_time:
                         timed_out = True
                         self.trace.emit("budget.exceeded", data={"budget": "wall_time"})
                         _terminate_process(proc)
-                        subprocess.run(["docker", "kill", container_name], capture_output=True, check=False)
+                        subprocess.run(
+                            ["docker", "kill", container_name], capture_output=True, check=False
+                        )
                         break
                     time.sleep(0.05)
                 returncode = proc.wait()
@@ -539,5 +596,3 @@ class PiAdapter:
 
     def _command(self, task: TaskSpec, *, gateway_enabled: bool) -> list[str]:
         return [self.pi.binary, *self._pi_args(task, gateway_enabled=gateway_enabled)]
-
-

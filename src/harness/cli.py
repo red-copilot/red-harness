@@ -11,6 +11,7 @@ import typer
 import uvicorn
 from pydantic import ValidationError
 
+from .audit import audit_run
 from .benchmark.tsec import TSecRunner, load_tsec_config
 from .control_plane import create_control_plane
 from .execution import ExecutionCapabilities
@@ -30,6 +31,22 @@ app = typer.Typer(
     help="Reproducible evaluation runtime for security agents.",
     no_args_is_help=True,
 )
+
+
+@app.command("audit-run")
+def audit_run_command(
+    run_dir: Annotated[Path, typer.Argument(file_okay=False)],
+) -> None:
+    """Audit saved run artifacts without changing them."""
+    report = audit_run(run_dir)
+    typer.echo(report.model_dump_json(indent=2))
+    raise typer.Exit(
+        code={
+            "consistent": 0,
+            "contradictory": 1,
+            "incomplete": 2,
+        }[report.status]
+    )
 
 
 def _gateway_config(
@@ -377,9 +394,7 @@ def submit(
 @app.command("worker")
 def worker(
     control_url: Annotated[str, typer.Option("--control-url")],
-    workspace_root: Annotated[Path, typer.Option("--workspace-root", file_okay=False)] = Path(
-        "."
-    ),
+    workspace_root: Annotated[Path, typer.Option("--workspace-root", file_okay=False)] = Path("."),
     worker_id: Annotated[str | None, typer.Option("--worker-id")] = None,
     lease_seconds: Annotated[int, typer.Option("--lease-seconds", min=10, max=3600)] = 60,
     poll_interval: Annotated[float, typer.Option("--poll-interval", min=0.1)] = 2.0,

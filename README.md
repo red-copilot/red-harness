@@ -132,10 +132,16 @@ harness run benchmark/task.yaml \
   --allow-host-agent
 ```
 
-The adapter runs Pi in one-shot JSON mode and normalizes its structured events:
+The adapter defaults to Pi's long-lived RPC mode. Harness sends the initial objective and plan
+through `prompt`, streams normalized Pi events, and injects verification, world, and benchmark
+feedback with `steer` before Pi's next model turn. It waits for `agent_settled`, since `agent_end`
+can precede automatic retry or queued work. Set `pi.mode: json` to retain the one-shot compatibility
+path.
+
+The normalized event mapping is:
 
 ```text
-Pi session                    -> pi.session
+Pi session header (JSON mode) -> pi.session
 assistant message_start       -> model.request
 assistant message_end         -> model.response + model.usage
 tool_execution_start          -> tool.call
@@ -143,7 +149,8 @@ tool_execution_end            -> tool.result
 agent_settled                 -> pi.agent_settled
 ```
 
-Pi model usage contributes input/output/total tokens, cache usage, reasoning usage, and model cost to the existing Harness budget and result metrics. The raw Pi JSONL stream is retained in `agent.stdout.log`.
+Pi model usage contributes input/output/total tokens and model cost to the Harness budget and result
+metrics. The raw Pi JSONL stream is retained in `agent.stdout.log`.
 
 By default, Pi runs in Docker with a read-only root filesystem, dropped Linux capabilities, bounded CPU/RAM/PIDs, read-only task mount, writable run workspace, and a fresh per-run `PI_CODING_AGENT_DIR`. Pi sessions are ephemeral, telemetry/update checks are disabled, project trust is denied, and project context/extensions/skills/MCP/templates/themes are not loaded unless explicitly enabled.
 
@@ -185,6 +192,21 @@ harness tsec --agent agents/examples/pi-tsec.yaml
 Use `--challenge WEB-001` for a specific challenge or `--all` for every unfinished challenge. Harness performs the SDK lifecycle and never passes the Benchmark token into Pi. Pi receives only the challenge description and target addresses and emits candidates as `HARNESS_FLAG=<flag>`. Candidate plaintext is submitted through the SDK; trace records only the SHA256 of each candidate. Challenge close is always executed in `finally`.
 
 For VPN-backed targets, `agents/examples/pi-tsec.yaml` uses `network: host` so the Kali container shares the Linux worker's VPN routes. See [`docs/tsec.md`](docs/tsec.md).
+
+## Audit a saved run
+
+Audit the consistency of a completed run's result, trace, progress, and available
+World exports without changing those files:
+
+```bash
+harness audit-run .harness/runs/run_...
+```
+
+The command prints a JSON report with status `consistent`,
+`contradictory`, or `incomplete`; exit codes are 0, 1, and 2 respectively.
+The authenticated control plane also exposes the same report at
+`GET /v1/runs/{run_id}/audit`. A consistent report means the inspected records
+agree; it does not authenticate their sources or independently prove task success.
 
 ## Distributed control plane
 
@@ -541,10 +563,16 @@ Externally evaluated benchmarks may accept structured submissions through
 `HARNESS_FEEDBACK_FILE`. TSec uses this path for online flag feedback while retaining
 `HARNESS_FLAG=<flag>` as a compatibility fallback.
 
-Each benchmark run also maintains `progress.json` (`harness/progress/v1`) separately from
-World State. It tracks active solver progress, recent action status, no-progress/failure counters,
-submission outcomes, and objective completion. Containerized Pi sessions can be actively stopped
-when the evaluator reports objective completion.
+Session checkpoints retain event IDs, budget totals, and pending tool actions. Recovery refuses to
+continue while an action is unresolved; `harness.runtime.checkpoint.reconcile_pending_actions()`
+records an operator-supplied outcome and never reruns the interrupted tool. This provides safe
+accounting and reconciliation without claiming exactly-once execution.
+
+Each benchmark run also maintains `progress.json` (`harness/progress/v2`) separately from World
+State. It stores Agent-authored facts as claims, distinguishes successful execution from verified
+evidence and goal progress, and tracks no-progress/failure counters, budget usage, submissions, and
+objective completion. A successful tool exit or accepted submission alone does not establish
+objective completion; the final task verifier or benchmark evaluation controls the result.
 
 
 ### Rolling-horizon planning
@@ -556,11 +584,14 @@ GET /v1/runs/{run_id}/plan/rolling?horizon=1..3
 ```
 
 It combines the current World Snapshot, Skill Registry, and `progress.json` to return at most three
-`PlannedAction` records. Each action includes a skill, expected observations, a compact rationale,
+`PlannedAction` records. Each action includes a skill, expected observations, an inspectable rationale
+with goal relevance, information gain, repeated-failure penalty, and remaining-budget fit,
 and explicit replan triggers such as action failure, missing expected observations, changed world
 revision, repeated no-progress, or contradicted hypotheses.
 
-The rolling planner is also used by the interactive SolverLoop. A session receives an initial
+The planner can filter state requirements by minimum provenance level (`claim`, `evidence`, or
+`verified`). Capabilities are checked for expiry. The rolling planner is also used by the interactive
+SolverLoop. A session receives an initial
 `solver.plan.updated` observation and receives a new plan when verification, repeated no-progress,
 or benchmark feedback requests replanning. Plans are persisted to `plan.json` and guide the Agent;
 the Harness still does not execute Skill metadata directly as commands. Coordination-plane work

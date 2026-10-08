@@ -4,13 +4,15 @@ The world event store remains authoritative for domain state. This module
 persists the *control-plane* cursor needed to resume without replaying
 completed agent events as new work.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +28,13 @@ class RunCheckpoint(BaseModel):
     agent_session_id: str | None = None
     session_checkpoint_id: str | None = None
     plan_revision: int | None = Field(default=None, ge=0)
+    processed_event_ids: dict[str, str] = Field(default_factory=dict)
+
+
+class ActionReconciliation(BaseModel):
+    run_id: str
+    reconciled_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    outcomes: dict[str, Literal["succeeded", "failed", "unknown"]]
 
 
 class FileCheckpointStore:
@@ -63,6 +72,8 @@ async def save_session_checkpoint(
     world_revision: int,
     progress: Any,
     plan_revision: int | None = None,
+    budget_used: dict[str, float] | None = None,
+    processed_event_ids: dict[str, str] | None = None,
 ) -> RunCheckpoint | None:
     """Capture a drained session at the end of event consumption.
 
@@ -73,20 +84,21 @@ async def save_session_checkpoint(
     if not callable(get_checkpoint):
         return None
     cursor = await get_checkpoint()
+    active_actions = getattr(progress, "active_actions", {})
+    pending = [dict(action) for action in active_actions.values()]
     last_action = getattr(progress, "last_action", None)
-    pending = (
-        [dict(last_action)]
-        if isinstance(last_action, dict) and last_action.get("status") == "running"
-        else []
-    )
+    if not pending and isinstance(last_action, dict) and last_action.get("status") == "running":
+        pending = [dict(last_action)]
     record = RunCheckpoint(
         run_id=run_dir.name,
         world_revision=world_revision,
         event_offset=cursor.event_offset,
         feedback_offset=cursor.feedback_offset,
+        budget_used=budget_used or {},
         pending_actions=pending,
         session_checkpoint_id=cursor.id,
         plan_revision=plan_revision,
+        processed_event_ids=processed_event_ids or {},
     )
     FileCheckpointStore(run_dir / "checkpoint.json").save(record)
     return record
@@ -111,3 +123,71 @@ def load_recovery_state(
         (run_dir / "progress.json").read_text(encoding="utf-8")
     )
     return record, ledger
+
+
+def reconcile_pending_actions(
+    run_dir: str | Path,
+    *,
+    outcomes: dict[str, Literal["succeeded", "failed", "unknown"]],
+) -> ActionReconciliation:
+    """Record operator-supplied outcomes without replaying interrupted actions."""
+    path = Path(run_dir)
+    if not outcomes:
+        raise ValueError("at least one pending action outcome is required")
+    store = FileCheckpointStore(path / "checkpoint.json")
+    checkpoint = store.load()
+    if checkpoint is None:
+        raise FileNotFoundError(path / "checkpoint.json")
+    if checkpoint.run_id != path.name:
+        raise ValueError("checkpoint run ID mismatch")
+    from ..progress import ProgressLedger
+
+    progress_path = path / "progress.json"
+    progress = ProgressLedger.model_validate_json(progress_path.read_text(encoding="utf-8"))
+    report_path = path / "action.reconciliation.json"
+    pending_ids = {
+        action.get("tool_call_id")
+        for action in checkpoint.pending_actions
+        if isinstance(action.get("tool_call_id"), str)
+    }
+    if not pending_ids:
+        if report_path.is_file():
+            prior = ActionReconciliation.model_validate_json(
+                report_path.read_text(encoding="utf-8")
+            )
+            if prior.outcomes != outcomes:
+                raise ValueError("checkpoint has no pending actions for the supplied outcomes")
+            return prior
+        if all(progress.reconciled_actions.get(key) == value for key, value in outcomes.items()):
+            reconciliation = ActionReconciliation(run_id=checkpoint.run_id, outcomes=outcomes)
+            report_path.write_text(
+                reconciliation.model_dump_json(indent=2) + "\n", encoding="utf-8"
+            )
+            return reconciliation
+        raise ValueError("checkpoint has no identifiable pending actions")
+    if set(outcomes) != pending_ids:
+        raise ValueError("reconciliation outcomes must match pending action IDs exactly")
+    last_action = progress.last_action or {}
+    last_id = last_action.get("tool_call_id")
+    for call_id, outcome in outcomes.items():
+        if isinstance(progress.active_actions, dict):
+            progress.active_actions.pop(call_id, None)
+        if call_id in progress.reconciled_actions:
+            if progress.reconciled_actions[call_id] != outcome:
+                raise ValueError(f"action {call_id} was already reconciled differently")
+            continue
+        progress.reconciled_actions[call_id] = outcome
+        if call_id == last_id:
+            progress.last_action = {**last_action, "status": outcome}
+        if outcome == "succeeded":
+            progress.execution_succeeded += 1
+            progress.no_progress_count += 1
+        elif outcome == "failed":
+            progress.failure_count += 1
+            progress.no_progress_count += 1
+
+    reconciliation = ActionReconciliation(run_id=checkpoint.run_id, outcomes=outcomes)
+    progress.write(progress_path)
+    store.save(checkpoint.model_copy(update={"pending_actions": []}))
+    report_path.write_text(reconciliation.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    return reconciliation

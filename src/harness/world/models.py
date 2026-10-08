@@ -16,6 +16,7 @@ class Provenance(BaseModel):
     source: str | None = None
     event_id: str | None = None
     source_event_id: str | None = None
+    epistemic_status: Literal["claim", "evidence", "verified", "unclassified"] = "unclassified"
 
 
 class WorldRecord(BaseModel):

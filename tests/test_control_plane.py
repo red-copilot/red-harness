@@ -205,7 +205,7 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
         "/v1/runs/run_test/plan/rolling?horizon=2",
         headers=headers,
     ).json()
-    assert rolling["planner"] == "rolling-horizon-skill-v1"
+    assert rolling["planner"] == "rolling-horizon-world-v2"
     assert rolling["horizon"] == 2
     assert rolling["current_subgoal"] == "enumerate services"
     assert rolling["no_progress_count"] == 2
@@ -260,7 +260,6 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
         "kvm",
         "pi",
     }
-
 
 
 def test_control_plane_uses_world_repository_factory(tmp_path: Path) -> None:

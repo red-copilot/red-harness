@@ -63,6 +63,7 @@ class OneShotAgentSession:
         self.control_path = run_dir / "agent.control.jsonl"
         self._task: asyncio.Task[AgentResult] | None = None
         self._event_offset = 0
+        self._event_line = 0
         self._feedback_offset = 0
         self._closed = False
 
@@ -99,13 +100,21 @@ class OneShotAgentSession:
                         if not line.endswith(("\n", "\r")):
                             remainder = line
                             continue
-                        event = self._parse_event(line)
+                        self._event_line += 1
+                        event = self._parse_event(
+                            line,
+                            fallback_event_id=f"agent-event-line:{self._event_line}",
+                        )
                         if event is not None:
                             yield event
 
             if self._task.done():
                 if remainder.strip():
-                    event = self._parse_event(remainder)
+                    self._event_line += 1
+                    event = self._parse_event(
+                        remainder,
+                        fallback_event_id=f"agent-event-line:{self._event_line}",
+                    )
                     if event is not None:
                         yield event
                 await self._task
@@ -113,21 +122,27 @@ class OneShotAgentSession:
             await asyncio.sleep(self.poll_interval)
 
     @staticmethod
-    def _parse_event(line: str) -> AgentEvent | None:
+    def _parse_event(
+        line: str,
+        *,
+        fallback_event_id: str | None = None,
+    ) -> AgentEvent | None:
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
             return AgentEvent(
                 type="agent.telemetry_error",
                 data={"message": "invalid JSON event", "line": line[:500]},
+                event_id=fallback_event_id,
             )
         if not isinstance(payload, dict):
             return None
         data = payload.get("data")
+        event_id = payload.get("event_id")
         return AgentEvent(
             type=str(payload.get("type", "unknown")),
             data=data if isinstance(data, dict) else {},
-            event_id=payload.get("event_id"),
+            event_id=(event_id if isinstance(event_id, str) and event_id else fallback_event_id),
         )
 
     async def observe(self, observation: AgentObservation) -> None:

@@ -37,7 +37,7 @@ class WorldContextBuilder:
 
     @staticmethod
     def _state_meta(item: Any) -> dict:
-        return item.model_dump(
+        metadata = item.model_dump(
             mode="json",
             include={
                 "provenance",
@@ -47,7 +47,13 @@ class WorldContextBuilder:
                 "supersedes",
             },
             exclude_none=True,
+            exclude_defaults=True,
         )
+        provenance = getattr(item, "provenance", None)
+        trust = getattr(provenance, "epistemic_status", "unclassified")
+        if trust != "unclassified":
+            metadata.setdefault("provenance", {})["epistemic_status"] = trust
+        return metadata
 
     @staticmethod
     def _line(prefix: str, object_id: str, type_name: str, payload: dict) -> str:

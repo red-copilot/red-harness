@@ -164,11 +164,54 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert result["progress"]["accepted_submissions"] == 1
     assert result["progress"]["objective_completed"] is True
     assert result["world"]["revision"] >= 2
-    context = next(tmp_path.glob("fake_CASE-1_*/world.context.txt")).read_text(
-        encoding="utf-8"
-    )
+    context = next(tmp_path.glob("fake_CASE-1_*/world.context.txt")).read_text(encoding="utf-8")
     assert "obs-live" in context
     assert "benchmark.submission.feedback" in context
+
+
+class InconsistentEvaluationBenchmark(FakeBenchmarkAdapter):
+    async def evaluate(self, _session):
+        return EvaluationResult(success=False, score=10, message="final evaluator rejected")
+
+
+def test_final_benchmark_evaluation_overrides_accepted_completed_submission(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import harness.benchmark.runner as runner_module
+
+    fake_agent = FakeAgentAdapter()
+    monkeypatch.setattr(
+        runner_module,
+        "build_agent_adapter",
+        lambda *_args, **_kwargs: fake_agent,
+    )
+    benchmark = InconsistentEvaluationBenchmark()
+    agent = AgentSpec.model_validate(
+        {
+            "apiVersion": "harness/v1",
+            "id": "demo",
+            "type": "cli",
+            "command": ["true"],
+        }
+    )
+
+    result = asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=benchmark,
+            case=BenchmarkCase(id="CASE-INCONSISTENT", benchmark="fake"),
+            agent=agent,
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+            allow_host_agent=True,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "finished"
+    assert result["progress"]["objective_completed"] is False
+    assert fake_agent.session is not None
+    assert fake_agent.session.closed_reason is None
 
 
 class ReactiveBenchmarkAdapter(FakeBenchmarkAdapter):
@@ -209,10 +252,7 @@ class ReactiveSession(FakeSession):
 
     async def observe(self, observation):
         await super().observe(observation)
-        if (
-            observation.type == "benchmark.feedback"
-            and observation.data.get("accepted") is False
-        ):
+        if observation.type == "benchmark.feedback" and observation.data.get("accepted") is False:
             self.negative_feedback.set()
 
 

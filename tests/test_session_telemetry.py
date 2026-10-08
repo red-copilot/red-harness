@@ -64,10 +64,7 @@ def test_trace_emits_causal_identifiers(tmp_path: Path) -> None:
 
 def test_failure_taxonomy_classifies_execution_boundaries() -> None:
     assert classify_failure(timed_out=True) == FailureClass.TOOL_TIMEOUT
-    assert (
-        classify_failure(budget_exceeded="max_tokens")
-        == FailureClass.BUDGET_EXHAUSTED
-    )
+    assert classify_failure(budget_exceeded="max_tokens") == FailureClass.BUDGET_EXHAUSTED
     assert classify_failure(returncode=2) == FailureClass.TOOL_ERROR
     assert classify_failure(returncode=0) is None
 
@@ -81,6 +78,10 @@ def test_oneshot_agent_session_streams_events_and_feedback(tmp_path: Path) -> No
         )
         events = [event async for event in session.events()]
         assert [event.data["step"] for event in events] == [1, 2]
+        assert [event.event_id for event in events] == [
+            "agent-event-line:1",
+            "agent-event-line:2",
+        ]
 
         await session.observe(
             AgentObservation(
@@ -116,6 +117,7 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
         "tool": "bash",
         "tool_call_id": "1",
         "status": "running",
+        "skill_id": None,
     }
 
     ledger.record_event(
@@ -146,12 +148,19 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
                 },
                 "replan_reason": "new capability",
                 "made_progress": True,
+                "objective_completed": True,
             },
         )
     )
     assert ledger.current_subgoal == "enumerate web routes"
-    assert ledger.completed_subgoals == ["identify service"]
-    assert ledger.confirmed_facts == ["http is reachable"]
+    assert ledger.completed_subgoals == []
+    assert ledger.claimed_completed_subgoals == ["identify service"]
+    assert ledger.claims == ["http is reachable"]
+    assert ledger.completion_claims == ["goal:test"]
+    assert ledger.objective_completed is False
+    assert ledger.confirmed_facts == []
+    assert ledger.execution_succeeded == 0
+    assert ledger.no_progress_count == 1
     assert ledger.expected_observation == "admin route exists"
     assert ledger.actual_observation == "/admin returned 200"
     assert ledger.hypotheses["hyp-admin"].status == "supported"
@@ -159,6 +168,9 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
 
     ledger.record_submission(accepted=True, completed=True)
     assert ledger.accepted_submissions == 1
+    assert ledger.objective_completed is False
+    assert ledger.no_progress_count == 1
+    ledger.record_trusted_progress("objective_completed")
     assert ledger.objective_completed is True
     assert ledger.no_progress_count == 0
 
@@ -167,6 +179,26 @@ def test_progress_ledger_tracks_actions_and_submissions(tmp_path: Path) -> None:
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["active_goal"] == "goal:test"
     assert saved["objective_completed"] is True
+
+
+def test_successful_tool_exit_is_not_task_progress() -> None:
+    ledger = ProgressLedger()
+    ledger.record_event(
+        AgentEvent(
+            type="tool.call",
+            data={"tool": "bash", "tool_call_id": "call-ok"},
+        )
+    )
+    ledger.record_event(
+        AgentEvent(
+            type="tool.result",
+            data={"tool": "bash", "tool_call_id": "call-ok", "is_error": False},
+        )
+    )
+
+    assert ledger.execution_succeeded == 1
+    assert ledger.no_progress_count == 1
+    assert ledger.objective_completed is False
 
 
 def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path) -> None:
@@ -187,5 +219,5 @@ def test_container_pi_session_close_kills_container(monkeypatch, tmp_path: Path)
     asyncio.run(session.close("objective-complete"))
 
     assert calls == [["docker", "kill", "harness_pi_run_demo"]]
-    control = (tmp_path / "run_demo" / "agent.control.jsonl")
+    control = tmp_path / "run_demo" / "agent.control.jsonl"
     assert "objective-complete" in control.read_text(encoding="utf-8")

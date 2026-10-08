@@ -46,6 +46,15 @@ class WorldReducer:
             provenance["event_id"] = event.id
             if event.source_event_id is not None:
                 provenance["source_event_id"] = event.source_event_id
+            declared_status = provenance.get("epistemic_status")
+            if event.actor == "agent" or event.actor.startswith("agent:"):
+                provenance["epistemic_status"] = "claim"
+            elif event.actor.startswith("benchmark:") or event.actor in {"grader", "verifier"}:
+                provenance["epistemic_status"] = "evidence"
+            elif event.actor == "harness" and declared_status in {"evidence", "verified"}:
+                provenance["epistemic_status"] = declared_status
+            else:
+                provenance["epistemic_status"] = "unclassified"
             payload["provenance"] = provenance
             collection[object_id] = model_type.model_validate(payload)
 

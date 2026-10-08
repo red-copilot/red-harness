@@ -71,9 +71,10 @@ class Orchestrator:
             if not source.is_file():
                 raise FileNotFoundError(f"resume world state not found: {source}")
             if source.suffix == ".db":
-                with sqlite3.connect(source) as source_db, sqlite3.connect(
-                    world_db_path
-                ) as target_db:
+                with (
+                    sqlite3.connect(source) as source_db,
+                    sqlite3.connect(world_db_path) as target_db,
+                ):
                     source_db.backup(target_db)
             else:
                 shutil.copyfile(source, world_event_path)
@@ -92,6 +93,7 @@ class Orchestrator:
             context_query=task.objective.description,
             skills_root=self.skills_root,
             world_repository_factory=self.world_repository_factory,
+            budget_limits=task.budgets.model_dump(exclude_none=True),
         )
         world = runtime.world
         context_builder = runtime.context_builder
@@ -151,6 +153,7 @@ class Orchestrator:
                 "gateway_token": gateway_runtime.token if gateway_runtime else None,
                 "gateway_network": gateway_runtime.network_name if gateway_runtime else None,
             }
+
             async def run_session():
                 agent_session = await adapter.start_session(**run_kwargs)
                 await solver_loop.maybe_replan(agent_session, force=True)
@@ -158,10 +161,13 @@ class Orchestrator:
                     await solver_loop.process_event(agent_session, event)
                 result = await agent_session.result()
                 await save_session_checkpoint(
-                    run_dir=run_dir, session=agent_session,
+                    run_dir=run_dir,
+                    session=agent_session,
                     world_revision=world.snapshot.revision,
                     progress=progress,
                     plan_revision=solver_loop.planned_world_revision,
+                    budget_used=result.metrics.as_dict(),
+                    processed_event_ids=solver_loop.processed_event_ids,
                 )
                 return result
 
@@ -202,7 +208,7 @@ class Orchestrator:
                 (run_dir / "verifier.stderr.log").write_text(verr, encoding="utf-8")
                 verification = verified.model_dump()
                 if verified.success:
-                    progress.objective_completed = True
+                    progress.record_trusted_progress("objective_completed")
                 progress.write(progress_path)
                 status = resolve_run_status(timed_out=False, budget_exceeded=False)
         except Exception as exc:  # noqa: BLE001 - orchestrator boundary records all failures.
@@ -264,8 +270,13 @@ class Orchestrator:
             },
         }
         finalize_world_goal(
-            world=world, goal=root_goal, context_builder=context_builder,
-            run_dir=run_dir, status=status, success=result["success"], score=result["score"],
+            world=world,
+            goal=root_goal,
+            context_builder=context_builder,
+            run_dir=run_dir,
+            status=status,
+            success=result["success"],
+            score=result["score"],
         )
         result["world"] = world_result(world=world, solver_loop=solver_loop, agent_id=agent.id)
         result["world"]["resumed"] = resume_world_events is not None

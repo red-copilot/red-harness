@@ -36,6 +36,8 @@ def bootstrap_solver(
     world_repository_factory: Callable[[Path], WorldRepository] = SQLiteWorldRepository,
     targets: Iterable[Entity] = (),
     target_actor: str | None = None,
+    budget_limits: dict[str, float] | None = None,
+    processed_event_ids: dict[str, str] | None = None,
 ) -> SolverRuntime:
     """Initialize a solver run without coupling it to a benchmark or agent.
 
@@ -52,7 +54,7 @@ def bootstrap_solver(
         context_builder.render(world.snapshot, query=context_query),
         encoding="utf-8",
     )
-    progress = ProgressLedger(active_goal=goal.id)
+    progress = ProgressLedger(active_goal=goal.id, budget_limits=budget_limits or {})
     progress.write(run_dir / "progress.json")
     loop = SolverLoop(
         world=world,
@@ -64,5 +66,6 @@ def bootstrap_solver(
         planned_world_revision=world.snapshot.revision,
         context_builder=context_builder,
         skills=load_skills(skills_root),
+        processed_event_ids=processed_event_ids,
     )
     return SolverRuntime(world=world, context_builder=context_builder, progress=progress, loop=loop)

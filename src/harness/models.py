@@ -65,6 +65,7 @@ class TaskSpec(BaseModel):
 
 class PiSpec(BaseModel):
     binary: str = Field(default="pi", min_length=1)
+    mode: Literal["rpc", "json"] = "rpc"
     launcher_args: list[str] = Field(default_factory=list)
     provider: str | None = None
     model: str = Field(min_length=1)

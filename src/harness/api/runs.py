@@ -5,7 +5,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from starlette.concurrency import run_in_threadpool
 
+from ..audit import audit_run
 from ..otel import trace_to_otlp_json
 from ..planner import HeuristicSkillPlanner, RollingHorizonPlanner
 from ..progress import ProgressLedger
@@ -31,6 +33,13 @@ def build_runs_router(
         if not result_path.is_file():
             raise HTTPException(status_code=404, detail="result not found")
         return json.loads(result_path.read_text(encoding="utf-8"))
+
+    @router.get("/v1/runs/{run_id}/audit")
+    async def run_audit(request: Request, run_id: str) -> dict:
+        authorize(request, token)
+        directory = run_dir(run_root, run_id)
+        report = await run_in_threadpool(audit_run, directory)
+        return report.model_dump(mode="json")
 
     @router.get("/v1/runs/{run_id}/trace")
     async def run_trace(

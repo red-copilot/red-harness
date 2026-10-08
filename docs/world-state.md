@@ -96,7 +96,8 @@ in simply by detecting `HARNESS_WORLD_INBOX`.
 7. **Research:** derived graph/timeline views, learned retrieval, and transition-model planning.
 
 The runtime loop now treats World State as durable knowledge, `progress.json` as ephemeral solver
-state, and `plan.json` as a derived short-horizon decision artifact. Replanning is triggered by
+state, and `plan.json` as a derived short-horizon decision artifact. Progress v2 stores Agent-authored
+`confirmed_fact` fields as claims; successful tool exits only update execution metrics. Replanning is triggered by
 verification failures, repeated no-progress, and benchmark feedback; Skill metadata remains
 non-executable and is used only to rank candidate next actions.
 
@@ -142,6 +143,7 @@ provenance.actor
 provenance.source
 provenance.event_id
 provenance.source_event_id
+provenance.epistemic_status
 
 observed_at
 valid_from
@@ -156,6 +158,21 @@ written by the Harness.
 `valid_from` and `expires_at` describe a validity window; invalid reversed windows are rejected.
 `supersedes` records explicit replacement relationships without requiring the storage graph to be
 a DAG.
+
+`epistemic_status` distinguishes `claim`, `evidence`, `verified`, and `unclassified` records.
+Agent-authored World submissions are always marked `claim`, even if the submitted object asks to be
+trusted. Benchmark or verifier records are marked `evidence`; only an explicit Harness verifier
+result can create a `verified` observation. These labels describe how the record entered the World
+and are not cryptographic proof against a modified run directory.
+
+Skill selectors can state a minimum provenance level:
+
+```yaml
+requires:
+  - kind: observation
+    type: web.endpoint
+    minimum_trust: verified
+```
 
 These fields are intentionally generic: credentials, sessions, cloud permissions, service
 observations, exploit capabilities, and other domain extensions may all become stale over time.

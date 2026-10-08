@@ -1,6 +1,7 @@
 # Pi integration
 
-Red Harness v0.8 runs Pi inside a dedicated Kali Rolling Docker image and consumes Pi's JSON protocol for model/tool telemetry.
+Red Harness runs Pi inside a dedicated Kali Rolling Docker image. It uses the bidirectional RPC
+protocol by default, with one-shot JSON mode available for compatibility.
 
 ## Build the Pi/Kali image
 
@@ -27,6 +28,7 @@ image: harness/pi-kali:local
 network: environment
 
 pi:
+  mode: rpc # default; set to json for the one-shot compatibility adapter
   provider: openai
   model: gpt-5.6-sol
   thinking: medium
@@ -74,7 +76,14 @@ For each run Harness writes a private `models.json` under the run directory. The
 
 `network: host` and sidecar Gateway mode are intentionally incompatible because sidecar mode requires the Agent to join the Gateway's private Docker network.
 
-## Event normalization
+## RPC interaction and event normalization
+
+Harness starts `pi --mode rpc --no-session`, sends the objective and initial rolling plan as a
+`prompt` command, and waits for `agent_settled` before completing the session. It continues reading
+stdout while the model and tools run. Verification, refreshed World state, benchmark feedback, and
+replanning instructions are sent as `steer` commands; steering uses Pi's `all` mode so feedback
+collected during a tool turn reaches the next model call together. RPC commands carry request IDs,
+and JSONL framing splits on LF only.
 
 | Pi JSON event | Red Harness event |
 | --- | --- |
@@ -82,12 +91,13 @@ For each run Harness writes a private `models.json` under the run directory. The
 | assistant `message_end` | `model.response` + `model.usage` |
 | `tool_execution_start` | `tool.call` |
 | `tool_execution_end` | `tool.result` |
-| `session` | `pi.session` |
+| JSON-mode `session` header | `pi.session` |
 | `agent_settled` | `pi.agent_settled` |
 
 Pi usage contributes input/output/total tokens and model cost to the normal Harness budgets. When the Harness model Gateway is enabled, Gateway model usage is authoritative so model usage is not double-counted.
 
-Raw Pi JSONL is retained in `agent.stdout.log`.
+Raw Pi JSONL is retained in `agent.stdout.log`. In RPC mode the stream has no session header;
+`agent_end` is not treated as session completion because Pi can continue retries or queued work.
 
 ## Container security defaults
 
@@ -106,7 +116,7 @@ Harness creates the Pi container with:
 Pi is also started with deterministic non-interactive defaults:
 
 ```text
---mode json
+--mode rpc
 --no-session
 --no-approve
 --no-context-files
@@ -117,6 +127,9 @@ Pi is also started with deterministic non-interactive defaults:
 --no-mcp
 --offline
 ```
+
+Set `pi.mode: json` to use the one-shot `--mode json` adapter. RPC mode does not accept positional
+prompt files; Harness sends the prompt over stdin.
 
 ## TSec Benchmark
 

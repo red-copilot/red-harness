@@ -2,8 +2,9 @@ from datetime import UTC, datetime, timedelta
 
 from harness.planner import HeuristicSkillPlanner, RollingHorizonPlanner
 from harness.progress import ProgressLedger
+from harness.session import AgentEvent
 from harness.skills import SkillSpec
-from harness.world import Capability, Observation, WorldSnapshot
+from harness.world import Capability, Goal, Observation, Provenance, WorldSnapshot
 
 
 def test_planner_filters_unmet_requirements() -> None:
@@ -65,7 +66,6 @@ def test_planner_prefers_novel_outputs() -> None:
     assert candidates[1].novelty == 0.0
 
 
-
 def test_planner_ignores_expired_capabilities() -> None:
     now = datetime.now(UTC)
     snapshot = WorldSnapshot(
@@ -88,7 +88,6 @@ def test_planner_ignores_expired_capabilities() -> None:
     )
 
     assert HeuristicSkillPlanner().propose(snapshot, [skill]) == []
-
 
 
 def test_rolling_horizon_plan_uses_progress_and_expected_outputs() -> None:
@@ -167,7 +166,6 @@ def test_rolling_horizon_clamps_to_three_actions() -> None:
     assert len(plan.actions) == 3
 
 
-
 def test_rolling_horizon_consumes_verifier_replan_state() -> None:
     snapshot = WorldSnapshot()
     progress = ProgressLedger(
@@ -217,3 +215,91 @@ def test_rejected_submission_becomes_planner_replan_signal() -> None:
     assert plan.replan_required is True
     assert "benchmark_negative_feedback" in plan.replan_reasons
     assert "benchmark_negative_feedback" in plan.actions[0].replan_triggers
+
+
+def test_goal_state_changes_candidate_order() -> None:
+    skills = [
+        SkillSpec(
+            id="web-routes",
+            description="Enumerate web routes and discover exposed endpoints",
+            domain="web",
+            produces=[{"kind": "observation", "type": "web.endpoint"}],
+        ),
+        SkillSpec(
+            id="binary-strings",
+            description="Extract strings and inspect binary firmware",
+            domain="binary",
+            produces=[{"kind": "artifact", "type": "binary.strings"}],
+        ),
+    ]
+    web_snapshot = WorldSnapshot(
+        goals={
+            "goal:1": Goal(
+                id="goal:1",
+                description="Discover exposed web routes and endpoints",
+                status="active",
+            )
+        }
+    )
+    binary_snapshot = WorldSnapshot(
+        goals={
+            "goal:2": Goal(
+                id="goal:2",
+                description="Inspect binary firmware and extract strings",
+                status="active",
+            )
+        }
+    )
+    planner = HeuristicSkillPlanner()
+
+    assert planner.propose(web_snapshot, skills)[0].skill_id == "web-routes"
+    assert planner.propose(binary_snapshot, skills)[0].skill_id == "binary-strings"
+
+
+def test_planner_penalizes_failed_skill_and_excludes_over_budget_actions() -> None:
+    skills = [
+        SkillSpec(id="repeated-failure", description="Retry target probe", cost=0.2),
+        SkillSpec(id="alternate", description="Inspect another target", cost=0.2),
+    ]
+    progress = ProgressLedger(failed_skill_counts={"repeated-failure": 3})
+    candidates = HeuristicSkillPlanner().propose(WorldSnapshot(), skills, progress=progress)
+
+    assert candidates[0].skill_id == "alternate"
+    assert candidates[1].failure_penalty == 1.0
+
+    limited = ProgressLedger(budget_limits={"max_tool_calls": 1})
+    limited.record_event(AgentEvent(type="tool.call", data={"tool": "bash"}))
+    assert HeuristicSkillPlanner().propose(WorldSnapshot(), skills, progress=limited) == []
+
+
+def test_planner_can_require_verified_world_state() -> None:
+    skill = SkillSpec(
+        id="exploit-confirmed-endpoint",
+        description="Continue from a verified endpoint",
+        requires=[
+            {
+                "kind": "observation",
+                "type": "web.endpoint",
+                "minimum_trust": "verified",
+            }
+        ],
+        produces=[{"kind": "observation", "type": "web.finding"}],
+    )
+    snapshot = WorldSnapshot(
+        observations={
+            "claimed": Observation(
+                id="claimed",
+                type="web.endpoint",
+                provenance=Provenance(actor="agent:test", epistemic_status="claim"),
+            )
+        }
+    )
+
+    assert HeuristicSkillPlanner().propose(snapshot, [skill]) == []
+
+    snapshot.observations["verified"] = Observation(
+        id="verified",
+        type="web.endpoint",
+        provenance=Provenance(actor="harness", epistemic_status="verified"),
+    )
+    assert HeuristicSkillPlanner().propose(snapshot, [skill])

@@ -22,7 +22,7 @@ from ..world import (
     Goal,
     Observation,
 )
-from .base import BenchmarkAdapter, BenchmarkCase, Submission
+from .base import BenchmarkAdapter, BenchmarkCase, EvaluationResult, Submission
 from .protocol import SubmissionInbox
 
 
@@ -93,6 +93,7 @@ class BenchmarkRunner:
             skills_root=self.skills_root,
             targets=targets,
             target_actor=f"benchmark:{session.benchmark}",
+            budget_limits=budgets.model_dump(exclude_none=True),
         )
         world = runtime.world
         context_builder = runtime.context_builder
@@ -131,12 +132,16 @@ class BenchmarkRunner:
         submission_results: list[dict] = []
         submitted_keys: set[tuple[str, str]] = set()
         teardown_error: str | None = None
+        evaluation: EvaluationResult | None = None
         submission_inbox = SubmissionInbox(run_dir / "submission.inbox.jsonl")
+
         async def submit_candidate(submission: Submission, agent_session=None) -> bool:
+            nonlocal evaluation
             key = (submission.type, submission.value)
             if key in submitted_keys:
                 return False
             submitted_keys.add(key)
+            evaluation = None
             trace.emit(
                 "benchmark.submission.proposed",
                 actor="agent",
@@ -156,6 +161,12 @@ class BenchmarkRunner:
             data["value_sha256"] = submission_digest
             submission_results.append(data)
             trace.emit("benchmark.submission.result", data=data)
+            submission_completed = False
+            if submitted.completed:
+                # The submission response is an intermediate signal. Stop only
+                # after the adapter's independent final evaluator agrees.
+                evaluation = await adapter.evaluate(session)
+                submission_completed = evaluation.success
 
             revision_before_feedback = world.snapshot.revision
             feedback_id = f"benchmark-feedback:{submission_digest[:16]}"
@@ -209,8 +220,7 @@ class BenchmarkRunner:
                 "metadata": submitted.metadata,
                 "value_sha256": submission_digest,
                 "world_revision": revision_after_feedback,
-                "replan_required": "benchmark_negative_feedback"
-                in progress.replan_reasons,
+                "replan_required": "benchmark_negative_feedback" in progress.replan_reasons,
                 "replan_reasons": list(progress.replan_reasons),
             }
             if agent_session is not None:
@@ -245,7 +255,7 @@ class BenchmarkRunner:
                             },
                         )
                     )
-            return submitted.completed
+            return submission_completed
 
         try:
             adapter_instance = build_agent_adapter(
@@ -278,10 +288,13 @@ class BenchmarkRunner:
                         break
                 agent_result = await agent_session.result()
                 await save_session_checkpoint(
-                    run_dir=run_dir, session=agent_session,
+                    run_dir=run_dir,
+                    session=agent_session,
                     world_revision=world.snapshot.revision,
                     progress=progress,
                     plan_revision=solver_loop.planned_world_revision,
+                    budget_used=agent_result.metrics.as_dict(),
+                    processed_event_ids=solver_loop.processed_event_ids,
                 )
             else:
                 agent_result = adapter_instance.run(**run_kwargs)
@@ -299,9 +312,13 @@ class BenchmarkRunner:
                     if await submit_candidate(submission):
                         break
 
-            evaluation = await adapter.evaluate(session)
+            if evaluation is None:
+                evaluation = await adapter.evaluate(session)
+            # The final evaluator is authoritative. A submission marked
+            # completed is feedback, not a substitute for this result.
+            progress.objective_completed = evaluation.success
             if evaluation.success:
-                progress.objective_completed = True
+                progress.record_trusted_progress("objective_completed")
             progress.write(progress_path)
         finally:
             try:
@@ -322,8 +339,13 @@ class BenchmarkRunner:
             budget_exceeded=bool(agent_result.budget_exceeded),
         )
         finalize_world_goal(
-            world=world, goal=root_goal, context_builder=context_builder,
-            run_dir=run_dir, status=status, success=evaluation.success, score=evaluation.score,
+            world=world,
+            goal=root_goal,
+            context_builder=context_builder,
+            run_dir=run_dir,
+            status=status,
+            success=evaluation.success,
+            score=evaluation.score,
         )
 
         result = {
@@ -337,9 +359,7 @@ class BenchmarkRunner:
             },
             "agent_id": agent.id,
             "status": status,
-            "termination_reason": (
-                "objective-complete" if progress.objective_completed else None
-            ),
+            "termination_reason": ("objective-complete" if progress.objective_completed else None),
             "success": evaluation.success,
             "score": evaluation.score,
             "message": evaluation.message,

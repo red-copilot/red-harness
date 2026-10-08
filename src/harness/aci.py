@@ -13,6 +13,7 @@ from .world import (
     Failure,
     Hypothesis,
     Observation,
+    Provenance,
     WorldRepository,
 )
 
@@ -25,6 +26,7 @@ class ActionIntent(BaseModel):
     schema_version: str = "harness/action-intent/v1"
     action_id: str = Field(default_factory=lambda: _id("action"))
     subgoal_id: str | None = None
+    skill_id: str | None = None
     tool: str | None = None
     description: str = ""
     expected_observations: list[str] = Field(default_factory=list)
@@ -144,6 +146,7 @@ class TypedACI:
                         "intent_action_id": (
                             intent.get("action_id") if isinstance(intent, dict) else None
                         ),
+                        "skill_id": (intent.get("skill_id") if isinstance(intent, dict) else None),
                     },
                 ),
                 actor=actor,
@@ -164,6 +167,11 @@ class TypedACI:
                         "tool_call_id": call_id,
                         "duration_ms": event.data.get("duration_ms"),
                         "failure_class": event.data.get("failure_class"),
+                        "skill_id": (
+                            progress.action_intent.get("skill_id")
+                            if isinstance(progress.action_intent, dict)
+                            else None
+                        ),
                     },
                 ),
                 actor=actor,
@@ -183,6 +191,10 @@ class TypedACI:
                     },
                     confidence=1.0,
                     source="harness.tool",
+                    provenance=Provenance(
+                        source="harness.tool",
+                        epistemic_status="evidence",
+                    ),
                 ),
                 actor="harness",
                 source_event_id=event.event_id,
