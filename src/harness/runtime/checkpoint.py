@@ -24,6 +24,7 @@ class RunCheckpoint(BaseModel):
     budget_used: dict[str, float] = Field(default_factory=dict)
     pending_actions: list[dict[str, Any]] = Field(default_factory=list)
     agent_session_id: str | None = None
+    session_checkpoint_id: str | None = None
     plan_revision: int | None = Field(default=None, ge=0)
 
 
@@ -84,7 +85,7 @@ async def save_session_checkpoint(
         event_offset=cursor.event_offset,
         feedback_offset=cursor.feedback_offset,
         pending_actions=pending,
-        agent_session_id=cursor.id,
+        session_checkpoint_id=cursor.id,
         plan_revision=plan_revision,
     )
     FileCheckpointStore(run_dir / "checkpoint.json").save(record)
