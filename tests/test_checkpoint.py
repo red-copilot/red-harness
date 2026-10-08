@@ -4,9 +4,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from harness.runtime.checkpoint import (FileCheckpointStore, RunCheckpoint, save_session_checkpoint)
-from harness.session import AgentCheckpoint
 from harness.progress import ProgressLedger
+from harness.runtime.checkpoint import FileCheckpointStore, RunCheckpoint, save_session_checkpoint
+from harness.session import AgentCheckpoint
 
 
 def test_checkpoint_roundtrip_and_replace(tmp_path: Path) -> None:
