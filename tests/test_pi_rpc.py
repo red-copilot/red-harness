@@ -175,3 +175,56 @@ def test_rpc_live_protocol_delivers_feedback_and_counts_trusted_tool(tmp_path: P
         assert result.returncode == 0
         assert result.timed_out is False
     asyncio.run(scenario())
+
+
+def test_rpc_container_mounts_protect_authoritative_run_state(tmp_path: Path) -> None:
+    """Check the mount contract without relying on Docker availability."""
+    from harness.pi_rpc import ContainerPiRpcSession
+    from harness.models import AgentSpec, TaskSpec, ObjectiveSpec
+    from harness.trace import TraceRecorder
+    from harness.pi_container import ContainerPiAdapter
+    from unittest.mock import patch
+
+    async def scenario():
+        task = TaskSpec(apiVersion="harness/v1", id="test", name="test",
+                        objective=ObjectiveSpec(description="Authorized task"))
+        spec = AgentSpec.model_validate({
+            "apiVersion": "harness/v1", "id": "pi", "type": "pi",
+            "image": "fake", "pi": {"model": "fake", "session_mode": "rpc",
+                                      "env_passthrough": []},
+        })
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        adapter = ContainerPiAdapter(
+            spec, allow_host=False,
+            trace=TraceRecorder(run_dir / "trace.jsonl", "run", "task"),
+        )
+        commands = []
+        class DummyProc:
+            stdin = SimpleNamespace(close=lambda: None)
+            returncode = 0
+            async def wait(self):
+                return 0
+        async def fake_spawn(*args, **kwargs):
+            commands.append(args)
+            raise RuntimeError("stop after inspecting the command")
+        with patch("harness.pi_rpc.asyncio.create_subprocess_exec", fake_spawn), \
+             patch.object(adapter, "_docker", lambda *a, **k: commands.append(a[0])):
+            try:
+                await ContainerPiRpcSession.start(
+                    adapter, task=task, task_dir=tmp_path, run_dir=run_dir,
+                    environment_project=None, environment_network=None, seed=0,
+                )
+            except RuntimeError as exc:
+                assert str(exc) == "stop after inspecting the command"
+        cmd = commands[0]
+        assert f"{run_dir.resolve()}:/run/harness:ro" in cmd
+        assert f"{run_dir.resolve()}:/run/harness:rw" not in cmd
+        for subdir in ("input", "home", "workspace", "pi-agent", "pi-sessions"):
+            source = "agent-input" if subdir == "input" else subdir
+            assert f"{(run_dir / source).resolve()}:/run/harness/{subdir}:rw" in cmd
+        assert (run_dir / "events.jsonl").is_symlink()
+        assert "HARNESS_EVENT_FILE=/run/harness/input/events.jsonl" in cmd
+        assert "HARNESS_SUBMISSION_INBOX=/run/harness/input/submission.inbox.jsonl" in cmd
+    with patch("harness.pi_container.shutil.which", return_value="/usr/bin/docker"):
+        asyncio.run(scenario())

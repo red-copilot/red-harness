@@ -113,11 +113,23 @@ class ContainerPiRpcSession:
         else:
             network = "none"
 
+        # Protect canonical DB, progress, trace and feedback with a read-only root
+        # mount. Agent-generated JSONL is confined to the writable input mount.
+        inbox = run_dir / "agent-input"
+        inbox.mkdir(mode=0o700, exist_ok=True)
+        for filename in ("events.jsonl", "world.inbox.jsonl", "submission.inbox.jsonl"):
+            destination = run_dir / filename
+            target = inbox / filename
+            if destination.exists() or destination.is_symlink():
+                raise AgentError(f"RPC mailbox already exists: {destination}")
+            target.touch(mode=0o600)
+            destination.symlink_to(target.relative_to(run_dir))
         adapter._prepare_agent_dir(
             run_dir=run_dir, gateway_url=gateway_url, gateway_token=gateway_token,
         )
         (run_dir / "home").mkdir(exist_ok=True)
         (run_dir / "pi-sessions").mkdir(exist_ok=True)
+        (run_dir / "workspace").mkdir(exist_ok=True)
         name = ("harness_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
         command = adapter._container_command(
             task, task_dir=task_dir, run_dir=run_dir,
@@ -126,6 +138,31 @@ class ContainerPiRpcSession:
             gateway_url=gateway_url, gateway_token=gateway_token,
             host_gateway=gateway_enabled and not sidecar_gateway and network != "host",
         )
+        # The Docker root mount is read-only; only explicit Agent-owned paths
+        # are writable. No Docker socket or Harness state DB is mounted rw.
+        root_mount = f"{run_dir.resolve()}:/run/harness:rw"
+        assert root_mount in command
+        command[command.index(root_mount)] = f"{run_dir.resolve()}:/run/harness:ro"
+        mounts = [
+            ("agent-input", "input"),
+            ("pi-agent", "pi-agent"),
+            ("pi-sessions", "pi-sessions"),
+            ("home", "home"),
+            ("workspace", "workspace"),
+        ]
+        for source, destination in mounts:
+            command.extend(["-v", f"{(run_dir / source).resolve()}:/run/harness/{destination}:rw"])
+        command[command.index("-w") + 1] = "/run/harness/workspace"
+        for old, new in (
+            ("HARNESS_EVENT_FILE=/run/harness/events.jsonl",
+             "HARNESS_EVENT_FILE=/run/harness/input/events.jsonl"),
+            ("HARNESS_WORLD_INBOX=/run/harness/world.inbox.jsonl",
+             "HARNESS_WORLD_INBOX=/run/harness/input/world.inbox.jsonl"),
+            ("HARNESS_SUBMISSION_INBOX=/run/harness/submission.inbox.jsonl",
+             "HARNESS_SUBMISSION_INBOX=/run/harness/input/submission.inbox.jsonl"),
+        ):
+            assert old in command
+            command[command.index(old)] = new
         prompt = command.pop()  # CLI text is not a valid RPC prompt argument.
         command[command.index("--mode") + 1] = "rpc"
         command.insert(2, "-i")  # Keep container stdin open for RPC commands.

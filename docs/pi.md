@@ -147,3 +147,16 @@ For environments requiring strong evidence provenance, use RPC mode.
 
 Reference: https://pi.dev/docs/latest/rpc and
 https://pi.dev/docs/latest/rpc-commands .
+
+## RPC filesystem boundary
+
+RPC mode mounts the run root at `/run/harness` **read-only**, with separate
+writable bind mounts for `input/`, `workspace/`, `pi-agent/`, `pi-sessions/`
+and `home/`. The three Agent-written input mailboxes remain visible to the
+Harness through root-level compatibility symlinks. Canonical `world.db`,
+`progress.json`, `trace.jsonl`, plan and benchmark feedback files therefore
+cannot be overwritten through the container's root mount. The Agent can still
+modify its own input mailboxes and files in the explicitly writable directories.
+
+This protects filesystem write access, **not** the trustworthiness of Agent
+semantic claims; verify those before treating them as target facts.
