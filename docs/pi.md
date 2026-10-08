@@ -121,3 +121,29 @@ Pi is also started with deterministic non-interactive defaults:
 ## TSec Benchmark
 
 For TSec Benchmark integration use `agents/examples/pi-tsec.yaml` and see `docs/tsec.md`. The TSec token stays in Harness; it is never copied into the Pi container.
+
+## Interactive RPC session (opt-in)
+
+For benchmark feedback that must change Pi's next model turn, set `pi.session_mode: rpc`.
+The TSec example enables RPC. The default remains `json` so existing one-shot
+agents and fake-Pi CI fixtures keep their original behavior.
+
+RPC starts `pi --mode rpc --no-session` in the constrained Kali container,
+sends the objective using a JSONL `prompt` command on stdin, correlates
+command acknowledgements, and reads protocol events continuously. Rejected
+benchmark submissions and contradicted verifications become `steer` commands
+while Pi is active, or new `prompt` commands when it has settled. A command
+acknowledgement only means Pi accepted it; `agent_settled` is the completion
+signal. The accepted feedback is also recorded in `agent.feedback.jsonl`.
+
+RPC **does not trust** `events.jsonl` for model usage or tool outcomes.
+Those are derived only from Pi's protocol stdout. The Agent-writable event file
+remains available for `action.intent` and `world.*` semantic claims, with
+their original Agent provenance. Fake `model.usage`, `tool.result`, or
+`pi.agent_settled` records written into that file are ignored in RPC mode.
+
+The legacy JSON session mode is not protected by this RPC transport boundary.
+For environments requiring strong evidence provenance, use RPC mode.
+
+Reference: https://pi.dev/docs/latest/rpc and
+https://pi.dev/docs/latest/rpc-commands .
