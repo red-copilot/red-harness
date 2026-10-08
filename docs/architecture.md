@@ -34,3 +34,26 @@ module boundaries. Preserve public import paths until migration is complete.
 
 This is an incremental refactor: the older top-level modules remain valid,
 and this document does not claim the full package has been relocated.
+
+## Enforced dependency direction
+
+`tests/test_architecture.py` parses package imports without importing modules.
+It rejects reverse imports from world into API, benchmark, runtime or entry
+points; from runtime into transport or use-case entry points; and from
+benchmark adapters into API/CLI/worker. These rules deliberately target
+high-risk dependency inversions instead of pretending all top-level modules
+have already been migrated.
+
+CI executes the boundary check in the regular pytest suite. A boundary
+exception should be explicit, documented and reviewed rather than hidden
+behind runtime import aliases.
+
+## Planned migration sequence
+
+1. Extract shared bootstrapping (completed in this branch).
+2. Introduce import-boundary tests (completed in this branch).
+3. Move run-result persistence/serialization behind a runtime service, then
+   unify local and external benchmark lifecycle states.
+4. Separate SDK/network, Docker and Pi infrastructure from policy logic.
+5. Consolidate composition at CLI and worker entry points, preserving
+   existing external interfaces and world event format.
