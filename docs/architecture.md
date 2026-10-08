@@ -52,8 +52,8 @@ behind runtime import aliases.
 
 1. Extract shared bootstrapping (completed in this branch).
 2. Introduce import-boundary tests (completed in this branch).
-3. Move run-result persistence/serialization behind a runtime service, then
-   unify local and external benchmark lifecycle states.
+3. Move run-result persistence/serialization behind a runtime service (done),
+   then unify local and external benchmark lifecycle states.
 4. Separate SDK/network, Docker and Pi infrastructure from policy logic.
 5. Consolidate composition at CLI and worker entry points, preserving
    existing external interfaces and world event format.
