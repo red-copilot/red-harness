@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import shutil
 import sqlite3
 import time
@@ -18,6 +17,7 @@ from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .runtime import bootstrap_solver
+from .runtime.results import persist_run_result
 from .trace import TraceRecorder
 from .verifier import run_verifier
 from .world import Goal, SQLiteWorldRepository, WorldRepository
@@ -287,17 +287,5 @@ class Orchestrator:
                 "rejected": solver_loop.stats.inbox_rejected,
             },
         }
-        (run_dir / "result.json").write_text(
-            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        trace.emit(
-            "run.finished",
-            data={
-                "status": status,
-                "success": result["success"],
-                "score": result["score"],
-                "metrics": metrics,
-            },
-        )
+        persist_run_result(run_dir=run_dir, trace=trace, result=result)
         return result
