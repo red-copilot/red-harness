@@ -5,7 +5,12 @@ import pytest
 from pydantic import ValidationError
 
 from harness.progress import ProgressLedger
-from harness.runtime.checkpoint import FileCheckpointStore, RunCheckpoint, load_recovery_state, save_session_checkpoint
+from harness.runtime.checkpoint import (
+    FileCheckpointStore,
+    RunCheckpoint,
+    load_recovery_state,
+    save_session_checkpoint,
+)
 from harness.session import AgentCheckpoint
 
 
