@@ -12,6 +12,7 @@ from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..session import AgentObservation
 from ..trace import TraceRecorder
 from ..runtime import bootstrap_solver
+from ..runtime.lifecycle import resolve_run_status
 from ..runtime.projections import finalize_world_goal, network_result, world_result
 from ..runtime.results import persist_run_result
 from ..world import (
@@ -308,14 +309,10 @@ class BenchmarkRunner:
         if agent_result is None:
             raise RuntimeError("agent did not start")
 
-        status = (
-            "objective_completed"
-            if progress.objective_completed
-            else "timeout"
-            if agent_result.timed_out
-            else "budget_exceeded"
-            if agent_result.budget_exceeded
-            else "finished"
+        status = resolve_run_status(
+            objective_completed=progress.objective_completed,
+            timed_out=agent_result.timed_out,
+            budget_exceeded=bool(agent_result.budget_exceeded),
         )
         finalize_world_goal(
             world=world, goal=root_goal, context_builder=context_builder,
