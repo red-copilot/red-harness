@@ -90,3 +90,20 @@ async def save_session_checkpoint(
     )
     FileCheckpointStore(run_dir / "checkpoint.json").save(record)
     return record
+
+
+def load_recovery_state(run_dir: Path) -> tuple[RunCheckpoint, Any]:
+    """Load a checkpoint and progress without launching a session."""
+    from ..progress import ProgressLedger
+
+    record = FileCheckpointStore(run_dir / "checkpoint.json").load()
+    if record is None:
+        raise FileNotFoundError(run_dir / "checkpoint.json")
+    if record.run_id != run_dir.name:
+        raise ValueError("checkpoint run ID mismatch")
+    if record.pending_actions:
+        raise RuntimeError("unresolved actions require manual reconciliation")
+    ledger = ProgressLedger.model_validate_json(
+        (run_dir / "progress.json").read_text(encoding="utf-8")
+    )
+    return record, ledger
