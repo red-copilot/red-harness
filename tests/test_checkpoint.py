@@ -90,3 +90,16 @@ def test_recovery_refuses_unresolved_actions(tmp_path: Path) -> None:
     ProgressLedger().write(run_dir / "progress.json")
     with pytest.raises(RuntimeError, match="unresolved actions"):
         load_recovery_state(run_dir)
+
+
+def test_recovery_rejects_stale_world_revision(tmp_path: Path) -> None:
+    run_dir = tmp_path / "revision-run"
+    run_dir.mkdir()
+    FileCheckpointStore(run_dir / "checkpoint.json").save(
+        RunCheckpoint(run_id="revision-run", world_revision=3)
+    )
+    ProgressLedger().write(run_dir / "progress.json")
+    with pytest.raises(ValueError, match="world revision mismatch"):
+        load_recovery_state(run_dir, current_world_revision=4)
+    record, _ = load_recovery_state(run_dir, current_world_revision=3)
+    assert record.world_revision == 3
