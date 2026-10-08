@@ -85,3 +85,93 @@ def test_rpc_mode_is_opt_in_by_default() -> None:
     assert spec.pi is not None
     assert spec.pi.session_mode == "json"
     assert spec.pi.model_copy(update={"session_mode": "rpc"}).session_mode == "rpc"
+
+
+def test_rpc_live_protocol_delivers_feedback_and_counts_trusted_tool(tmp_path: Path, monkeypatch) -> None:
+    """A fake RPC subprocess exercises command ACKs and native event streaming."""
+    from harness.models import BudgetSpec, ObjectiveSpec, PiSpec, TaskSpec
+    from harness.trace import TraceRecorder
+
+    class FakeStdin:
+        def __init__(self, stdout):
+            self.stdout = stdout
+            self.commands = []
+            self.closed = False
+
+        def write(self, data):
+            request = json.loads(data)
+            self.commands.append(request)
+            self.stdout.feed_data((json.dumps({
+                "type": "response", "id": request["id"], "command": request["type"],
+                "success": True,
+            }) + "\n").encode())
+            if request["type"] == "prompt":
+                for kind in ("tool_execution_start", "tool_execution_end"):
+                    self.stdout.feed_data((json.dumps({
+                        "type": kind, "toolCallId": "real-tool", "toolName": "bash",
+                        "isError": False,
+                    }) + "\n").encode())
+            if request["type"] == "steer":
+                self.stdout.feed_data(b'{"type":"agent_settled"}\n')
+
+        async def drain(self):
+            return None
+
+        def is_closing(self):
+            return self.closed
+
+        def close(self):
+            self.closed = True
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = asyncio.StreamReader()
+            self.stdin = FakeStdin(self.stdout)
+            self.returncode = 0
+
+        async def wait(self):
+            self.stdout.feed_eof()
+            return 0
+
+        def kill(self):
+            self.stdout.feed_eof()
+
+    monkeypatch.setattr(
+        "harness.pi_rpc.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
+
+    async def scenario():
+        process = FakeProcess()
+        adapter = SimpleNamespace(
+            pi=PiSpec(model="fake"),
+            trace=TraceRecorder(tmp_path / "trace.jsonl", "run", "case"),
+        )
+        task = TaskSpec(
+            apiVersion="harness/v1", id="case", name="case",
+            objective=ObjectiveSpec(description="Inspect authorized target"),
+            budgets=BudgetSpec(wall_time=5),
+        )
+        session = ContainerPiRpcSession(
+            adapter, task=task, run_dir=tmp_path, container_name="fake",
+            process=process, gateway_enabled=False,
+            stdout_handle=(tmp_path / "agent.stdout.log").open("wb"),
+            stderr_handle=(tmp_path / "agent.stderr.log").open("wb"),
+        )
+        await session._command("prompt", message="Inspect target")
+        types = []
+        async for event in session.events():
+            types.append(event.type)
+            if event.type == "tool.result":
+                await session.observe(AgentObservation(
+                    type="benchmark.feedback", data={"accepted": False},
+                ))
+        result = await session.result()
+        assert types == ["tool.call", "tool.result", "pi.agent_settled"]
+        assert [cmd["type"] for cmd in process.stdin.commands] == [
+            "prompt", "steer",
+        ]
+        assert result.metrics.tool_calls == 1
+        assert result.returncode == 0
+        assert result.timed_out is False
+    asyncio.run(scenario())
