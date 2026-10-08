@@ -179,11 +179,12 @@ def test_rpc_live_protocol_delivers_feedback_and_counts_trusted_tool(tmp_path: P
 
 def test_rpc_container_mounts_protect_authoritative_run_state(tmp_path: Path) -> None:
     """Check the mount contract without relying on Docker availability."""
-    from harness.pi_rpc import ContainerPiRpcSession
-    from harness.models import AgentSpec, TaskSpec, ObjectiveSpec
-    from harness.trace import TraceRecorder
-    from harness.pi_container import ContainerPiAdapter
     from unittest.mock import patch
+
+    from harness.models import AgentSpec, ObjectiveSpec, TaskSpec
+    from harness.pi_container import ContainerPiAdapter
+    from harness.pi_rpc import ContainerPiRpcSession
+    from harness.trace import TraceRecorder
 
     async def scenario():
         task = TaskSpec(apiVersion="harness/v1", id="test", name="test",
