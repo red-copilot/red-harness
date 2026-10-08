@@ -179,7 +179,8 @@ def test_orchestrator_ingests_world_state_during_session(
     assert result["world"]["aci"]["world_mutations"] >= 1
     assert result["world"]["legacy_inbox"]["accepted"] == 0
     assert result["world"]["agent_authored_records"] >= 1
-    assert result["progress"]["verified_actions"] >= 1
+    assert result["progress"]["verified_actions"] == 0
+    assert result["progress"]["pending_actions"] >= 1
     assert fake.session is not None
     assert any(item.type == "world.state.updated" for item in fake.session.feedback)
 
