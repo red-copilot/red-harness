@@ -47,7 +47,7 @@ def test_action_verifier_skips_without_expected_observation() -> None:
     assert ActionVerifier().verify(progress) is None
 
 
-def test_action_verifier_negative_evidence_wins_over_token_overlap() -> None:
+def test_agent_negative_text_is_not_trusted_verdict() -> None:
     progress = ProgressLedger(
         expected_observation="service reachable",
         actual_observation="service reachable failed",
@@ -55,7 +55,7 @@ def test_action_verifier_negative_evidence_wins_over_token_overlap() -> None:
     )
     result = ActionVerifier().verify(progress)
     assert result is not None
-    assert result.status == "contradicted"
+    assert result.status == "pending"
 
 
 def test_trusted_verifier_can_confirm_matching_tool_call() -> None:
