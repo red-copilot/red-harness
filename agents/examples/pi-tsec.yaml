@@ -6,6 +6,7 @@ network: host
 network_profile: benchmark-only
 env: {}
 pi:
+  session_mode: rpc
   provider: openai
   model: gpt-5.6-sol
   thinking: medium

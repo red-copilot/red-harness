@@ -208,6 +208,16 @@ class ContainerPiAdapter(PiAdapter):
         gateway_token: str | None = None,
         gateway_network: str | None = None,
     ) -> ContainerPiSession:
+        if self.pi.session_mode == "rpc":
+            from .pi_rpc import ContainerPiRpcSession
+
+            return await ContainerPiRpcSession.start(
+                self, task=task, task_dir=task_dir, run_dir=run_dir,
+                environment_project=environment_project,
+                environment_network=environment_network, seed=seed,
+                gateway_url=gateway_url, gateway_token=gateway_token,
+                gateway_network=gateway_network,
+            )
         return await ContainerPiSession.start(
             self,
             run_dir=run_dir,
