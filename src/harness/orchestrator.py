@@ -17,6 +17,7 @@ from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .runtime import bootstrap_solver
+from .runtime.checkpoint import save_session_checkpoint
 from .runtime.lifecycle import resolve_run_status
 from .runtime.projections import finalize_world_goal, network_result, world_result
 from .runtime.results import persist_run_result
@@ -155,7 +156,14 @@ class Orchestrator:
                 await solver_loop.maybe_replan(agent_session, force=True)
                 async for event in agent_session.events():
                     await solver_loop.process_event(agent_session, event)
-                return await agent_session.result()
+                result = await agent_session.result()
+                await save_session_checkpoint(
+                    run_dir=run_dir, session=agent_session,
+                    world_revision=world.snapshot.revision,
+                    progress=progress,
+                    plan_revision=solver_loop.planned_world_revision,
+                )
+                return result
 
             start_session = getattr(adapter, "start_session", None)
             if callable(start_session):

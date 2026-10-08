@@ -12,6 +12,7 @@ from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..session import AgentObservation
 from ..trace import TraceRecorder
 from ..runtime import bootstrap_solver
+from ..runtime.checkpoint import save_session_checkpoint
 from ..runtime.lifecycle import resolve_run_status
 from ..runtime.projections import finalize_world_goal, network_result, world_result
 from ..runtime.results import persist_run_result
@@ -276,6 +277,12 @@ class BenchmarkRunner:
                     if completed_online:
                         break
                 agent_result = await agent_session.result()
+                await save_session_checkpoint(
+                    run_dir=run_dir, session=agent_session,
+                    world_revision=world.snapshot.revision,
+                    progress=progress,
+                    plan_revision=solver_loop.planned_world_revision,
+                )
             else:
                 agent_result = adapter_instance.run(**run_kwargs)
 

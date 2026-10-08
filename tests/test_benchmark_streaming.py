@@ -157,9 +157,10 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
     assert benchmark_feedback.data["completed"] is True
     assert benchmark_feedback.data["world_revision"] >= 1
     assert benchmark_feedback.data["replan_required"] is False
-    assert result["progress"]["verified_actions"] >= 1
+    assert result["progress"]["verified_actions"] == 0
+    assert result["progress"]["pending_actions"] >= 1
     assert result["progress"]["skipped_verifications"] >= 0
-    assert result["progress"]["last_verification"]["status"] == "verified"
+    assert result["progress"]["last_verification"]["status"] == "pending"
     assert result["progress"]["accepted_submissions"] == 1
     assert result["progress"]["objective_completed"] is True
     assert result["world"]["revision"] >= 2
