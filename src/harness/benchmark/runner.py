@@ -10,18 +10,14 @@ from pathlib import Path
 
 from ..agent import AgentResult, build_agent_adapter
 from ..models import AgentSpec, BudgetSpec, TaskSpec
-from ..progress import ProgressLedger
 from ..session import AgentObservation
-from ..skills import load_skills
-from ..solver_loop import SolverLoop
 from ..trace import TraceRecorder
+from ..runtime import bootstrap_solver
 from ..world import (
     Entity,
     Failure,
     Goal,
     Observation,
-    SQLiteWorldRepository,
-    WorldContextBuilder,
 )
 from .base import BenchmarkAdapter, BenchmarkCase, Submission
 from .protocol import SubmissionInbox
@@ -69,44 +65,37 @@ class BenchmarkRunner:
                 data={"error_type": type(exc).__name__, "message": str(exc)},
             )
             raise
-        world = SQLiteWorldRepository(run_dir / "world.events.jsonl")
-        context_builder = WorldContextBuilder()
         started = time.monotonic()
-
-        progress = ProgressLedger(active_goal=f"goal:{session.case_id}:objective")
-        progress_path = run_dir / "progress.json"
-        progress.write(progress_path)
-
         root_goal = Goal(
             id=f"goal:{session.case_id}:objective",
             description=session.objective.description,
             status="active",
             priority=1.0,
-            attributes={
-                "benchmark": session.benchmark,
-                "case_id": session.case_id,
-            },
+            attributes={"benchmark": session.benchmark, "case_id": session.case_id},
         )
-        world.upsert("goal", root_goal)
-
-        for target in session.targets:
-            world.upsert(
-                "entity",
-                Entity(
-                    id=target.id,
-                    type="benchmark.target",
-                    attributes={
-                        "address": target.address,
-                        **target.metadata,
-                    },
-                ),
-                actor=f"benchmark:{session.benchmark}",
+        targets = [
+            Entity(
+                id=target.id,
+                type="benchmark.target",
+                attributes={"address": target.address, **target.metadata},
             )
-
-        (run_dir / "world.context.txt").write_text(
-            context_builder.render(world.snapshot, query=session.objective.description),
-            encoding="utf-8",
+            for target in session.targets
+        ]
+        runtime = bootstrap_solver(
+            run_dir=run_dir,
+            trace=trace,
+            goal=root_goal,
+            actor=f"agent:{agent.id}",
+            context_query=session.objective.description,
+            skills_root=self.skills_root,
+            targets=targets,
+            target_actor=f"benchmark:{session.benchmark}",
         )
+        world = runtime.world
+        context_builder = runtime.context_builder
+        progress = runtime.progress
+        solver_loop = runtime.loop
+        progress_path = run_dir / "progress.json"
 
         task = TaskSpec(
             apiVersion="harness/v1",
@@ -140,18 +129,6 @@ class BenchmarkRunner:
         submitted_keys: set[tuple[str, str]] = set()
         teardown_error: str | None = None
         submission_inbox = SubmissionInbox(run_dir / "submission.inbox.jsonl")
-        solver_loop = SolverLoop(
-            world=world,
-            progress=progress,
-            run_dir=run_dir,
-            trace=trace,
-            actor=f"agent:{agent.id}",
-            context_query=session.objective.description,
-            planned_world_revision=world.snapshot.revision,
-            context_builder=context_builder,
-            skills=load_skills(self.skills_root),
-        )
-
         async def submit_candidate(submission: Submission, agent_session=None) -> bool:
             key = (submission.type, submission.value)
             if key in submitted_keys:
