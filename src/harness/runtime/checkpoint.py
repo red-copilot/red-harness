@@ -53,3 +53,39 @@ class FileCheckpointStore:
         if not self.path.exists():
             return None
         return RunCheckpoint.model_validate(json.loads(self.path.read_text(encoding="utf-8")))
+
+
+async def save_session_checkpoint(
+    *,
+    run_dir: Path,
+    session: Any,
+    world_revision: int,
+    progress: Any,
+    plan_revision: int | None = None,
+) -> RunCheckpoint | None:
+    """Capture a drained session at the end of event consumption.
+
+    Legacy adapters may not implement checkpoint(). A saved record describes
+    a completed stream, NOT an exactly-once crash-resume guarantee.
+    """
+    get_checkpoint = getattr(session, "checkpoint", None)
+    if not callable(get_checkpoint):
+        return None
+    cursor = await get_checkpoint()
+    last_action = getattr(progress, "last_action", None)
+    pending = (
+        [dict(last_action)]
+        if isinstance(last_action, dict) and last_action.get("status") == "running"
+        else []
+    )
+    record = RunCheckpoint(
+        run_id=run_dir.name,
+        world_revision=world_revision,
+        event_offset=cursor.event_offset,
+        feedback_offset=cursor.feedback_offset,
+        pending_actions=pending,
+        agent_session_id=cursor.id,
+        plan_revision=plan_revision,
+    )
+    FileCheckpointStore(run_dir / "checkpoint.json").save(record)
+    return record
