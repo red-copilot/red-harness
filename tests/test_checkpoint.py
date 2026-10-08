@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from harness.progress import ProgressLedger
-from harness.runtime.checkpoint import FileCheckpointStore, RunCheckpoint, save_session_checkpoint
+from harness.runtime.checkpoint import FileCheckpointStore, RunCheckpoint, load_recovery_state, save_session_checkpoint
 from harness.session import AgentCheckpoint
 
 
@@ -61,3 +61,27 @@ def test_legacy_session_without_checkpoint(tmp_path: Path) -> None:
         progress=ProgressLedger(),
     ))
     assert result is None
+
+
+def test_recovery_restores_progress(tmp_path: Path) -> None:
+    run_dir = tmp_path / "safe-run"
+    run_dir.mkdir()
+    FileCheckpointStore(run_dir / "checkpoint.json").save(
+        RunCheckpoint(run_id="safe-run", world_revision=2, event_offset=19)
+    )
+    ProgressLedger(verified_actions=2).write(run_dir / "progress.json")
+    checkpoint, progress = load_recovery_state(run_dir)
+    assert checkpoint.event_offset == 19
+    assert progress.verified_actions == 2
+
+
+def test_recovery_refuses_unresolved_actions(tmp_path: Path) -> None:
+    run_dir = tmp_path / "interrupted-run"
+    run_dir.mkdir()
+    FileCheckpointStore(run_dir / "checkpoint.json").save(
+        RunCheckpoint(run_id="interrupted-run", world_revision=1,
+                      pending_actions=[{"tool_call_id": "call-1", "status": "running"}])
+    )
+    ProgressLedger().write(run_dir / "progress.json")
+    with pytest.raises(RuntimeError, match="unresolved actions"):
+        load_recovery_state(run_dir)
