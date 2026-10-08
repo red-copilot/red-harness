@@ -9,7 +9,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
 
 # Directional rules, not a prohibition on deliberate application composition.
@@ -28,7 +27,7 @@ def _module_parts(path: Path) -> tuple[str, ...]:
 
 def _imports(path: Path) -> set[str]:
     module = _module_parts(path)
-    package = module[:-1] if path.name != "__init__.py" else module[:-1]
+    package = module[:-1]
     imports: set[str] = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
         if isinstance(node, ast.Import):
