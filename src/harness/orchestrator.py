@@ -17,6 +17,7 @@ from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
 from .runtime import bootstrap_solver
+from .runtime.projections import finalize_world_goal, network_result, world_result
 from .runtime.results import persist_run_result
 from .trace import TraceRecorder
 from .verifier import run_verifier
@@ -246,46 +247,18 @@ class Orchestrator:
             },
             "metrics": metrics,
             "progress": progress.model_dump(mode="json"),
-            "network": {
-                "profile": agent.network_profile,
-                "enforcement": (
-                    "docker-none"
-                    if agent.network_profile == "offline" and agent.type in {"docker", "pi"}
-                    else "advisory"
-                    if agent.network_profile == "benchmark-only"
-                    else "unrestricted"
-                ),
-            },
+            "network": network_result(agent),
             "versions": {
                 "harness": __version__,
                 "task_sha256": _sha256(task_path),
                 "agent_sha256": _sha256(agent_path),
             },
         }
-        root_goal.status = "completed" if result["success"] else "failed"
-        root_goal.attributes.update(
-            {"run_status": status, "score": result["score"], "success": result["success"]}
+        finalize_world_goal(
+            world=world, goal=root_goal, context_builder=context_builder,
+            run_dir=run_dir, status=status, success=result["success"], score=result["score"],
         )
-        world.upsert("goal", root_goal)
-        (run_dir / "world.context.txt").write_text(
-            context_builder.render(world.snapshot),
-            encoding="utf-8",
-        )
-        result["world"] = {
-            "revision": world.snapshot.revision,
-            "resumed": resume_world_events is not None,
-            "agent_authored_records": sum(
-                1 for event in world.events() if event.actor == f"agent:{agent.id}"
-            ),
-            "aci": {
-                "accepted_events": solver_loop.stats.aci_accepted,
-                "rejected_events": solver_loop.stats.aci_rejected,
-                "world_mutations": solver_loop.stats.aci_world_mutations,
-            },
-            "legacy_inbox": {
-                "accepted": solver_loop.stats.inbox_accepted,
-                "rejected": solver_loop.stats.inbox_rejected,
-            },
-        }
+        result["world"] = world_result(world=world, solver_loop=solver_loop, agent_id=agent.id)
+        result["world"]["resumed"] = resume_world_events is not None
         persist_run_result(run_dir=run_dir, trace=trace, result=result)
         return result
