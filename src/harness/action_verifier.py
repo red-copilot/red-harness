@@ -1,15 +1,12 @@
 # ruff: noqa: I001
 from __future__ import annotations
 
-import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from .progress import ProgressLedger
 
-
-_TOKEN_RE = re.compile(r"[A-Za-z0-9]{3,}")
 
 
 class ActionVerification(BaseModel):
@@ -22,13 +19,10 @@ class ActionVerification(BaseModel):
 
 
 class ActionVerifier:
-    """Conservative deterministic verifier for solver action outcomes."""
+    """Conservative verifier: agent text cannot establish verified success.
 
-    @staticmethod
-    def _tokens(value: str | None) -> set[str]:
-        if not value:
-            return set()
-        return {token.lower() for token in _TOKEN_RE.findall(value)}
+    trusted_evidence must come from harness-controlled code, never agent payloads.
+    """
 
     def verify(
         self,
@@ -36,6 +30,7 @@ class ActionVerifier:
         *,
         planned_world_revision: int | None = None,
         current_world_revision: int | None = None,
+        trusted_evidence: dict | None = None,
     ) -> ActionVerification | None:
         expected = progress.expected_observation
         actual = progress.actual_observation
@@ -80,47 +75,37 @@ class ActionVerifier:
                 replan_reasons=reasons,
             )
 
-        expected_tokens = self._tokens(expected)
-        actual_tokens = self._tokens(actual)
-        overlap = expected_tokens & actual_tokens
-        coverage = len(overlap) / max(1, len(expected_tokens))
+        # Textual observations, including world.observe from an agent, are claims.
+        # Only the trusted runtime's explicit verdict may establish success.
+        if trusted_evidence is not None:
+            source = trusted_evidence.get("source")
+            verdict = trusted_evidence.get("verdict")
+            action_id = trusted_evidence.get("action_id")
+            actual_id = last_action.get("tool_call_id")
+            if (
+                source in {"tool_adapter", "task_verifier"}
+                and verdict in {"verified", "contradicted"}
+                and isinstance(action_id, str)
+                and bool(action_id)
+                and action_id == actual_id
+            ):
+                return ActionVerification(
+                    status=verdict,
+                    expected_observation=expected,
+                    actual_observation=actual,
+                    evidence=[f"trusted:{source}:{action_id}"],
+                    replan_required=verdict == "contradicted",
+                    replan_reasons=(["trusted_evidence_contradicted"] if verdict == "contradicted" else []),
+                )
 
-        explicit_negative = any(
-            token in actual.lower()
-            for token in ("not found", "missing", "closed", "denied", "failed", "unreachable")
-        )
-        if explicit_negative:
-            reasons.append("expected_observation_contradicted")
-            evidence.append("actual observation contains explicit negative evidence")
-            return ActionVerification(
-                status="contradicted",
-                expected_observation=expected,
-                actual_observation=actual,
-                evidence=evidence,
-                replan_required=True,
-                replan_reasons=reasons,
-            )
-
-        if expected.lower() in actual.lower() or coverage >= 0.6:
-            evidence.append(f"token_coverage={coverage:.2f}")
-            return ActionVerification(
-                status="verified",
-                expected_observation=expected,
-                actual_observation=actual,
-                evidence=evidence,
-                replan_required=bool(reasons),
-                replan_reasons=reasons,
-            )
-
-        reasons.append("expected_observation_not_evidenced")
+        reasons.append("unverified_observation")
         if world_revision_changed:
             reasons.append("world_revision_changed")
-        evidence.append(f"token_coverage={coverage:.2f}")
         return ActionVerification(
             status="pending",
             expected_observation=expected,
             actual_observation=actual,
-            evidence=evidence,
+            evidence=["agent observations are not independently verified"],
             replan_required=True,
             replan_reasons=reasons,
         )
