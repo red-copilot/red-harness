@@ -17,17 +17,10 @@ from .budget import UsageMetrics
 from .environment import build_environment
 from .gateway_runtime import GatewayConfig, build_gateway_runtime
 from .models import AgentSpec, TaskSpec
-from .progress import ProgressLedger
-from .skills import load_skills
-from .solver_loop import SolverLoop
 from .trace import TraceRecorder
 from .verifier import run_verifier
-from .world import (
-    Goal,
-    SQLiteWorldRepository,
-    WorldContextBuilder,
-    WorldRepository,
-)
+from .world import Goal, SQLiteWorldRepository, WorldRepository
+from .runtime import bootstrap_solver
 
 
 def _sha256(path: Path) -> str:
@@ -81,7 +74,6 @@ class Orchestrator:
                     source_db.backup(target_db)
             else:
                 shutil.copyfile(source, world_event_path)
-        world = self.world_repository_factory(world_event_path)
         root_goal = Goal(
             id=f"goal:{task.id}:objective",
             description=task.objective.description,
@@ -89,26 +81,20 @@ class Orchestrator:
             priority=1.0,
             attributes={"task_id": task.id, "category": task.category},
         )
-        world.upsert("goal", root_goal)
-        context_builder = WorldContextBuilder()
-        (run_dir / "world.context.txt").write_text(
-            context_builder.render(world.snapshot, query=task.objective.description),
-            encoding="utf-8",
-        )
-        progress = ProgressLedger(active_goal=root_goal.id)
-        progress_path = run_dir / "progress.json"
-        progress.write(progress_path)
-        solver_loop = SolverLoop(
-            world=world,
-            progress=progress,
+        runtime = bootstrap_solver(
             run_dir=run_dir,
             trace=trace,
+            goal=root_goal,
             actor=f"agent:{agent.id}",
             context_query=task.objective.description,
-            planned_world_revision=world.snapshot.revision,
-            context_builder=context_builder,
-            skills=load_skills(self.skills_root),
+            skills_root=self.skills_root,
+            world_repository_factory=self.world_repository_factory,
         )
+        world = runtime.world
+        context_builder = runtime.context_builder
+        progress = runtime.progress
+        solver_loop = runtime.loop
+        progress_path = run_dir / "progress.json"
         started = time.monotonic()
         status = "running"
         usage = UsageMetrics()
