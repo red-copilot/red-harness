@@ -57,3 +57,13 @@ behind runtime import aliases.
 4. Separate SDK/network, Docker and Pi infrastructure from policy logic.
 5. Consolidate composition at CLI and worker entry points, preserving
    existing external interfaces and world event format.
+
+## Lifecycle status policy
+
+`runtime.lifecycle.resolve_run_status` centralizes the existing priority order
+for externally evaluated runs: confirmed objective completion takes priority,
+then timeout, budget exhaustion and ordinary finish. Local-run error and
+verification branches remain in `Orchestrator`; this extraction does not
+change the environment, SDK or teardown semantics. Runtime result persistence
+and world projections are shared, but resource ownership stays with the
+individual run entry points.
