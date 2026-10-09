@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from ..secureio import open_regular_file
 from .models import WorldObjectKind
 from .protocol import IngestError, IngestReport, WorldSubmission
 from .repository import WorldRepository
@@ -32,7 +33,7 @@ class WorldInboxCursor:
         if not self.path.exists():
             return report
 
-        with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+        with open_regular_file(self.path, "r", errors="replace") as handle:
             handle.seek(self.offset)
             chunk = handle.read()
             self.offset = handle.tell()
@@ -60,9 +61,7 @@ class WorldInboxCursor:
                 report.accepted += 1
             except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 report.rejected += 1
-                report.errors.append(
-                    IngestError(line=self.line_number, message=str(exc))
-                )
+                report.errors.append(IngestError(line=self.line_number, message=str(exc)))
 
         return report
 

@@ -111,7 +111,6 @@ def test_world_store_supports_updates_and_removals(tmp_path):
     assert "goal-1" not in store.snapshot.goals
 
 
-
 def test_world_inbox_validates_agent_submissions(tmp_path):
     store = WorldStore(tmp_path / "world.events.jsonl")
     inbox = tmp_path / "world.inbox.jsonl"
@@ -148,7 +147,6 @@ def test_world_inbox_validates_agent_submissions(tmp_path):
     assert persisted[0]["actor"] == "agent:test"
 
 
-
 def test_world_temporal_metadata_and_provenance(tmp_path):
     store = WorldStore(tmp_path / "world.events.jsonl")
     now = datetime.now(UTC)
@@ -160,6 +158,7 @@ def test_world_temporal_metadata_and_provenance(tmp_path):
         valid_from=now,
         expires_at=now + timedelta(minutes=5),
         supersedes=["obs-old"],
+        contradicts=["obs-conflicting"],
         provenance={"source": "scanner"},
     )
 
@@ -176,6 +175,7 @@ def test_world_temporal_metadata_and_provenance(tmp_path):
     assert restored.provenance.source_event_id == "tool-result-1"
     assert restored.provenance.event_id is not None
     assert restored.supersedes == ["obs-old"]
+    assert restored.contradicts == ["obs-conflicting"]
     assert restored.expires_at == now + timedelta(minutes=5)
 
 
@@ -189,6 +189,22 @@ def test_world_temporal_window_rejects_invalid_range():
             expires_at=now - timedelta(seconds=1),
         )
 
+
+def test_world_record_links_migrate_from_legacy_shape():
+    # New provenance links are additive so v1 records without them keep loading.
+    legacy = Observation.model_validate(
+        {"id": "legacy-observation", "type": "note", "content": {"value": "old"}}
+    )
+    assert legacy.contradicts == []
+
+
+def test_world_temporal_links_require_unique_nonempty_ids():
+    with pytest.raises(ValueError, match="contradicts"):
+        Observation(
+            id="bad-links",
+            type="note",
+            contradicts=["other", "other"],
+        )
 
 
 def test_event_provenance_overrides_agent_actor(tmp_path):

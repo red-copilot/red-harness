@@ -24,6 +24,8 @@ class WorldRepository(Protocol):
 
     def replay(self) -> WorldSnapshot: ...
 
+    def flush(self) -> None: ...
+
     def append(
         self,
         event: WorldEvent,
