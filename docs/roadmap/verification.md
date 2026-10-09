@@ -2,20 +2,28 @@
 
 **Scope:** `action_verifier.py`, `verifier.py`, `audit.py`, `solver_loop.py`, World provenance. Existing code conservatively treats Agent observations as claims and accepts structured trusted evidence; preserve those safeguards.
 
-### VER-01 [ ] P0 — Typed evidence and verdict contracts
+### VER-01 [x] P0 — Typed evidence and verdict contracts
 Deliver: separate immutable EvidenceRef, ActionVerdict, ObjectiveVerdict models with action/run IDs, producer, capture time, world revision and artifact hash/ref; distinguish command execution, observed effect and objective completion. Reject non-Harness producers from the trusted channel. Wire adapter results without trusting an Agent-authored source string.
 Accept: unit tests for forged producer, missing action ID, stale revision, conflicting evidence, failed tool with apparent success text; no false verified verdicts. Version or migrate existing event schemas.
 
-### VER-02 [ ] P0 — Trusted verification boundary
+Implementation is complete on branch `codex/ver-01-typed-evidence`: immutable v1 contracts are in `src/harness/verification.py`; the solver accepts typed action verdicts and persists the versioned verdict/evidence shape. Regression coverage covers producer forgery, missing IDs, stale revisions, action identity mismatch, conflicting evidence IDs, and failed execution. A failed command remains an execution failure with a pending effect verdict. Validation on 2026-10-09: full suite passed (205 passed, 1 Docker integration test skipped locally); `ruff check .`, architecture test, compileall, and `git diff --check` passed. Maintainer review is required before merge because this changes the verification trust boundary.
+
+### VER-02 [x] P0 — Trusted verification boundary
 Deliver: verifier registry and explicit authority for `tool_adapter`, isolated task verifier, benchmark evaluator; enforce producer identity at integration boundary rather than caller-supplied dictionary alone. Keep objective verdict independent of tool result.
 Accept: integration test with malicious agent claims and successful command exits failing goal verification; all terminal verified goals tied to durable evidence IDs.
 
-### VER-03 [ ] P1 — Durable evidence lifecycle and audit
+Implementation and acceptance evidence are present on the current branch: `VerifierRegistry` issues in-process producer capabilities; local task verifiers and benchmark evaluators persist sanitized, content-addressed objective evidence; the terminal v2 audit requires the verified objective verdict and validates its artifact hash and run provenance. Python task verifiers run under bubblewrap with user/PID/network/IPC/UTS namespaces, no capabilities, a read-only task and run view, a minimal environment, and resource limits; missing bubblewrap or unsupported environment networking fails closed. The CI workflow installs bubblewrap. Malicious Agent claims and successful tool exits without evaluator evidence do not complete an objective. Validation on 2026-10-09: full suite passed (205 passed, 1 Docker integration test skipped locally), architecture test, Ruff lint, compileall, and diff check passed. Maintainer review is required before merge because this changes the verification trust boundary.
+
+### VER-03 [x] P1 — Durable evidence lifecycle and audit
 Deliver: content-addressed artifact references, provenance and redaction; revision-aware invalidation/supersession; reconcile contradictory verdicts and trace links.
 Accept: audit flags missing evidence, mismatched verdicts and hash corruption; event replay yields same verdict history; no secrets persisted.
 
-### VER-04 [ ] P2 — Online/offline verifier parity
+Content-addressed objective evidence, bounded sanitized artifacts, provenance links and hash verification are implemented. Audit now treats the verdict at the highest World revision before terminal completion as authoritative, reports lower-revision verdicts as superseded, and flags contradictory verdicts within the current revision; an earlier success cannot mask a later contradiction. Repeated audit/replay of the same immutable trace and artifacts yields the same report. Regression coverage in `tests/test_audit.py` covers artifact corruption, newer-revision supersession, and deterministic replay (13 tests). Validation on 2026-10-09: `tests/test_audit.py` passed (13 passed); full suite passed (236 passed, 2 Docker-dependent tests skipped locally); Ruff, compileall, and `git diff --check` passed.
+
+### VER-04 [x] P2 — Online/offline verifier parity
 Deliver: same verifier protocol for local tasks and benchmark adapters, sandboxed verifier execution where required.
 Accept: shared contract tests for success, failure, unavailable verifier, timeout and inconsistent evaluator responses; fail closed where verification is unavailable.
+
+Task verifiers and benchmark evaluators use the same durable `ObjectiveVerdict` persistence contract. Both runner paths now record an `unavailable` verdict with a content-addressed artifact containing only the safe error class when a verifier/evaluator fails, return an unsuccessful error result, and perform normal teardown; exception messages are excluded from evidence and result metadata. Shared tests cover verified, contradicted and unavailable outcomes for both producer authorities. Python/Docker verifier subprocess timeouts and missing runtimes surface as explicit `VerifierError`s. Benchmark evaluator calls are bounded by remaining wall-time and reject malformed or non-finite responses. End-to-end tests execute the local task and benchmark paths through unavailable outcomes and audit their durable artifacts; coverage also includes verifier timeout/missing bubblewrap and malformed output, plus benchmark timeout/inconsistent response. Validation on 2026-10-09: 46 focused tests passed, Ruff, compileall, architecture test and `git diff --check` passed. Two full-suite runs each had only the existing 1,000-event SQLite performance test over its 25 s threshold (25.66 s and 25.99 s); an isolated rerun passed in 21.48 s. Latest full result: 297 passed, 3 skipped, 1 timing failure. Docker/CI validation remains environment-dependent.
 
 **Not in scope:** LLM self-confidence as proof, automatically elevating World claims, or benchmark-specific shortcuts in core.
