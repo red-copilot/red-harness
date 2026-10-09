@@ -1,0 +1,27 @@
+apiVersion: harness/v1
+id: multidomain-demo
+type: cli
+command:
+  - python
+  - -c
+  - |
+    import os
+    from pathlib import Path
+    from harness.telemetry import model_usage, tool_call
+
+    task_id = os.environ["HARNESS_TASK_ID"]
+    outputs = {
+        "hello-001": ("proof.txt", "red-harness-ok\n"),
+        "coding-001": ("solution.py", "def solve():\n    return 42\n"),
+        "file-001": ("receipt.txt", "harness-fixture-accepted\n"),
+        "web-001": ("answer.txt", "flag{web_fixture_token}\n"),
+        "pwn-001": ("answer.txt", "24\n"),
+        "reverse-001": ("answer.txt", "flag{reverse_fixture}\n"),
+        "crypto-001": ("answer.txt", "flag{crypto_fixture}\n"),
+        "forensics-001": ("answer.txt", "flag{forensics_fixture}\n"),
+        "misc-001": ("answer.txt", "42\n"),
+    }
+    name, content = outputs[task_id]
+    tool_call(tool="file.write")
+    model_usage(input_tokens=7, output_tokens=5, cost_usd=0.01, model="demo")
+    Path(os.environ["HARNESS_RUN_DIR"], name).write_text(content, encoding="utf-8")

@@ -1,0 +1,19 @@
+apiVersion: harness/v1
+id: web-001
+name: Extract a marker from a simulated HTTP response
+category: web
+difficulty: trivial
+tags: [smoke, synthetic, offline]
+objective:
+  description: Read capture.txt and write its X-Fixture-Token value to answer.txt.
+environment:
+  provider: none
+budgets:
+  wall_time: 30
+  max_tokens: 100
+  max_model_calls: 3
+  max_tool_calls: 3
+  max_cost_usd: 0.10
+verification:
+  type: python
+  entrypoint: verifier.py

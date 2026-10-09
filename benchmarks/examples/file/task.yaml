@@ -1,0 +1,19 @@
+apiVersion: harness/v1
+id: file-001
+name: Create a verified receipt file
+category: file
+difficulty: trivial
+tags: [smoke, offline]
+objective:
+  description: Create receipt.txt containing exactly `harness-fixture-accepted` followed by one newline.
+environment:
+  provider: none
+budgets:
+  wall_time: 30
+  max_tokens: 100
+  max_model_calls: 3
+  max_tool_calls: 3
+  max_cost_usd: 0.10
+verification:
+  type: python
+  entrypoint: verifier.py

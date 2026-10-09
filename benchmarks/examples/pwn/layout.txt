@@ -1,0 +1,4 @@
+Synthetic 64-bit stack frame for an offline teaching fixture:
+buffer: 16 bytes
+saved frame pointer: 8 bytes
+saved return address follows both fields

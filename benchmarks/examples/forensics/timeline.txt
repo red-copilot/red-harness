@@ -1,0 +1,3 @@
+2026-01-01T00:00:01Z file-open /home/user/readme.txt
+2026-01-01T00:00:03Z archive-extract /tmp/recovered.bin
+2026-01-01T00:00:04Z recovered-marker flag{forensics_fixture}

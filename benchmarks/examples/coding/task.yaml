@@ -1,0 +1,19 @@
+apiVersion: harness/v1
+id: coding-001
+name: Implement a deterministic Python function
+category: coding
+difficulty: trivial
+tags: [smoke, offline]
+objective:
+  description: Create solution.py with a zero-argument solve function that returns integer 42.
+environment:
+  provider: none
+budgets:
+  wall_time: 30
+  max_tokens: 100
+  max_model_calls: 3
+  max_tool_calls: 3
+  max_cost_usd: 0.10
+verification:
+  type: python
+  entrypoint: verifier.py
