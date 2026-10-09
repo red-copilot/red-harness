@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from harness.planner import HeuristicSkillPlanner, RollingHorizonPlanner
 from harness.progress import ProgressLedger
@@ -22,6 +23,98 @@ def test_planner_filters_unmet_requirements() -> None:
     ]
 
     assert HeuristicSkillPlanner().propose(snapshot, skills) == []
+
+
+def test_skill_execution_metadata_is_inert_and_scores_are_deterministic(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "must-not-be-created"
+    skill = SkillSpec(
+        id="inert-metadata",
+        description="Planner metadata is descriptive only",
+        produces=[{"kind": "observation", "type": "custom.result"}],
+        metadata={"command": ["touch", str(marker)]},
+    )
+    planner = HeuristicSkillPlanner()
+    snapshot = WorldSnapshot()
+
+    first = planner.propose(snapshot, [skill])
+    second = planner.propose(snapshot, [skill])
+
+    assert not marker.exists()
+    assert first == second
+    assert first[0].skill_id == "inert-metadata"
+
+
+def test_planner_explains_missing_expired_and_untrusted_skill_requirements() -> None:
+    now = datetime.now(UTC)
+    snapshot = WorldSnapshot(
+        observations={
+            "stale": Observation(
+                id="stale",
+                type="state.stale",
+                expires_at=now - timedelta(seconds=1),
+                provenance=Provenance(epistemic_status="verified"),
+            ),
+            "claim": Observation(
+                id="claim",
+                type="state.claimed",
+                provenance=Provenance(epistemic_status="claim"),
+            ),
+        }
+    )
+    skills = [
+        SkillSpec(
+            id="missing",
+            description="requires missing state",
+            requires=[{"kind": "observation", "type": "state.missing"}],
+        ),
+        SkillSpec(
+            id="stale",
+            description="requires current state",
+            requires=[
+                {"kind": "observation", "type": "state.stale", "minimum_trust": "verified"}
+            ],
+        ),
+        SkillSpec(
+            id="untrusted",
+            description="requires trusted state",
+            requires=[
+                {
+                    "kind": "observation",
+                    "type": "state.claimed",
+                    "minimum_trust": "verified",
+                }
+            ],
+        ),
+    ]
+
+    report = HeuristicSkillPlanner().explain(snapshot, skills)
+
+    assert [item.rejection_reasons[0].split(":", 1)[0] for item in report] == [
+        "missing",
+        "expired",
+        "insufficient_trust",
+    ]
+    assert all(not item.applicable for item in report)
+
+
+def test_capability_gain_changes_applicable_plan() -> None:
+    snapshot = WorldSnapshot()
+    skill = SkillSpec(
+        id="probe-service",
+        description="Probe a reachable service",
+        requires=[{"kind": "capability", "type": "network.reachability"}],
+        produces=[{"kind": "observation", "type": "network.service"}],
+    )
+    planner = RollingHorizonPlanner()
+    before = planner.propose(snapshot, [skill], progress=ProgressLedger())
+    snapshot.capabilities["reachability"] = Capability(
+        id="reachability", type="network.reachability", scope="target"
+    )
+    after = planner.propose(snapshot, [skill], progress=ProgressLedger())
+    assert before.actions == []
+    assert [action.skill_id for action in after.actions] == ["probe-service"]
 
 
 def test_planner_prefers_novel_outputs() -> None:
@@ -190,6 +283,28 @@ def test_rolling_horizon_consumes_verifier_replan_state() -> None:
     assert plan.replan_required is True
     assert plan.replan_reasons == ["expected_observation_missing"]
     assert plan.previous_verification_status == "inconclusive"
+
+
+def test_hypothesis_contradiction_changes_plan_decision() -> None:
+    progress = ProgressLedger(
+        hypotheses={
+            "hyp-1": {
+                "id": "hyp-1",
+                "statement": "service is exposed",
+                "status": "refuted",
+                "evidence_against": ["evidence-1"],
+            }
+        }
+    )
+    skill = SkillSpec(
+        id="alternate-service-check",
+        description="Check another service after the current hypothesis is refuted",
+        produces=[{"kind": "observation", "type": "network.service"}],
+    )
+    plan = RollingHorizonPlanner().propose(WorldSnapshot(), [skill], progress=progress, horizon=1)
+    assert plan.replan_required
+    assert "hypothesis_contradicted" in plan.replan_reasons
+    assert "hypothesis_contradicted" in plan.actions[0].replan_triggers
 
 
 def test_rejected_submission_becomes_planner_replan_signal() -> None:

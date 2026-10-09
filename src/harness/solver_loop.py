@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -12,7 +14,11 @@ from .planner import RollingHorizonPlanner, RollingPlan
 from .progress import ProgressLedger
 from .session import AgentEvent, AgentObservation, AgentSession
 from .skills import SkillSpec
+from .solver_policy import SolverAction, SolverDecision, decide_solver_action
 from .trace import TraceRecorder
+
+MAX_PROCESSED_EVENT_IDS = 50_000
+from .verification import AuthorizedActionVerdict, VerifierRegistry
 from .world import Observation, Provenance, WorldContextBuilder, WorldRepository
 from .world.live import WorldInboxCursor
 
@@ -48,12 +54,17 @@ class SolverLoop:
         planned_world_revision: int,
         typed_aci: TypedACI | None = None,
         action_verifier: ActionVerifier | None = None,
+        verifier_registry: VerifierRegistry | None = None,
         context_builder: WorldContextBuilder | None = None,
         world_inbox: WorldInboxCursor | None = None,
         skills: list[SkillSpec] | None = None,
         planner: RollingHorizonPlanner | None = None,
+        planner_enabled: bool = True,
+        world_context_enabled: bool = True,
         plan_horizon: int = 3,
         processed_event_ids: dict[str, str] | None = None,
+        world_inbox_path: Path | None = None,
+        sync_agent_views: Callable[[], None] | None = None,
     ) -> None:
         self.world = world
         self.progress = progress
@@ -63,29 +74,74 @@ class SolverLoop:
         self.context_query = context_query
         self.planned_world_revision = planned_world_revision
         self.typed_aci = typed_aci or TypedACI()
-        self.action_verifier = action_verifier or ActionVerifier()
+        self.verifier_registry = verifier_registry or VerifierRegistry()
+        self.action_verifier = action_verifier or ActionVerifier(self.verifier_registry)
         self.context_builder = context_builder or WorldContextBuilder()
         self.world_inbox = world_inbox or WorldInboxCursor(
-            run_dir / "world.inbox.jsonl",
+            world_inbox_path or run_dir / "world.inbox.jsonl",
             world,
             actor=actor,
         )
         self.progress_path = run_dir / "progress.json"
+        self.sync_agent_views = sync_agent_views
         self.plan_path = run_dir / "plan.json"
         self.skills = list(skills or [])
         self.planner = planner or RollingHorizonPlanner()
+        self.planner_enabled = planner_enabled
+        self.world_context_enabled = world_context_enabled
         self.plan_horizon = max(1, min(3, plan_horizon))
         self._last_plan_signature: tuple | None = None
         self.stats = SolverLoopStats()
         self._processed_event_ids: dict[str, str] = dict(processed_event_ids or {})
+
+    def _correlate_legacy_tool_event(self, event: AgentEvent) -> AgentEvent:
+        if event.type not in {"tool.call", "tool.result"}:
+            return event
+        data = dict(event.data)
+        event_id = event.event_id
+        call_id = data.get("tool_call_id")
+        valid_call_id = isinstance(call_id, str) and 0 < len(call_id) <= 256
+        correlations = self.progress.tool_event_correlations
+        if not valid_call_id and isinstance(event_id, str):
+            call_id = correlations.get(event_id)
+            valid_call_id = isinstance(call_id, str) and 0 < len(call_id) <= 256
+
+        if not valid_call_id and event.type == "tool.call":
+            if isinstance(event_id, str) and event_id:
+                seed = event_id.encode("utf-8")
+                call_id = f"legacy_{hashlib.sha256(seed).hexdigest()[:32]}"
+            else:
+                call_id = f"legacy_{uuid.uuid4().hex}"
+            valid_call_id = True
+        elif not valid_call_id and event.type == "tool.result":
+            tool = data.get("tool")
+            candidates = [
+                action
+                for action in self.progress.active_actions.values()
+                if not isinstance(tool, str) or action.get("tool") == tool
+            ]
+            if len(candidates) == 1:
+                candidate_id = candidates[0].get("tool_call_id")
+                if isinstance(candidate_id, str) and candidate_id:
+                    call_id = candidate_id
+                    valid_call_id = True
+
+        if valid_call_id:
+            data["tool_call_id"] = call_id
+            if isinstance(event_id, str) and event_id:
+                correlations[event_id] = call_id
+                if len(correlations) > 100_000:
+                    correlations.pop(next(iter(correlations)))
+        return AgentEvent(type=event.type, data=data, event_id=event.event_id)
 
     async def process_event(
         self,
         session: AgentSession,
         event: AgentEvent,
         *,
-        trusted_evidence: dict | None = None,
-    ) -> None:
+        trusted_verdict: AuthorizedActionVerdict | None = None,
+    ) -> SolverDecision:
+        event = self._correlate_legacy_tool_event(event)
         if event.event_id:
             canonical = json.dumps(
                 {"type": event.type, "data": event.data},
@@ -98,7 +154,9 @@ class SolverLoop:
             previous = self._processed_event_ids.get(event.event_id)
             if previous == fingerprint:
                 self.stats.duplicate_events += 1
-                return
+                decision = SolverDecision(SolverAction.CONTINUE, "duplicate_event")
+                self._emit_decision(decision, event_type=event.type, event_id=event.event_id)
+                return decision
             if previous is not None:
                 self.stats.conflicting_event_ids += 1
                 self.trace.emit(
@@ -112,13 +170,38 @@ class SolverLoop:
                         data={"event_id": event.event_id, "event_type": event.type},
                     )
                 )
-                return
+                decision = SolverDecision(SolverAction.CONTINUE, "conflicting_event_id")
+                self._emit_decision(decision, event_type=event.type, event_id=event.event_id)
+                return decision
             self._processed_event_ids[event.event_id] = fingerprint
-            if len(self._processed_event_ids) > 100_000:
+            if len(self._processed_event_ids) > MAX_PROCESSED_EVENT_IDS:
                 self._processed_event_ids.pop(next(iter(self._processed_event_ids)))
 
         self.progress.record_event(event)
+        self.progress.write(self.progress_path)
+        self._sync_agent_views()
         before_revision = self.world.snapshot.revision
+        if event.type in {"tool.call", "tool.result"}:
+            tool_call_id = event.data.get("tool_call_id")
+            if isinstance(tool_call_id, str) and 0 < len(tool_call_id) <= 256:
+                trace_data: dict[str, object] = {
+                    "tool_call_id": tool_call_id,
+                    "source_event_id": (
+                        event.event_id
+                        if isinstance(event.event_id, str) and len(event.event_id) <= 256
+                        else None
+                    ),
+                }
+                if event.type == "tool.result":
+                    trace_data["is_error"] = bool(event.data.get("is_error", False))
+                    trace_data["execution_status"] = (self.progress.last_action or {}).get("status")
+                self.trace.emit(
+                    event.type,
+                    actor=self.actor,
+                    data=trace_data,
+                    parent_event_id=event.event_id,
+                    action_id=tool_call_id,
+                )
 
         try:
             aci_mutations = self.typed_aci.apply(
@@ -224,9 +307,11 @@ class SolverLoop:
         if event.type in self.VERIFY_EVENTS:
             verification = self.action_verifier.verify(
                 self.progress,
+                run_id=self.trace.run_id,
                 planned_world_revision=self.planned_world_revision,
                 current_world_revision=self.world.snapshot.revision,
-                trusted_evidence=trusted_evidence,
+                evidence_world_revision=before_revision,
+                trusted_verdict=trusted_verdict,
             )
             if verification is None:
                 self.progress.skipped_verifications += 1
@@ -256,7 +341,10 @@ class SolverLoop:
                                         "action_id": action_id,
                                         "expected_observation": verification.expected_observation,
                                         "actual_observation": verification.actual_observation,
-                                        "evidence": verification.evidence,
+                                        "evidence": [
+                                            ref.model_dump(mode="json")
+                                            for ref in verification.evidence
+                                        ],
                                     },
                                     confidence=1.0,
                                     source="harness.action_verifier",
@@ -287,7 +375,39 @@ class SolverLoop:
                     )
 
         self.progress.write(self.progress_path)
-        await self.maybe_replan(session)
+        self._sync_agent_views()
+        decision = self.decide(event_type=event.type)
+        if decision.action is SolverAction.REPLAN:
+            plan = await self.maybe_replan(session)
+            if plan is None:
+                decision = SolverDecision(SolverAction.CONTINUE, "replan_suppressed")
+        if decision.action is SolverAction.STOP:
+            await session.observe(
+                AgentObservation(
+                    type="solver.stop",
+                    data={"reason": decision.reason},
+                )
+            )
+        self._emit_decision(decision, event_type=event.type, event_id=event.event_id)
+        return decision
+
+    def _emit_decision(
+        self, decision: SolverDecision, *, event_type: str, event_id: str | None
+    ) -> None:
+        self.trace.emit(
+            "solver.decision",
+            actor="harness",
+            data={
+                "action": decision.action.value,
+                "reason": decision.reason,
+                "event_type": event_type,
+                "event_id": event_id,
+                "world_revision": self.world.snapshot.revision,
+                "no_progress_count": self.progress.no_progress_count,
+                "replan_count": self.progress.replan_count,
+                "remaining_budget_fraction": self.progress.remaining_budget_fraction,
+            },
+        )
 
     @property
     def processed_event_ids(self) -> dict[str, str]:
@@ -299,6 +419,11 @@ class SolverLoop:
         *,
         force: bool = False,
     ) -> RollingPlan | None:
+        if not self.planner_enabled:
+            return None
+        decision = self.decide(force_replan=force)
+        if decision.action is not SolverAction.REPLAN:
+            return None
         reasons = list(self.progress.replan_reasons)
         if self.progress.no_progress_count >= 2 and "no_progress_threshold" not in reasons:
             reasons.append("no_progress_threshold")
@@ -325,12 +450,15 @@ class SolverLoop:
             encoding="utf-8",
         )
         self.planned_world_revision = self.world.snapshot.revision
+        self.progress.replan_count += 1
         payload = plan.model_dump(mode="json")
         self.trace.emit(
             "solver.plan.updated",
             actor="harness",
             data=payload,
         )
+        self.progress.write(self.progress_path)
+        self._sync_agent_views()
         await session.observe(
             AgentObservation(
                 type="solver.plan.updated",
@@ -344,6 +472,21 @@ class SolverLoop:
         self.progress.write(self.progress_path)
         self._last_plan_signature = signature
         return plan
+
+    def decide(
+        self,
+        *,
+        event_type: str | None = None,
+        force_replan: bool = False,
+    ) -> SolverDecision:
+        return decide_solver_action(
+            event_type=event_type,
+            replan_reasons=self.progress.replan_reasons,
+            no_progress_count=self.progress.no_progress_count,
+            replans_used=self.progress.replan_count,
+            remaining_budget_fraction=self.progress.remaining_budget_fraction,
+            force_replan=force_replan,
+        )
 
     def finish_ingest(self) -> None:
         report = self.world_inbox.poll()
@@ -360,9 +503,13 @@ class SolverLoop:
 
     def _write_context(self) -> None:
         (self.run_dir / "world.context.txt").write_text(
-            self.context_builder.render(
-                self.world.snapshot,
-                query=self.context_query,
-            ),
+            self.context_builder.render(self.world.snapshot, query=self.context_query)
+            if self.world_context_enabled
+            else "",
             encoding="utf-8",
         )
+        self._sync_agent_views()
+
+    def _sync_agent_views(self) -> None:
+        if self.sync_agent_views is not None:
+            self.sync_agent_views()

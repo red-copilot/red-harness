@@ -30,12 +30,25 @@ class CoordinationStore:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA busy_timeout=30000")
         return connection
 
+    @staticmethod
+    def _enable_wal(db: sqlite3.Connection) -> None:
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                db.execute("PRAGMA journal_mode=WAL")
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+
     def _init_db(self) -> None:
         with self._connect() as db:
+            self._enable_wal(db)
+            db.execute("BEGIN IMMEDIATE")
             db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS work_items (
@@ -164,7 +177,7 @@ class CoordinationStore:
                     OR (
                       state = 'running'
                       AND lease_expires_at IS NOT NULL
-                      AND lease_expires_at < ?
+                      AND lease_expires_at <= ?
                     )
                   )
                 ORDER BY priority DESC, created_at
@@ -201,8 +214,9 @@ class CoordinationStore:
                 UPDATE work_items
                 SET lease_expires_at=?, updated_at=?
                 WHERE id=? AND state='running' AND lease_owner=?
+                    AND lease_expires_at>?
                 """,
-                (now + lease_seconds, now, work_id, agent_id),
+                (now + lease_seconds, now, work_id, agent_id, now),
             )
         return cursor.rowcount == 1
 
@@ -215,12 +229,14 @@ class CoordinationStore:
                 SET state='completed', result_json=?, error=NULL,
                     lease_owner=NULL, lease_expires_at=NULL, updated_at=?
                 WHERE id=? AND state='running' AND lease_owner=?
+                    AND lease_expires_at>?
                 """,
                 (
                     json.dumps(result, ensure_ascii=False),
                     now,
                     work_id,
                     agent_id,
+                    now,
                 ),
             )
         return cursor.rowcount == 1
@@ -235,8 +251,9 @@ class CoordinationStore:
                 SET state=?, error=?, lease_owner=NULL,
                     lease_expires_at=NULL, updated_at=?
                 WHERE id=? AND state='running' AND lease_owner=?
+                    AND lease_expires_at>?
                 """,
-                (state, error[:4000], now, work_id, agent_id),
+                (state, error[:4000], now, work_id, agent_id, now),
             )
         return cursor.rowcount == 1
 
@@ -249,7 +266,8 @@ class CoordinationStore:
                 SET state='queued', lease_owner=NULL,
                     lease_expires_at=NULL, updated_at=?
                 WHERE id=? AND state='running' AND lease_owner=?
+                    AND lease_expires_at>?
                 """,
-                (now, work_id, agent_id),
+                (now, work_id, agent_id, now),
             )
         return cursor.rowcount == 1
