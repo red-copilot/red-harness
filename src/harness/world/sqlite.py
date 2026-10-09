@@ -16,7 +16,10 @@ from .repository import WorldConflictError
 class SQLiteWorldRepository:
     """Transactional event-sourced WorldRepository backed by SQLite/WAL."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, snapshot_interval: int = 500) -> None:
+        if snapshot_interval < 1:
+            raise ValueError("snapshot_interval must be positive")
+        self.snapshot_interval = snapshot_interval
         self.db_path = (
             path if path.suffix == ".db" else path.with_name("world.db")
         )
@@ -29,6 +32,7 @@ class SQLiteWorldRepository:
         self._reducer = WorldReducer()
         self._initialize()
         self._import_legacy_jsonl_if_needed()
+        self._snapshot_cache = self.snapshot
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -92,7 +96,12 @@ class SQLiteWorldRepository:
     @property
     def snapshot(self) -> WorldSnapshot:
         with self._connect() as connection:
-            return self._load_snapshot(connection)
+            # Revision and materialized rows must come from the same SQLite
+            # read snapshot while writers commit concurrently in WAL mode.
+            connection.execute("BEGIN")
+            snapshot = self._load_snapshot(connection)
+            self._snapshot_cache = snapshot
+            return snapshot.model_copy(deep=True)
 
     @property
     def revision(self) -> int:
@@ -141,6 +150,25 @@ class SQLiteWorldRepository:
             source_collection = getattr(temp, collection_names[kind])
             collection[row["object_id"]] = source_collection[row["object_id"]]
         return snapshot
+
+    @staticmethod
+    def _snapshot_view(snapshot: WorldSnapshot) -> WorldSnapshot:
+        """Return a detached collection view without re-copying every record."""
+        view = snapshot.model_copy(deep=False)
+        for name in (
+            "entities",
+            "relations",
+            "observations",
+            "artifacts",
+            "capabilities",
+            "hypotheses",
+            "goals",
+            "actions",
+            "constraints",
+            "failures",
+        ):
+            setattr(view, name, dict(getattr(snapshot, name)))
+        return view
 
     def events(
         self,
@@ -211,7 +239,9 @@ class SQLiteWorldRepository:
                             f"world event id {event.id} already exists with different payload"
                         )
                     connection.execute("COMMIT")
-                    return self._load_snapshot(connection)
+                    snapshot = self._load_snapshot(connection)
+                    self._snapshot_cache = snapshot
+                    return self._snapshot_view(snapshot)
 
                 if (
                     expected_revision is not None
@@ -222,8 +252,30 @@ class SQLiteWorldRepository:
                         f"current {current_revision}"
                     )
 
-                snapshot = self._load_snapshot(connection)
-                candidate = snapshot.model_copy(deep=True)
+                cached = getattr(self, "_snapshot_cache", None)
+                if cached is not None and cached.revision == current_revision:
+                    snapshot = cached.model_copy(deep=False)
+                    collection_names = {
+                        "entity": "entities",
+                        "relation": "relations",
+                        "observation": "observations",
+                        "artifact": "artifacts",
+                        "capability": "capabilities",
+                        "hypothesis": "hypotheses",
+                        "goal": "goals",
+                        "action": "actions",
+                        "constraint": "constraints",
+                        "failure": "failures",
+                    }
+                    collection_name = collection_names[event.kind]
+                    setattr(snapshot, collection_name, dict(getattr(cached, collection_name)))
+                else:
+                    snapshot = self._load_snapshot(connection)
+                # The changed collection was detached above. The reducer only
+                # replaces or removes one record in that collection and updates
+                # the revision, so copying every record here adds quadratic work
+                # to long append streams without improving snapshot isolation.
+                candidate = snapshot
                 self._reducer.apply(candidate, event)
                 new_revision = candidate.revision
 
@@ -287,12 +339,14 @@ class SQLiteWorldRepository:
                     (str(new_revision),),
                 )
                 connection.execute("COMMIT")
+                self._snapshot_cache = candidate
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
 
-        self._write_exports()
-        return self.snapshot
+        if new_revision % self.snapshot_interval == 0:
+            self.flush()
+        return self._snapshot_view(candidate)
 
     def upsert(
         self,
@@ -378,3 +432,75 @@ class SQLiteWorldRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+    def flush(self) -> None:
+        """Write current event and snapshot exports at a checkpoint boundary."""
+        self._write_exports()
+
+    def integrity_check(self) -> dict[str, object]:
+        """Check SQLite structure and parity among events, objects, and exports."""
+        with self._connect() as connection:
+            sqlite_results = [
+                str(row[0]) for row in connection.execute("PRAGMA integrity_check").fetchall()
+            ]
+            materialized = self._load_snapshot(connection)
+        replayed = self.replay()
+        issues: list[str] = []
+        if sqlite_results != ["ok"]:
+            issues.append("sqlite_integrity_check_failed")
+        if replayed != materialized:
+            issues.append("event_replay_mismatch")
+        if self.snapshot_path.exists():
+            try:
+                exported_snapshot = WorldSnapshot.model_validate_json(
+                    self.snapshot_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                issues.append("snapshot_corrupt")
+            else:
+                if exported_snapshot != materialized:
+                    issues.append("snapshot_mismatch")
+        if self.export_event_path.exists():
+            try:
+                exported_events = [
+                    WorldEvent.model_validate_json(line)
+                    for line in self.export_event_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            except (OSError, ValueError):
+                issues.append("event_export_corrupt")
+            else:
+                if self._reducer.replay(exported_events) != materialized:
+                    issues.append("event_export_mismatch")
+        return {
+            "ok": not issues,
+            "sqlite": sqlite_results,
+            "revision": materialized.revision,
+            "event_count": len(self.events()),
+            "issues": issues,
+        }
+
+    def backup_to(self, destination: Path) -> Path:
+        """Create a transactionally consistent SQLite backup for restore/testing."""
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        self.flush()
+        with self._connect() as source, sqlite3.connect(destination) as target:
+            source.backup(target)
+        restored = SQLiteWorldRepository(destination, snapshot_interval=self.snapshot_interval)
+        restored.flush()
+        report = restored.integrity_check()
+        if not report["ok"]:
+            raise ValueError(f"World backup failed integrity verification: {report['issues']}")
+        return destination
+
+    def compact(self) -> dict[str, object]:
+        """Reclaim SQLite pages without deleting event or provenance history."""
+        self.flush()
+        with self._connect() as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("VACUUM")
+        report = self.integrity_check()
+        if not report["ok"]:
+            raise ValueError(f"World compaction failed integrity verification: {report['issues']}")
+        return report

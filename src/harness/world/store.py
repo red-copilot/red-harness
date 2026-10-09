@@ -56,6 +56,10 @@ class FileWorldRepository:
     def replay(self) -> WorldSnapshot:
         return self._reducer.replay(self.events())
 
+    def flush(self) -> None:
+        """Persist the current materialized snapshot; file events are already durable."""
+        self._write_snapshot()
+
     def append(
         self,
         event: WorldEvent,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from harness.world import WorldStore
 from harness.world.live import WorldInboxCursor
 from harness.world.protocol import WorldSubmission, write_submission
@@ -85,3 +87,16 @@ def test_world_inbox_cursor_handles_partial_and_invalid_lines(tmp_path) -> None:
     assert finished.rejected == 1
     assert store.snapshot.revision == 1
     assert "obs-partial" in store.snapshot.observations
+
+
+def test_world_inbox_rejects_symlinked_agent_input(tmp_path) -> None:
+    store = WorldStore(tmp_path / "world.events.jsonl")
+    outside = tmp_path / "protected.jsonl"
+    outside.write_text("{}\n", encoding="utf-8")
+    inbox = tmp_path / "world.inbox.jsonl"
+    inbox.symlink_to(outside)
+    cursor = WorldInboxCursor(inbox, store, actor="agent:test")
+
+    with pytest.raises(OSError):
+        cursor.poll()
+    assert store.snapshot.revision == 0

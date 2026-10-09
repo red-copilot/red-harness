@@ -45,6 +45,7 @@ class WorldContextBuilder:
                 "valid_from",
                 "expires_at",
                 "supersedes",
+                "contradicts",
             },
             exclude_none=True,
             exclude_defaults=True,
