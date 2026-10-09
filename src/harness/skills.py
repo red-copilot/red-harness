@@ -10,6 +10,8 @@ from .world.models import WorldObjectKind
 
 
 class StateSelector(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     kind: WorldObjectKind
     type: str = Field(min_length=1)
     scope: str | None = None
@@ -19,7 +21,7 @@ class StateSelector(BaseModel):
 class SkillSpec(BaseModel):
     """Planner-facing metadata for a reusable offensive technique."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     api_version: Literal["harness/skill/v1"] = Field(
         default="harness/skill/v1",

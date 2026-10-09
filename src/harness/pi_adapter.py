@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -145,6 +146,16 @@ class PiAdapter:
             )
         ]
         if not isinstance(usage, dict):
+            normalized.append(
+                (
+                    "model.usage_missing",
+                    {
+                        "source": "pi",
+                        "provider": message.get("provider"),
+                        "model": message.get("model", self.pi.model),
+                    },
+                )
+            )
             return normalized
         cost = usage.get("cost") if isinstance(usage.get("cost"), dict) else {}
         normalized.append(
@@ -154,13 +165,15 @@ class PiAdapter:
                     "source": "pi",
                     "provider": message.get("provider"),
                     "model": message.get("model", self.pi.model),
-                    "input_tokens": int(usage.get("input", 0) or 0),
-                    "output_tokens": int(usage.get("output", 0) or 0),
-                    "total_tokens": int(usage.get("totalTokens", 0) or 0),
-                    "cache_read_tokens": int(usage.get("cacheRead", 0) or 0),
-                    "cache_write_tokens": int(usage.get("cacheWrite", 0) or 0),
-                    "reasoning_tokens": int(usage.get("reasoning", 0) or 0),
-                    "cost_usd": float(cost.get("total", 0.0) or 0.0),
+                    # Keep raw counters intact; the budget boundary validates
+                    # them and terminates on malformed or negative values.
+                    "input_tokens": usage.get("input", 0),
+                    "output_tokens": usage.get("output", 0),
+                    "total_tokens": usage.get("totalTokens", 0),
+                    "cache_read_tokens": usage.get("cacheRead", 0),
+                    "cache_write_tokens": usage.get("cacheWrite", 0),
+                    "reasoning_tokens": usage.get("reasoning", 0),
+                    "cost_usd": cost.get("total", 0.0),
                 },
             )
         )
@@ -252,8 +265,20 @@ class PiAdapter:
             )
         return agent_dir
 
-    def _pi_args(self, task: TaskSpec, *, gateway_enabled: bool) -> list[str]:
-        args = [*self.pi.launcher_args, "--mode", self.pi.mode, "--no-session"]
+    def _pi_args(
+        self,
+        task: TaskSpec,
+        *,
+        gateway_enabled: bool,
+        session_id: str | None = None,
+    ) -> list[str]:
+        args = [*self.pi.launcher_args, "--mode", self.pi.mode]
+        if session_id is not None:
+            if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", session_id):
+                raise AgentError("invalid Pi session ID in recovery checkpoint")
+            args.extend(["--session", session_id])
+        elif self.pi.mode != "rpc":
+            args.append("--no-session")
         args.append("--approve" if self.pi.approve_project else "--no-approve")
         for enabled, flag in (
             (self.pi.context_files, "--no-context-files"),
@@ -440,14 +465,24 @@ class PiAdapter:
         gateway_network: str | None = None,
     ) -> AgentResult:
         del environment_project
+        from .network_policy import enforced_network
+
         gateway_enabled = bool(gateway_url and gateway_token)
+        enforced = enforced_network(
+            self.spec,
+            environment_network=environment_network,
+            gateway_network=gateway_network,
+            gateway_enabled=gateway_enabled,
+        )
         sidecar_gateway = gateway_enabled and gateway_network is not None
         if self.spec.network == "none" and gateway_enabled:
             raise AgentError("Pi network:none is incompatible with Gateway access")
         if sidecar_gateway and self.spec.network == "host":
             raise AgentError("Pi network:host is incompatible with sidecar Gateway mode")
 
-        if self.spec.network_profile == "offline":
+        if enforced is not None:
+            primary_network = enforced.primary
+        elif self.spec.network_profile == "offline":
             primary_network = "none"
         elif sidecar_gateway:
             primary_network = str(gateway_network)
@@ -594,5 +629,16 @@ class PiAdapter:
         )
         return result
 
-    def _command(self, task: TaskSpec, *, gateway_enabled: bool) -> list[str]:
-        return [self.pi.binary, *self._pi_args(task, gateway_enabled=gateway_enabled)]
+    def _command(
+        self,
+        task: TaskSpec,
+        *,
+        gateway_enabled: bool,
+        session_id: str | None = None,
+    ) -> list[str]:
+        return [
+            self.pi.binary,
+            *self._pi_args(
+                task, gateway_enabled=gateway_enabled, session_id=session_id
+            ),
+        ]

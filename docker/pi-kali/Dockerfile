@@ -1,9 +1,13 @@
-FROM kalilinux/kali-rolling
+ARG KALI_BASE_IMAGE=kalilinux/kali-last-release@sha256:3ea545e38849417fc933514e117014b98aa42fd87d239177fa4c9874dcb73d5f
+FROM ${KALI_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PI_VERSION=1.0.4
 
-RUN apt-get update \
+RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+        -exec sed -i 's/kali-rolling/kali-last-snapshot/g' {} + \
+    && grep -Rqs 'kali-last-snapshot' /etc/apt \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         kali-linux-core \
         ca-certificates \

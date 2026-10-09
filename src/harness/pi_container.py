@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -12,9 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from .agent import AgentError, AgentResult, _terminate_process
+from .agent_workspace import (
+    prepare_agent_task_view,
+    prepare_agent_workspace_for_container,
+)
 from .budget import BudgetMonitor, UsageMetrics
-from .models import AgentSpec, TaskSpec
+from .models import AgentSpec, TaskSpec, _is_reserved_credential_env
 from .pi_adapter import PiAdapter
+from .secureio import open_regular_file, read_regular_text
 from .session import AgentCheckpoint, AgentEvent, AgentObservation, OneShotAgentSession
 from .trace import TraceRecorder
 
@@ -66,6 +74,9 @@ class ContainerPiRpcSession:
         self.control_path = self.run_dir / "agent.control.jsonl"
         self.raw_path = self.run_dir / "agent.stdout.log"
         self.stderr_path = self.run_dir / "agent.stderr.log"
+        gateway_usage_path = run_kwargs.get("gateway_usage_path")
+        self.gateway_usage_path = Path(gateway_usage_path) if gateway_usage_path else None
+        self._gateway_event_offset = int(run_kwargs.get("resume_gateway_event_offset", 0))
         self.process: asyncio.subprocess.Process | None = None
         self._stderr_handle = None
         self._write_lock = asyncio.Lock()
@@ -79,6 +90,9 @@ class ContainerPiRpcSession:
         self._event_offset = 0
         self._feedback_offset = 0
         self._rpc_line = 0
+        self._rpc_epoch = uuid.uuid4().hex
+        self._startup_records: list[bytes] = []
+        self._pi_session_id: str | None = None
         self._started = 0.0
         self._metrics = UsageMetrics()
         self._task = run_kwargs["task"]
@@ -111,21 +125,40 @@ class ContainerPiRpcSession:
         return session
 
     async def _start(self) -> None:
+        from .network_policy import enforced_network
+
         task = self.run_kwargs["task"]
         task_dir = Path(self.run_kwargs["task_dir"])
+        agent_task_dir = self.run_kwargs.get("agent_task_dir")
+        if agent_task_dir is None:
+            agent_task_dir = prepare_agent_task_view(
+                task_dir=task_dir,
+                run_root=self.run_dir.parent,
+                verifier_entrypoint=task.verification.entrypoint,
+            )
         run_dir = self.run_dir
+        if self.run_kwargs.get("resume_session_id"):
+            await self._guard_existing_resume_container(task_dir)
         environment_network = self.run_kwargs.get("environment_network")
         gateway_url = self.run_kwargs.get("gateway_url")
         gateway_token = self.run_kwargs.get("gateway_token")
         gateway_network = self.run_kwargs.get("gateway_network")
         gateway_enabled = bool(gateway_url and gateway_token)
+        enforced = enforced_network(
+            self.adapter.spec,
+            environment_network=environment_network,
+            gateway_network=gateway_network,
+            gateway_enabled=gateway_enabled,
+        )
         if gateway_enabled and (
             self.adapter.spec.network == "none" or self.adapter.spec.network_profile == "offline"
         ):
             raise AgentError("Pi offline networking is incompatible with per-run Gateway")
 
         sidecar_gateway = gateway_enabled and gateway_network is not None
-        if self.adapter.spec.network_profile == "offline":
+        if enforced is not None:
+            primary_network = enforced.primary
+        elif self.adapter.spec.network_profile == "offline":
             primary_network = "none"
         elif sidecar_gateway:
             if self.adapter.spec.network == "host":
@@ -156,6 +189,7 @@ class ContainerPiRpcSession:
         create_command = self.adapter._container_command(
             task,
             task_dir=task_dir,
+            agent_task_dir=agent_task_dir,
             run_dir=run_dir,
             container_name=self.container_name,
             network=primary_network,
@@ -164,6 +198,7 @@ class ContainerPiRpcSession:
             gateway_url=gateway_url,
             gateway_token=gateway_token,
             host_gateway=host_gateway,
+            agent_session_id=self.run_kwargs.get("resume_session_id"),
         )
         self.adapter.trace.emit(
             "agent.started",
@@ -184,13 +219,25 @@ class ContainerPiRpcSession:
             },
         )
         await asyncio.to_thread(self.adapter._docker, create_command, cwd=task_dir)
-        if sidecar_gateway and environment_network and environment_network != gateway_network:
+        enforced_target = enforced.environment if enforced is not None else None
+        target_differs = (
+            enforced_target is not None and enforced_target != primary_network
+            if enforced is not None
+            else bool(environment_network and environment_network != gateway_network)
+        )
+        if sidecar_gateway and environment_network and target_differs:
             await asyncio.to_thread(
                 self.adapter._docker,
-                ["docker", "network", "connect", str(environment_network), self.container_name],
+                [
+                    "docker",
+                    "network",
+                    "connect",
+                    str(enforced_target or environment_network),
+                    self.container_name,
+                ],
                 cwd=task_dir,
             )
-        self._stderr_handle = self.stderr_path.open("ab")
+        self._stderr_handle = open_regular_file(self.stderr_path, "ab")
         self.process = await asyncio.create_subprocess_exec(
             "docker",
             "start",
@@ -204,6 +251,65 @@ class ContainerPiRpcSession:
             limit=64 * 1024 * 1024,
         )
         self._started = time.monotonic()
+        await self._wait_for_session_identity()
+
+    async def _wait_for_session_identity(self) -> None:
+        if self.process is None or self.process.stdout is None:
+            raise RuntimeError("Pi RPC process has no stdout")
+        try:
+            while True:
+                line = await asyncio.wait_for(self.process.stdout.readline(), timeout=15)
+                if not line:
+                    raise AgentError("Pi RPC exited before reporting its session ID")
+                self._startup_records.append(line)
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "session":
+                    continue
+                session_id = record.get("id")
+                if not isinstance(session_id, str) or not re.fullmatch(
+                    r"[A-Za-z0-9._-]{1,128}", session_id
+                ):
+                    raise AgentError("Pi RPC reported an invalid session ID")
+                requested_id = self.run_kwargs.get("resume_session_id")
+                if requested_id is not None and requested_id != session_id:
+                    raise AgentError("Pi RPC did not restore the requested session ID")
+                self._pi_session_id = session_id
+                return
+        except TimeoutError as exc:
+            raise AgentError("Pi RPC did not report a session ID during startup") from exc
+
+    async def _guard_existing_resume_container(self, task_dir: Path) -> None:
+        inspect = await asyncio.to_thread(
+            self.adapter._docker,
+            ["docker", "inspect", "--format", "{{.State.Running}}", self.container_name],
+            cwd=task_dir,
+            check=False,
+        )
+        if inspect.returncode != 0:
+            if "no such object" not in inspect.stderr.lower() and "no such container" not in inspect.stderr.lower():
+                raise AgentError(f"cannot inspect prior Pi container: {inspect.stderr.strip()}")
+            return
+        if inspect.stdout.strip().lower() == "true":
+            raise AgentError(
+                "prior Pi container is still running; stop it and reconcile any in-flight "
+                "action before resuming"
+            )
+        await asyncio.to_thread(
+            self.adapter._docker,
+            ["docker", "rm", "-f", self.container_name],
+            cwd=task_dir,
+            check=False,
+        )
+
+    def _normalize_pi_record(self, raw: str) -> list[tuple[str, dict[str, Any]]]:
+        """Keep model accounting on the trusted Gateway stream when routed there."""
+        return self.adapter._normalize_line(
+            raw,
+            account_model=not self._gateway_enabled,
+        )
 
     async def events(self) -> AsyncIterator[AgentEvent]:
         if self.process is None:
@@ -213,6 +319,13 @@ class ContainerPiRpcSession:
         self._events_consumed = True
         task = self._task
         initial_prompt = self.adapter._prompt_text(task)
+        if self.run_kwargs.get("resume_session_id"):
+            initial_prompt = (
+                "Continue the existing Pi session for this Harness run. First read the current "
+                "world.context.txt and progress.json in the project workspace. Treat them as "
+                "the current Harness state, avoid repeating completed or interrupted actions, "
+                "and continue the objective using only new safe actions.\n\n" + initial_prompt
+            )
         if self._pending_observations:
             initial_prompt += "\n\nHarness state before the first model turn:\n" + "\n".join(
                 self._format_observation(item) for item in self._pending_observations
@@ -234,6 +347,8 @@ class ContainerPiRpcSession:
             }
         )
         assert self.process.stdout is not None
+        startup_records = list(self._startup_records)
+        self._startup_records.clear()
         while self.process.returncode is None:
             remaining = task.budgets.wall_time - (time.monotonic() - self._started)
             if remaining <= 0:
@@ -245,20 +360,34 @@ class ContainerPiRpcSession:
                 await self._kill_container()
                 break
             try:
-                line = await asyncio.wait_for(self.process.stdout.readline(), timeout=remaining)
-            except TimeoutError:
-                self._timed_out = True
-                self.adapter.trace.emit(
-                    "budget.exceeded",
-                    data={"budget": "wall_time", "limit": task.budgets.wall_time},
+                line = startup_records.pop(0) if startup_records else await asyncio.wait_for(
+                    self.process.stdout.readline(), timeout=min(remaining, 0.1)
                 )
+            except TimeoutError:
+                self._consume_gateway_events()
+                self._check_budget()
+                if self._budget_exceeded:
+                    await self._kill_container()
+                    break
+                if time.monotonic() - self._started >= task.budgets.wall_time:
+                    self._timed_out = True
+                    self.adapter.trace.emit(
+                        "budget.exceeded",
+                        data={"budget": "wall_time", "limit": task.budgets.wall_time},
+                    )
+                    await self._kill_container()
+                    break
+                continue
+            self._consume_gateway_events()
+            self._check_budget()
+            if self._budget_exceeded:
                 await self._kill_container()
                 break
             if not line:
                 break
             self._rpc_line += 1
             raw = line.decode("utf-8", errors="replace")
-            with self.raw_path.open("a", encoding="utf-8") as output:
+            with open_regular_file(self.raw_path, "a") as output:
                 output.write(raw)
             try:
                 record = json.loads(raw)
@@ -266,27 +395,34 @@ class ContainerPiRpcSession:
                 record = None
             if isinstance(record, dict) and record.get("type") == "response":
                 if record.get("success") is False:
+                    command_id = record.get("id")
                     event = AgentEvent(
                         type="agent.telemetry_error",
                         data={
                             "source": "pi.rpc",
-                            "command_id": record.get("id"),
-                            "message": str(record.get("error", "RPC command failed")),
+                            "command_id_sha256": (
+                                hashlib.sha256(command_id.encode("utf-8")).hexdigest()
+                                if isinstance(command_id, str)
+                                else None
+                            ),
+                            "error_type": type(record.get("error")).__name__,
+                            "message": "Pi RPC command failed",
                         },
-                        event_id=f"pi-rpc:{self._rpc_line}:0",
+                        event_id=f"pi-rpc:{self._rpc_epoch}:{self._rpc_line}:0",
                     )
                     self._persist_event(event)
                     yield event
                 continue
-            normalized = self.adapter._normalize_line(
-                raw.rstrip("\r\n"),
-                account_model=not self._gateway_enabled,
-            )
+            if isinstance(record, dict) and record.get("type") == "session":
+                session_id = record.get("id")
+                if isinstance(session_id, str) and 0 < len(session_id) <= 256:
+                    self._pi_session_id = session_id
+            normalized = self._normalize_pi_record(raw.rstrip("\r\n"))
             for index, (event_type, data) in enumerate(normalized):
                 event = AgentEvent(
                     type=event_type,
                     data=data,
-                    event_id=f"pi-rpc:{self._rpc_line}:{index}",
+                    event_id=f"pi-rpc:{self._rpc_epoch}:{self._rpc_line}:{index}",
                 )
                 self._persist_event(event)
                 self._account(event)
@@ -305,7 +441,7 @@ class ContainerPiRpcSession:
             event = AgentEvent(
                 type="agent.session.crashed",
                 data={"returncode": self.process.returncode},
-                event_id=f"pi-rpc:{self._rpc_line}:crash",
+                event_id=f"pi-rpc:{self._rpc_epoch}:{self._rpc_line}:crash",
             )
             self._persist_event(event)
             yield event
@@ -346,7 +482,13 @@ class ContainerPiRpcSession:
             id=f"pi-rpc-{self.container_name}-{self._rpc_line}",
             event_offset=self._event_offset,
             feedback_offset=self._feedback_offset,
+            session_id=self._pi_session_id,
+            gateway_event_offset=self._gateway_event_offset,
         )
+
+    @property
+    def usage_metrics(self) -> dict[str, int | float]:
+        return self._metrics.as_dict()
 
     async def close(self, reason: str) -> None:
         if self._closed:
@@ -389,8 +531,8 @@ class ContainerPiRpcSession:
             returncode=returncode,
             timed_out=self._timed_out,
             budget_exceeded=self._budget_exceeded,
-            stdout=self.raw_path.read_text(encoding="utf-8", errors="replace"),
-            stderr=self.stderr_path.read_text(encoding="utf-8", errors="replace"),
+            stdout=read_regular_text(self.raw_path),
+            stderr=read_regular_text(self.stderr_path),
             metrics=self._metrics,
         )
         self.adapter.trace.emit(
@@ -410,19 +552,19 @@ class ContainerPiRpcSession:
     def _persist_event(self, event: AgentEvent) -> None:
         payload = {"type": event.type, "data": event.data, "event_id": event.event_id}
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
-        with self.event_path.open("a", encoding="utf-8") as handle:
+        with open_regular_file(self.event_path, "a") as handle:
             handle.write(encoded)
             handle.flush()
             self._event_offset = handle.tell()
 
     def _append_feedback(self, line: str) -> None:
-        with self.feedback_path.open("a", encoding="utf-8") as handle:
+        with open_regular_file(self.feedback_path, "a") as handle:
             handle.write(line)
             handle.flush()
             self._feedback_offset = handle.tell()
 
     def _append_control(self, line: str) -> None:
-        with self.control_path.open("a", encoding="utf-8") as handle:
+        with open_regular_file(self.control_path, "a") as handle:
             handle.write(line)
             handle.flush()
 
@@ -440,13 +582,56 @@ class ContainerPiRpcSession:
         return f"Harness feedback ({observation.type}): {payload}"
 
     def _account(self, event: AgentEvent) -> None:
+        if event.type == "model.usage_missing":
+            self._budget_exceeded = "invalid_telemetry"
+            self.adapter.trace.emit(
+                "agent.telemetry_error",
+                data={"message": "model usage telemetry was missing"},
+            )
+            self.adapter.trace.emit(
+                "budget.exceeded",
+                data={
+                    "budget": self._budget_exceeded,
+                    "reason": "model usage telemetry was missing",
+                },
+            )
+            return
         if event.type == "model.request":
             self._metrics.model_calls += 1
         elif event.type == "model.usage":
-            self._metrics.input_tokens += int(event.data.get("input_tokens", 0) or 0)
-            self._metrics.output_tokens += int(event.data.get("output_tokens", 0) or 0)
-            self._metrics.total_tokens += int(event.data.get("total_tokens", 0) or 0)
-            self._metrics.cost_usd += float(event.data.get("cost_usd", 0.0) or 0.0)
+            counters = [
+                event.data.get(field, 0)
+                for field in ("input_tokens", "output_tokens", "total_tokens")
+            ]
+            cost = event.data.get("cost_usd", 0.0)
+            if (
+                any(
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    for value in counters
+                )
+                or counters[2] < counters[0] + counters[1]
+                or isinstance(cost, bool)
+                or not isinstance(cost, (int, float))
+                or not math.isfinite(float(cost))
+                or cost < 0
+            ):
+                self._budget_exceeded = "invalid_telemetry"
+                self.adapter.trace.emit(
+                    "agent.telemetry_error",
+                    data={"message": "invalid or negative Pi usage telemetry"},
+                )
+                self.adapter.trace.emit(
+                    "budget.exceeded",
+                    data={
+                        "budget": self._budget_exceeded,
+                        "reason": "untrusted Pi usage telemetry was invalid",
+                    },
+                )
+                return
+            self._metrics.input_tokens += counters[0]
+            self._metrics.output_tokens += counters[1]
+            self._metrics.total_tokens += counters[2]
+            self._metrics.cost_usd += float(cost)
         elif event.type == "tool.call":
             self._metrics.tool_calls += 1
 
@@ -467,6 +652,69 @@ class ContainerPiRpcSession:
                 )
                 return
 
+    def _consume_gateway_events(self) -> None:
+        if self.gateway_usage_path is None:
+            return
+        try:
+            with open_regular_file(self.gateway_usage_path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                if self._gateway_event_offset > handle.tell():
+                    self._invalid_gateway_telemetry("gateway usage cursor is ahead of its log")
+                    return
+                handle.seek(self._gateway_event_offset)
+                while True:
+                    line = handle.readline(8 * 1024 * 1024 + 1)
+                    if not line:
+                        return
+                    if len(line) > 8 * 1024 * 1024:
+                        self._invalid_gateway_telemetry("gateway usage record exceeded size limit")
+                        return
+                    if not line.endswith(b"\n"):
+                        return
+                    self._gateway_event_offset = handle.tell()
+                    self._consume_gateway_event_line(line)
+                    if self._budget_exceeded:
+                        return
+        except FileNotFoundError:
+            if self._gateway_event_offset:
+                self._invalid_gateway_telemetry("gateway usage log is missing at the saved cursor")
+            return
+
+    def _consume_gateway_event_line(self, line: bytes) -> None:
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._invalid_gateway_telemetry("gateway usage log contains malformed JSON")
+            return
+        if isinstance(record, dict) and record.get("type") == "model.usage_missing":
+            self.adapter.trace.emit("model.usage_missing", actor="gateway")
+            self._invalid_gateway_telemetry("gateway did not report valid model usage")
+            return
+        if not isinstance(record, dict) or record.get("type") not in {
+            "model.request",
+            "model.usage",
+        }:
+            return
+        data = record.get("data")
+        if not isinstance(data, dict):
+            self._invalid_gateway_telemetry("gateway usage record has invalid shape")
+            return
+        event = AgentEvent(
+            type=record["type"],
+            data=data,
+            event_id=f"gateway:{self._gateway_event_offset}",
+        )
+        self._account(event)
+        self.adapter.trace.emit(event.type, actor="gateway", data=event.data)
+
+    def _invalid_gateway_telemetry(self, reason: str) -> None:
+        self._budget_exceeded = "invalid_telemetry"
+        self.adapter.trace.emit("agent.telemetry_error", data={"message": reason})
+        self.adapter.trace.emit(
+            "budget.exceeded",
+            data={"budget": self._budget_exceeded, "reason": reason},
+        )
+
     async def _kill_container(self) -> None:
         await asyncio.to_thread(
             subprocess.run,
@@ -480,7 +728,7 @@ class ContainerPiRpcSession:
         if self.process is None or self.process.stdout is None:
             return
         while line := await self.process.stdout.readline():
-            with self.raw_path.open("ab") as output:
+            with open_regular_file(self.raw_path, "ab") as output:
                 output.write(line)
 
 
@@ -532,7 +780,21 @@ class ContainerPiAdapter(PiAdapter):
         gateway_url: str | None,
         gateway_token: str | None,
         host_gateway: bool,
+        agent_session_id: str | None = None,
+        agent_task_dir: Path | None = None,
     ) -> list[str]:
+        from .network_policy import proxy_environment_overrides, reject_agent_proxy_env
+
+        env_names = set(self.spec.env) | set(self.pi.env_passthrough)
+        if any(_is_reserved_credential_env(key) for key in env_names):
+            raise AgentError("container Agent cannot receive reserved credential environment variables")
+        reject_agent_proxy_env(self.spec.network_profile, env_names)
+        agent_task_dir = agent_task_dir or prepare_agent_task_view(
+            task_dir=task_dir,
+            run_root=run_dir.parent,
+            verifier_entrypoint=task.verification.entrypoint,
+        )
+        container_uid, container_gid = prepare_agent_workspace_for_container(run_dir)
         command = [
             "docker",
             "create",
@@ -540,6 +802,8 @@ class ContainerPiAdapter(PiAdapter):
             "--pull=never",
             "--name",
             container_name,
+            "--user",
+            f"{container_uid}:{container_gid}",
             "--read-only",
             "--cap-drop",
             "ALL",
@@ -568,7 +832,7 @@ class ContainerPiAdapter(PiAdapter):
         command.extend(
             [
                 "-v",
-                f"{task_dir.resolve()}:/task:ro",
+                f"{agent_task_dir.resolve()}:/task:ro",
                 "-v",
                 f"{run_dir.resolve()}:/run/harness:rw",
                 "-w",
@@ -634,11 +898,18 @@ class ContainerPiAdapter(PiAdapter):
                 if key not in os.environ:
                     raise AgentError(f"requested Pi environment variable is missing: {key}")
                 command.extend(["-e", f"{key}={os.environ[key]}"])
+        command.extend(proxy_environment_overrides(self.spec.network_profile))
 
         if self.pi.mode == "rpc":
             command.append("-i")
         command.append(str(self.spec.image))
-        command.extend(self._command(task, gateway_enabled=bool(gateway_url and gateway_token)))
+        command.extend(
+            self._command(
+                task,
+                gateway_enabled=bool(gateway_url and gateway_token),
+                session_id=agent_session_id,
+            )
+        )
         return command
 
     async def start_session(
@@ -653,10 +924,13 @@ class ContainerPiAdapter(PiAdapter):
         gateway_url: str | None = None,
         gateway_token: str | None = None,
         gateway_network: str | None = None,
+        resume_session_id: str | None = None,
+        agent_task_dir: Path | None = None,
     ) -> ContainerPiSession | ContainerPiRpcSession:
         run_kwargs = {
             "task": task,
             "task_dir": task_dir,
+            "agent_task_dir": agent_task_dir,
             "run_dir": run_dir,
             "environment_project": environment_project,
             "environment_network": environment_network,
@@ -664,9 +938,12 @@ class ContainerPiAdapter(PiAdapter):
             "gateway_url": gateway_url,
             "gateway_token": gateway_token,
             "gateway_network": gateway_network,
+            "resume_session_id": resume_session_id,
         }
         if self.pi.mode == "rpc":
             return await ContainerPiRpcSession.start(self, run_kwargs=run_kwargs)
+        if resume_session_id is not None:
+            raise AgentError("Pi JSON mode cannot restore an Agent session")
         return await ContainerPiSession.start(self, run_dir=run_dir, run_kwargs=run_kwargs)
 
     def run(
@@ -681,12 +958,21 @@ class ContainerPiAdapter(PiAdapter):
         gateway_url: str | None = None,
         gateway_token: str | None = None,
         gateway_network: str | None = None,
+        agent_task_dir: Path | None = None,
     ) -> AgentResult:
         if self.pi.mode == "rpc":
             raise AgentError(
                 "Pi RPC mode requires start_session(); use mode: json for one-shot runs"
             )
+        from .network_policy import enforced_network
+
         gateway_enabled = bool(gateway_url and gateway_token)
+        enforced = enforced_network(
+            self.spec,
+            environment_network=environment_network,
+            gateway_network=gateway_network,
+            gateway_enabled=gateway_enabled,
+        )
         if gateway_enabled and (
             self.spec.network == "none" or self.spec.network_profile == "offline"
         ):
@@ -711,7 +997,9 @@ class ContainerPiAdapter(PiAdapter):
         container_name = ("harness_pi_" + run_dir.name.lower()).replace("-", "_")[:63]
         sidecar_gateway = gateway_enabled and gateway_network is not None
         host_gateway = gateway_enabled and not sidecar_gateway and self.spec.network != "host"
-        if self.spec.network_profile == "offline":
+        if enforced is not None:
+            primary_network = enforced.primary
+        elif self.spec.network_profile == "offline":
             primary_network = "none"
         elif sidecar_gateway:
             if self.spec.network == "host":
@@ -735,6 +1023,8 @@ class ContainerPiAdapter(PiAdapter):
             gateway_url=gateway_url,
             gateway_token=gateway_token,
             host_gateway=host_gateway,
+            agent_session_id=None,
+            agent_task_dir=agent_task_dir,
         )
 
         self.trace.emit(
@@ -758,7 +1048,11 @@ class ContainerPiAdapter(PiAdapter):
                 "network_profile": self.spec.network_profile,
                 "network_profile_enforcement": (
                     "docker-none"
-                    if self.spec.network_profile == "offline"
+                    if self.spec.network_profile in {"offline", "fully-offline"}
+                    else "docker-internal-network"
+                    if self.spec.network_profile == "target-only"
+                    else "docker-internal-network-gateway-proxy"
+                    if self.spec.network_profile == "model-allowed"
                     else "advisory"
                     if self.spec.network_profile == "benchmark-only"
                     else "unrestricted"
@@ -774,13 +1068,28 @@ class ContainerPiAdapter(PiAdapter):
 
         try:
             self._docker(create_command, cwd=task_dir)
-            if sidecar_gateway and environment_network and environment_network != gateway_network:
+            enforced_target = enforced.environment if enforced is not None else None
+            target_differs = (
+                enforced_target is not None and enforced_target != primary_network
+                if enforced is not None
+                else bool(environment_network and environment_network != gateway_network)
+            )
+            if sidecar_gateway and environment_network and target_differs:
                 self._docker(
-                    ["docker", "network", "connect", environment_network, container_name],
+                    [
+                        "docker",
+                        "network",
+                        "connect",
+                        enforced_target or environment_network,
+                        container_name,
+                    ],
                     cwd=task_dir,
                 )
 
-            with raw_path.open("ab") as stdout_handle, stderr_path.open("wb") as stderr_handle:
+            with (
+                open_regular_file(raw_path, "ab") as stdout_handle,
+                open_regular_file(stderr_path, "wb") as stderr_handle,
+            ):
                 proc = subprocess.Popen(
                     ["docker", "start", "-a", container_name],
                     cwd=task_dir,
@@ -843,8 +1152,8 @@ class ContainerPiAdapter(PiAdapter):
             returncode=returncode,
             timed_out=timed_out,
             budget_exceeded=monitor.exceeded,
-            stdout=raw_path.read_text(encoding="utf-8", errors="replace"),
-            stderr=stderr_path.read_text(encoding="utf-8", errors="replace"),
+            stdout=read_regular_text(raw_path),
+            stderr=read_regular_text(stderr_path),
             metrics=monitor.metrics,
         )
         self.trace.emit(
