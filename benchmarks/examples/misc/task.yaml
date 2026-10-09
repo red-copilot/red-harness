@@ -1,0 +1,19 @@
+apiVersion: harness/v1
+id: misc-001
+name: Evaluate a mixed-radix arithmetic clue
+category: misc
+difficulty: trivial
+tags: [smoke, synthetic, offline]
+objective:
+  description: Evaluate the arithmetic expression in puzzle.txt and write the integer result to answer.txt.
+environment:
+  provider: none
+budgets:
+  wall_time: 30
+  max_tokens: 100
+  max_model_calls: 3
+  max_tool_calls: 3
+  max_cost_usd: 0.10
+verification:
+  type: python
+  entrypoint: verifier.py

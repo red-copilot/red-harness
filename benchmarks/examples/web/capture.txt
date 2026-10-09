@@ -1,0 +1,3 @@
+GET /fixture HTTP/1.1
+HTTP/1.1 200 OK
+X-Fixture-Token: flag{web_fixture_token}

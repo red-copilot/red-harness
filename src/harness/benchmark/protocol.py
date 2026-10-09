@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..secureio import open_regular_file
 from .base import Submission
 
 
@@ -18,7 +19,7 @@ class SubmissionInbox:
     def poll(self) -> list[Submission]:
         if not self.path.exists():
             return []
-        with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+        with open_regular_file(self.path, "r", errors="replace") as handle:
             handle.seek(self.offset)
             chunk = handle.read()
             self.offset = handle.tell()

@@ -114,3 +114,105 @@ def test_tsec_adapter_rejects_non_flag_submission() -> None:
         await adapter.teardown(session)
 
     asyncio.run(scenario())
+
+
+def test_tsec_provision_failure_closes_started_challenge() -> None:
+    async def scenario() -> None:
+        client = FakeTSecClient()
+
+        async def unavailable_hint(_unique_code: str):
+            raise RuntimeError("hint service unavailable")
+
+        client.get_hint = unavailable_hint
+        adapter = TSecBenchmarkAdapter(client, use_hint=True)
+        case = (await adapter.discover())[0]
+        try:
+            await adapter.provision(case)
+        except RuntimeError as exc:
+            assert "hint service unavailable" in str(exc)
+        else:
+            raise AssertionError("provision should propagate hint failure")
+        assert client.closed == ["WEB-001"]
+
+    asyncio.run(scenario())
+
+
+def test_tsec_teardown_is_idempotent() -> None:
+    async def scenario() -> None:
+        client = FakeTSecClient()
+        adapter = TSecBenchmarkAdapter(client)
+        case = (await adapter.discover())[0]
+        session = await adapter.provision(case)
+        await adapter.teardown(session)
+        await adapter.teardown(session)
+        assert client.closed == ["WEB-001"]
+
+    asyncio.run(scenario())
+
+
+def test_tsec_provision_retries_temporary_unavailable_service() -> None:
+    class ResourceUnavailable(Exception):
+        pass
+
+    async def scenario() -> None:
+        client = FakeTSecClient()
+        starts = 0
+
+        async def start_challenge(_unique_code: str):
+            nonlocal starts
+            starts += 1
+            if starts == 1:
+                raise ResourceUnavailable("temporarily unavailable")
+            return SimpleNamespace(container_addr=["10.0.0.10:8080"])
+
+        client.start_challenge = start_challenge
+        adapter = TSecBenchmarkAdapter(client, start_retries=1, retry_delay=0)
+        case = (await adapter.discover())[0]
+        session = await adapter.provision(case)
+        await adapter.teardown(session)
+        assert starts == 2
+
+    asyncio.run(scenario())
+
+
+def test_tsec_duplicate_submission_response_is_safe() -> None:
+    class DuplicateSubmit(Exception):
+        pass
+
+    async def scenario() -> None:
+        client = FakeTSecClient()
+
+        async def duplicate_submit(_unique_code: str, _flag: str):
+            raise DuplicateSubmit("already submitted")
+
+        client.submit_flag = duplicate_submit
+        adapter = TSecBenchmarkAdapter(client)
+        case = (await adapter.discover())[0]
+        session = await adapter.provision(case)
+        result = await adapter.submit(session, Submission(type="flag", value="flag{same}"))
+        assert result.accepted is False
+        assert result.metadata["duplicate"] is True
+        await adapter.teardown(session)
+
+    asyncio.run(scenario())
+
+
+def test_tsec_malformed_start_response_fails_closed_and_cleans_up() -> None:
+    async def scenario() -> None:
+        client = FakeTSecClient()
+
+        async def malformed_start(_unique_code: str):
+            return SimpleNamespace()
+
+        client.start_challenge = malformed_start
+        adapter = TSecBenchmarkAdapter(client)
+        case = (await adapter.discover())[0]
+        try:
+            await adapter.provision(case)
+        except AttributeError:
+            pass
+        else:
+            raise AssertionError("malformed service response must fail")
+        assert client.closed == ["WEB-001"]
+
+    asyncio.run(scenario())

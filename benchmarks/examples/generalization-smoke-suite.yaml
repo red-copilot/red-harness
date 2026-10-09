@@ -1,0 +1,25 @@
+apiVersion: harness/v1
+id: generalization-smoke-suite
+repeat: 2
+base_seed: 2000
+workers: 3
+pass_k: [1, 2]
+tasks:
+  - path: hello/task.yaml
+    weight: 1.0
+  - path: coding/task.yaml
+    weight: 1.0
+  - path: file/task.yaml
+    weight: 1.0
+  - path: web/task.yaml
+    weight: 1.0
+  - path: pwn/task.yaml
+    weight: 1.0
+  - path: reverse/task.yaml
+    weight: 1.0
+  - path: crypto/task.yaml
+    weight: 1.0
+  - path: forensics/task.yaml
+    weight: 1.0
+  - path: misc/task.yaml
+    weight: 1.0
