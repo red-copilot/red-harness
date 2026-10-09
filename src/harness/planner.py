@@ -23,6 +23,13 @@ class PlanCandidate(BaseModel):
     expected_outputs: list[StateSelector] = Field(default_factory=list)
 
 
+class SkillApplicability(BaseModel):
+    skill_id: str
+    applicable: bool
+    matched_requirements: int = Field(ge=0)
+    rejection_reasons: list[str] = Field(default_factory=list)
+
+
 class PlannedAction(BaseModel):
     rank: int = Field(ge=1)
     skill_id: str
@@ -71,26 +78,41 @@ _COLLECTIONS = {
 }
 
 
-def _selector_matches(snapshot: WorldSnapshot, selector: StateSelector) -> bool:
+def _selector_rejection(snapshot: WorldSnapshot, selector: StateSelector) -> str | None:
     collection = getattr(snapshot, _COLLECTIONS[selector.kind])
     trust_rank = {"unclassified": 1, "claim": 1, "evidence": 2, "verified": 3}
     minimum_rank = trust_rank[selector.minimum_trust]
+    typed: list = []
+    scoped: list = []
+    valid: list = []
     for item in collection.values():
-        if not item.is_valid_at():
-            continue
-        provenance = getattr(item, "provenance", None)
-        epistemic_status = getattr(provenance, "epistemic_status", "unclassified")
-        if trust_rank.get(epistemic_status, 0) < minimum_rank:
-            continue
         type_name = getattr(item, "type", None)
         if type_name is None or not fnmatch.fnmatchcase(type_name, selector.type):
             continue
+        typed.append(item)
         if selector.scope is not None:
             scope = getattr(item, "scope", None)
             if scope is None or not fnmatch.fnmatchcase(scope, selector.scope):
                 continue
-        return True
-    return False
+        scoped.append(item)
+        if not item.is_valid_at():
+            continue
+        valid.append(item)
+        provenance = getattr(item, "provenance", None)
+        epistemic_status = getattr(provenance, "epistemic_status", "unclassified")
+        if trust_rank.get(epistemic_status, 0) >= minimum_rank:
+            return None
+    if not typed:
+        return f"missing:{selector.kind}:{selector.type}"
+    if not scoped:
+        return f"scope_mismatch:{selector.kind}:{selector.type}:{selector.scope}"
+    if not valid:
+        return f"expired:{selector.kind}:{selector.type}"
+    return f"insufficient_trust:{selector.kind}:{selector.type}:{selector.minimum_trust}"
+
+
+def _selector_matches(snapshot: WorldSnapshot, selector: StateSelector) -> bool:
+    return _selector_rejection(snapshot, selector) is None
 
 
 def _goal_tokens(snapshot: WorldSnapshot, progress: ProgressLedger) -> set[str]:
@@ -119,6 +141,28 @@ def _goal_relevance(skill: SkillSpec, goal_tokens: set[str]) -> float:
 class HeuristicSkillPlanner:
     """Reference planner that ranks applicable skills without executing them."""
 
+    def explain(
+        self,
+        snapshot: WorldSnapshot,
+        skills: list[SkillSpec],
+    ) -> list[SkillApplicability]:
+        reports: list[SkillApplicability] = []
+        for skill in skills:
+            reasons = [
+                reason
+                for selector in skill.requires
+                if (reason := _selector_rejection(snapshot, selector)) is not None
+            ]
+            reports.append(
+                SkillApplicability(
+                    skill_id=skill.id,
+                    applicable=not reasons,
+                    matched_requirements=len(skill.requires) - len(reasons),
+                    rejection_reasons=reasons,
+                )
+            )
+        return reports
+
     def propose(
         self,
         snapshot: WorldSnapshot,
@@ -131,8 +175,9 @@ class HeuristicSkillPlanner:
         goal_tokens = _goal_tokens(snapshot, progress)
         budget_remaining = progress.remaining_budget_fraction
         candidates: list[PlanCandidate] = []
+        applicability = {item.skill_id: item for item in self.explain(snapshot, skills)}
         for skill in skills:
-            if not all(_selector_matches(snapshot, selector) for selector in skill.requires):
+            if not applicability[skill.id].applicable:
                 continue
 
             novel = [
@@ -258,6 +303,11 @@ class RollingHorizonPlanner:
         replan_reasons = list(progress.replan_reasons)
         if progress.no_progress_count >= 2 and "no_progress_threshold" not in replan_reasons:
             replan_reasons.append("no_progress_threshold")
+        if (
+            any(hypothesis.status == "refuted" for hypothesis in progress.hypotheses.values())
+            and "hypothesis_contradicted" not in replan_reasons
+        ):
+            replan_reasons.append("hypothesis_contradicted")
 
         return RollingPlan(
             world_revision=snapshot.revision,

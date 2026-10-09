@@ -7,6 +7,18 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+def _is_reserved_credential_env(name: str) -> bool:
+    normalized = name.upper()
+    credential_marker = any(
+        marker in normalized
+        for marker in ("TOKEN", "API_KEY", "SECRET", "PASSWORD", "CREDENTIAL")
+    )
+    return "TOKEN" in normalized or (credential_marker and (
+        normalized.startswith(("HARNESS_", "TSEC_"))
+        or "BENCHMARK" in normalized
+    ))
+
+
 class ObjectiveSpec(BaseModel):
     description: str = Field(min_length=1)
 
@@ -80,7 +92,7 @@ class PiSpec(BaseModel):
     mcp: bool = False
     offline: bool = True
     env_passthrough: list[str] = Field(default_factory=list)
-    cap_add: list[str] = Field(default_factory=lambda: ["NET_RAW"])
+    cap_add: list[str] = Field(default_factory=list)
     extra_args: list[str] = Field(default_factory=list)
 
 
@@ -95,7 +107,14 @@ class AgentSpec(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     image: str | None = None
     network: Literal["environment", "none", "host"] = "environment"
-    network_profile: Literal["offline", "benchmark-only", "unrestricted"] = "unrestricted"
+    network_profile: Literal[
+        "offline",
+        "benchmark-only",
+        "unrestricted",
+        "target-only",
+        "model-allowed",
+        "fully-offline",
+    ] = "unrestricted"
     runtime: str | None = None
     pi: PiSpec | None = None
 
@@ -114,6 +133,16 @@ class AgentSpec(BaseModel):
                 raise ValueError("pi agents use pi.launcher_args instead of command")
         if self.type not in {"docker", "pi"} and self.runtime is not None:
             raise ValueError("runtime is only valid for container agents")
+        if self.type in {"docker", "pi"}:
+            passthrough = set(self.env)
+            if self.pi is not None:
+                passthrough.update(self.pi.env_passthrough)
+            forbidden = sorted(name for name in passthrough if _is_reserved_credential_env(name))
+            if forbidden:
+                raise ValueError(
+                    "container Agent cannot receive token-named or reserved credential "
+                    f"environment variables: {', '.join(forbidden)}"
+                )
         return self
 
 

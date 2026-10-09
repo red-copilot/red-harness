@@ -1,4 +1,6 @@
 import json
+import sqlite3
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -103,6 +105,12 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     (run_dir / "trace.jsonl").write_text(
         json.dumps(
             {
+                "event_id": "evt_run_started",
+                "parent_event_id": None,
+                "plan_id": None,
+                "subgoal_id": None,
+                "action_id": None,
+                "hypothesis_id": None,
                 "ts": "2026-10-06T08:00:00+00:00",
                 "run_id": "run_test",
                 "task_id": "hello-001",
@@ -199,6 +207,7 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
 
     plan = client.get("/v1/runs/run_test/plan", headers=headers).json()
     assert plan["planner"] == "heuristic-skill-v1"
+    assert "applicability" in plan
     assert plan["candidates"][0]["skill_id"] == "network.service-discovery"
 
     rolling = client.get(
@@ -295,12 +304,424 @@ def test_control_plane_uses_world_repository_factory(tmp_path: Path) -> None:
     app = create_control_plane(
         queue_db=tmp_path / "control.db",
         runs_root=runs_root,
-        token=None,
+        token="read-token",
         world_repository_factory=repository_factory,
     )
     client = TestClient(app)
 
-    response = client.get("/v1/runs/run_repo/world")
+    headers = {"Authorization": "Bearer read-token"}
+    response = client.get("/v1/runs/run_repo/world", headers=headers)
     assert response.status_code == 200
     assert response.json()["goals"]["goal-repo"]["description"] == "repo test"
     assert seen_paths == [run_dir / "world.events.jsonl"]
+
+
+def test_control_plane_fails_closed_without_authentication_configuration(tmp_path: Path) -> None:
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=tmp_path / "runs",
+    )
+    client = TestClient(app)
+
+    assert client.get("/health").status_code == 200
+    assert client.get("/v1/jobs").status_code == 503
+
+
+def test_control_plane_rejects_run_directory_symlink(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    actual = runs / "run_actual"
+    actual.mkdir(parents=True)
+    (actual / "result.json").write_text('{"success":true}', encoding="utf-8")
+    (runs / "run_alias").symlink_to(actual, target_is_directory=True)
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=runs,
+        token="read-token",
+    )
+
+    response = TestClient(app).get(
+        "/v1/runs/run_alias",
+        headers={"Authorization": "Bearer read-token"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_control_plane_rejects_symlinked_world_artifact(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    run = runs / "run_world"
+    run.mkdir(parents=True)
+    outside = tmp_path / "outside.db"
+    outside.write_bytes(b"not a database")
+    (run / "world.db").symlink_to(outside)
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=runs,
+        token="read-token",
+    )
+
+    response = TestClient(app).get(
+        "/v1/runs/run_world/world",
+        headers={"Authorization": "Bearer read-token"},
+    )
+
+    assert response.status_code == 422
+    assert outside.read_bytes() == b"not a database"
+
+
+def test_otlp_endpoint_rejects_valid_json_with_invalid_trace_shape(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    run = runs / "run_invalid_otel"
+    run.mkdir(parents=True)
+    (run / "trace.jsonl").write_text(json.dumps({"type": "agent.output"}) + "\n")
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=runs,
+        token="read-token",
+    )
+
+    response = TestClient(app, raise_server_exceptions=False).get(
+        "/v1/runs/run_invalid_otel/otel",
+        headers={"Authorization": "Bearer read-token"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "trace artifact is invalid"
+
+
+def test_rolling_plan_rejects_symlinked_world_database(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    run = runs / "run_rolling"
+    run.mkdir(parents=True)
+    (run / "world.events.jsonl").write_text("", encoding="utf-8")
+    outside_db = tmp_path / "outside.db"
+    outside_db.write_bytes(b"sentinel")
+    (run / "world.db").symlink_to(outside_db)
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=runs,
+        token="read-token",
+    )
+
+    response = TestClient(app).get(
+        "/v1/runs/run_rolling/plan/rolling",
+        headers={"Authorization": "Bearer read-token"},
+    )
+
+    assert response.status_code == 422
+    assert outside_db.read_bytes() == b"sentinel"
+
+
+def test_control_plane_reports_malformed_trace_as_client_error(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    run = runs / "run_malformed"
+    run.mkdir(parents=True)
+    (run / "trace.jsonl").write_text('{"type":\n', encoding="utf-8")
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=runs,
+        token="read-token",
+    )
+
+    response = TestClient(app).get(
+        "/v1/runs/run_malformed/trace",
+        headers={"Authorization": "Bearer read-token"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_trace_endpoint_paginates_with_physical_line_cursor(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    run = runs / "run_trace_pages"
+    run.mkdir(parents=True)
+    (run / "trace.jsonl").write_text(
+        "".join(
+            json.dumps({"type": f"event.{index}", "data": {}}) + "\n"
+            for index in range(5)
+        ),
+        encoding="utf-8",
+    )
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=runs,
+        token="read-token",
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer read-token"}
+
+    first = client.get("/v1/runs/run_trace_pages/trace?limit=2", headers=headers)
+    second = client.get(
+        "/v1/runs/run_trace_pages/trace?limit=2&after_line=2", headers=headers
+    )
+    final = client.get(
+        "/v1/runs/run_trace_pages/trace?limit=2&after_line=4", headers=headers
+    )
+
+    assert [event["type"] for event in first.json()] == ["event.0", "event.1"]
+    assert first.headers["x-next-line"] == "2"
+    assert first.headers["x-has-more"] == "true"
+    assert [event["type"] for event in second.json()] == ["event.2", "event.3"]
+    assert second.headers["x-next-line"] == "4"
+    assert second.headers["x-has-more"] == "true"
+    assert [event["type"] for event in final.json()] == ["event.4"]
+    assert final.headers["x-next-line"] == "5"
+    assert final.headers["x-has-more"] == "false"
+
+
+def test_trace_endpoint_streams_and_bounds_serialized_page(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runs = tmp_path / "runs"
+    run = runs / "run_trace_stream"
+    run.mkdir(parents=True)
+    trace_path = run / "trace.jsonl"
+    with trace_path.open("w", encoding="utf-8") as handle:
+        for index in range(32):
+            handle.write(
+                json.dumps(
+                    {"type": f"event.{index}", "payload": "x" * 180_000},
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=runs,
+        token="read-token",
+    )
+    monkeypatch.setattr(
+        "harness.api.runs.read_regular_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("whole-file read")),
+    )
+
+    response = TestClient(app).get(
+        "/v1/runs/run_trace_stream/trace?limit=100",
+        headers={"Authorization": "Bearer read-token"},
+    )
+
+    assert response.status_code == 200
+    assert len(response.content) <= 4 * 1024 * 1024
+    assert response.headers["x-has-more"] == "true"
+    assert 0 < int(response.headers["x-next-line"]) < 32
+
+
+def test_control_plane_artifact_routes_reject_symlinked_inputs(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    run = runs / "run_linked_artifacts"
+    run.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"run_id":"outside","success":true}\n', encoding="utf-8")
+    for name in ("result.json", "progress.json", "trace.jsonl"):
+        (run / name).symlink_to(outside)
+    (run / "world.events.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "harness/world/v1",
+                "id": "world-event-linked",
+                "ts": "2026-10-09T00:00:00+00:00",
+                "kind": "goal",
+                "op": "upsert",
+                "object": {"id": "goal-linked", "description": "linked artifact test"},
+                "actor": "harness",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=runs,
+        token="read-token",
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer read-token"}
+
+    assert client.get("/v1/runs/run_linked_artifacts", headers=headers).status_code == 422
+    assert client.get(
+        "/v1/runs/run_linked_artifacts/trace", headers=headers
+    ).status_code == 404
+    audit = client.get("/v1/runs/run_linked_artifacts/audit", headers=headers)
+    assert audit.status_code == 200
+    assert audit.json()["status"] == "incomplete"
+    assert client.get("/v1/runs/run_linked_artifacts/otel", headers=headers).status_code == 422
+    rolling = client.get(
+        "/v1/runs/run_linked_artifacts/plan/rolling", headers=headers
+    )
+    assert rolling.status_code == 422
+    assert outside.read_text(encoding="utf-8") == '{"run_id":"outside","success":true}\n'
+
+
+def test_expired_job_requires_explicit_requeue_after_reconciliation(tmp_path: Path) -> None:
+    queue_db = tmp_path / "control.db"
+    app = create_control_plane(
+        queue_db=queue_db,
+        runs_root=tmp_path / "runs",
+        token="control-token",
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer control-token"}
+    submitted = client.post(
+        "/v1/jobs",
+        headers=headers,
+        json={"task_path": "task.yaml", "agent_path": "agent.yaml"},
+    ).json()
+    job_id = submitted["id"]
+    claimed = client.post(
+        "/v1/jobs/claim",
+        headers=headers,
+        json={"worker_id": "worker-a", "lease_seconds": 10},
+    ).json()
+    assert claimed["id"] == job_id
+    with sqlite3.connect(queue_db) as db:
+        db.execute(
+            "UPDATE jobs SET lease_expires_at=? WHERE id=?",
+            (time.time() - 1, job_id),
+        )
+
+    assert client.post(
+        "/v1/jobs/claim",
+        headers=headers,
+        json={"worker_id": "worker-b", "lease_seconds": 10},
+    ).json() is None
+    assert client.get(f"/v1/jobs/{job_id}", headers=headers).json()["state"] == (
+        "reconciliation_required"
+    )
+    retry = client.post(f"/v1/jobs/{job_id}/requeue", headers=headers)
+    assert retry.status_code == 200
+    retried = client.post(
+        "/v1/jobs/claim",
+        headers=headers,
+        json={"worker_id": "worker-b", "lease_seconds": 10},
+    ).json()
+    assert retried["id"] == job_id
+    assert retried["attempts"] == 2
+
+
+def test_control_plane_rejects_oversized_terminal_result_without_completing_job(
+    tmp_path: Path,
+) -> None:
+    queue_db = tmp_path / "control.db"
+    app = create_control_plane(
+        queue_db=queue_db,
+        runs_root=tmp_path / "runs",
+        token="control-token",
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer control-token"}
+    submitted = client.post(
+        "/v1/jobs",
+        headers=headers,
+        json={"task_path": "task.yaml", "agent_path": "agent.yaml"},
+    )
+    assert submitted.status_code == 200
+    job_id = submitted.json()["id"]
+    claimed = client.post(
+        "/v1/jobs/claim",
+        headers=headers,
+        json={"worker_id": "worker-a", "lease_seconds": 60},
+    )
+    assert claimed.status_code == 200
+
+    response = client.post(
+        f"/v1/jobs/{job_id}/complete",
+        headers=headers,
+        json={"worker_id": "worker-a", "result": {"artifact": "x" * (1024 * 1024 + 1)}},
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/v1/jobs/{job_id}", headers=headers).json()["state"] == "running"
+
+
+def test_control_plane_rejects_malformed_terminal_result_before_completion(
+    tmp_path: Path,
+) -> None:
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=tmp_path / "runs",
+        token="control-token",
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer control-token"}
+    submitted = client.post(
+        "/v1/jobs",
+        headers=headers,
+        json={"task_path": "task.yaml", "agent_path": "agent.yaml"},
+    )
+    job_id = submitted.json()["id"]
+    claimed = client.post(
+        "/v1/jobs/claim",
+        headers=headers,
+        json={"worker_id": "worker-a", "lease_seconds": 60},
+    )
+    assert claimed.status_code == 200
+
+    response = client.post(
+        f"/v1/jobs/{job_id}/complete",
+        headers=headers,
+        json={
+            "worker_id": "worker-a",
+            "result": {"agent_id": "agent", "success": True, "score": "100"},
+        },
+    )
+
+    assert response.status_code == 422
+    stored = client.get(f"/v1/jobs/{job_id}", headers=headers).json()
+    assert stored["state"] == "running"
+    assert stored["result"] is None
+
+
+def test_control_plane_rejects_oversized_json_request_body(tmp_path: Path) -> None:
+    app = create_control_plane(
+        queue_db=tmp_path / "control.db",
+        runs_root=tmp_path / "runs",
+        token="control-token",
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer control-token"}
+
+    response = client.post(
+        "/v1/jobs",
+        headers=headers,
+        json={
+            "task_path": "task.yaml",
+            "agent_path": "agent.yaml",
+            "ignored_extra": "x" * (2 * 1024 * 1024),
+        },
+    )
+
+    assert response.status_code == 413
+    assert client.get("/v1/jobs", headers=headers).json() == []
+
+
+def test_request_body_limit_catches_oversized_stream_without_content_length() -> None:
+    import asyncio
+
+    from harness.control_plane import _RequestBodyLimitMiddleware
+
+    called = False
+    messages = [
+        {"type": "http.request", "body": b"123", "more_body": True},
+        {"type": "http.request", "body": b"456", "more_body": False},
+    ]
+    sent = []
+
+    async def app(_scope, _receive, _send):
+        nonlocal called
+        called = True
+
+    async def receive():
+        return messages.pop(0)
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(
+        _RequestBodyLimitMiddleware(app, max_bytes=4)(
+            {"type": "http", "method": "POST", "headers": []}, receive, send
+        )
+    )
+
+    assert called is False
+    assert sent[0]["status"] == 413

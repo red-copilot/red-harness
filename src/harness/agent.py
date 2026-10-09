@@ -4,12 +4,18 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .agent_workspace import (
+    prepare_agent_task_view,
+    prepare_agent_workspace_for_container,
+)
 from .budget import BudgetMonitor, UsageMetrics
-from .models import AgentSpec, TaskSpec
+from .models import AgentSpec, TaskSpec, _is_reserved_credential_env
+from .secureio import open_regular_file, read_regular_text
 from .trace import TraceRecorder
 
 
@@ -47,6 +53,8 @@ def _run_monitored(
     run_dir: Path,
     task: TaskSpec,
     trace: TraceRecorder,
+    cancel_path: Path | None = None,
+    guard_parent_death: bool = False,
 ) -> AgentResult:
     event_file = run_dir / "events.jsonl"
     event_file.write_text("", encoding="utf-8")
@@ -56,9 +64,16 @@ def _run_monitored(
     timed_out = False
     started = time.monotonic()
 
-    with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
+    with (
+        open_regular_file(stdout_path, "wb") as stdout_handle,
+        open_regular_file(stderr_path, "wb") as stderr_handle,
+    ):
+        launch_command = command
+        if guard_parent_death and sys.platform == "linux":
+            guard = Path(__file__).with_name("process_guard.py")
+            launch_command = [sys.executable, str(guard), "--", *command]
         proc = subprocess.Popen(
-            command,
+            launch_command,
             cwd=cwd,
             env=env,
             stdout=stdout_handle,
@@ -66,6 +81,17 @@ def _run_monitored(
             start_new_session=True,
         )
         while proc.poll() is None:
+            if cancel_path is not None:
+                try:
+                    cancelled = bool(read_regular_text(cancel_path, max_bytes=64 * 1024))
+                except FileNotFoundError:
+                    cancelled = False
+                except OSError:
+                    cancelled = True
+                if cancelled:
+                    trace.emit("agent.cancelled", data={"reason": "session_closed"})
+                    _terminate_process(proc)
+                    break
             exceeded = monitor.poll()
             if exceeded:
                 _terminate_process(proc)
@@ -91,8 +117,8 @@ def _run_monitored(
         returncode=returncode,
         timed_out=timed_out,
         budget_exceeded=monitor.exceeded,
-        stdout=stdout_path.read_text(encoding="utf-8", errors="replace"),
-        stderr=stderr_path.read_text(encoding="utf-8", errors="replace"),
+        stdout=read_regular_text(stdout_path),
+        stderr=read_regular_text(stderr_path),
         metrics=monitor.metrics,
     )
 
@@ -120,7 +146,18 @@ class CLIAdapter:
         gateway_url: str | None = None,
         gateway_token: str | None = None,
         gateway_network: str | None = None,
+        agent_task_dir: Path | None = None,
+        cancel_path: Path | None = None,
     ) -> AgentResult:
+        del agent_task_dir  # Host Agents remain an explicit, unsandboxed development path.
+        from .network_policy import enforced_network
+
+        enforced_network(
+            self.spec,
+            environment_network=environment_network,
+            gateway_network=gateway_network,
+            gateway_enabled=bool(gateway_url and gateway_token),
+        )
         del environment_network, gateway_network
         env = os.environ.copy()
         env.update(self.spec.env)
@@ -168,10 +205,11 @@ class CLIAdapter:
             run_dir=run_dir,
             task=task,
             trace=self.trace,
+            cancel_path=cancel_path,
+            guard_parent_death=True,
         )
         self._finish_trace(result)
         return result
-
 
     async def start_session(
         self,
@@ -185,7 +223,9 @@ class CLIAdapter:
         gateway_url: str | None = None,
         gateway_token: str | None = None,
         gateway_network: str | None = None,
+        agent_task_dir: Path | None = None,
     ):
+        del agent_task_dir
         from .session import OneShotAgentSession
 
         return await OneShotAgentSession.start(
@@ -201,6 +241,7 @@ class CLIAdapter:
                 "gateway_url": gateway_url,
                 "gateway_token": gateway_token,
                 "gateway_network": gateway_network,
+                "cancel_path": run_dir / "agent.control.jsonl",
             },
         )
 
@@ -258,7 +299,22 @@ class DockerAdapter:
         gateway_url: str | None,
         gateway_token: str | None,
         host_gateway: bool,
+        agent_task_dir: Path | None = None,
     ) -> list[str]:
+        from .network_policy import proxy_environment_overrides, reject_agent_proxy_env
+
+        forbidden_env = sorted(
+            key for key in self.spec.env if _is_reserved_credential_env(key)
+        )
+        if forbidden_env:
+            raise AgentError("container Agent cannot receive reserved credential environment variables")
+        reject_agent_proxy_env(self.spec.network_profile, set(self.spec.env))
+        agent_task_dir = agent_task_dir or prepare_agent_task_view(
+            task_dir=task_dir,
+            run_root=run_dir.parent,
+            verifier_entrypoint=task.verification.entrypoint,
+        )
+        container_uid, container_gid = prepare_agent_workspace_for_container(run_dir)
         command = [
             "docker",
             "create",
@@ -266,6 +322,8 @@ class DockerAdapter:
             "--pull=never",
             "--name",
             container_name,
+            "--user",
+            f"{container_uid}:{container_gid}",
             "--read-only",
             "--cap-drop",
             "ALL",
@@ -290,7 +348,7 @@ class DockerAdapter:
         command.extend(
             [
                 "-v",
-                f"{task_dir.resolve()}:/task:ro",
+                f"{agent_task_dir.resolve()}:/task:ro",
                 "-v",
                 f"{run_dir.resolve()}:/run/harness:rw",
                 "-w",
@@ -339,6 +397,7 @@ class DockerAdapter:
 
         for key, value in sorted(self.spec.env.items()):
             command.extend(["-e", f"{key}={value}"])
+        command.extend(proxy_environment_overrides(self.spec.network_profile))
         command.append(str(self.spec.image))
         command.extend(self.spec.command)
         return command
@@ -355,8 +414,18 @@ class DockerAdapter:
         gateway_url: str | None = None,
         gateway_token: str | None = None,
         gateway_network: str | None = None,
+        agent_task_dir: Path | None = None,
+        cancel_path: Path | None = None,
     ) -> AgentResult:
+        from .network_policy import enforced_network
+
         gateway_enabled = bool(gateway_url and gateway_token)
+        enforced = enforced_network(
+            self.spec,
+            environment_network=environment_network,
+            gateway_network=gateway_network,
+            gateway_enabled=gateway_enabled,
+        )
         if gateway_enabled and (
             self.spec.network == "none" or self.spec.network_profile == "offline"
         ):
@@ -366,7 +435,9 @@ class DockerAdapter:
         sidecar_gateway = gateway_enabled and gateway_network is not None
         host_gateway = gateway_enabled and not sidecar_gateway and self.spec.network != "host"
 
-        if self.spec.network_profile == "offline":
+        if enforced is not None:
+            primary_network = enforced.primary
+        elif self.spec.network_profile == "offline":
             primary_network = "none"
         elif sidecar_gateway:
             if self.spec.network == "host":
@@ -390,6 +461,7 @@ class DockerAdapter:
             gateway_url=gateway_url,
             gateway_token=gateway_token,
             host_gateway=host_gateway,
+            agent_task_dir=agent_task_dir,
         )
 
         self.trace.emit(
@@ -409,17 +481,19 @@ class DockerAdapter:
 
         try:
             self._docker(create_command, cwd=task_dir)
-            if (
-                sidecar_gateway
-                and environment_network
-                and environment_network != gateway_network
-            ):
+            enforced_target = enforced.environment if enforced is not None else None
+            target_differs = (
+                enforced_target is not None and enforced_target != primary_network
+                if enforced is not None
+                else bool(environment_network and environment_network != gateway_network)
+            )
+            if sidecar_gateway and environment_network and target_differs:
                 self._docker(
                     [
                         "docker",
                         "network",
                         "connect",
-                        environment_network,
+                        enforced_target or environment_network,
                         container_name,
                     ],
                     cwd=task_dir,
@@ -432,6 +506,7 @@ class DockerAdapter:
                 run_dir=run_dir,
                 task=task,
                 trace=self.trace,
+                cancel_path=cancel_path,
             )
         finally:
             subprocess.run(
@@ -453,7 +528,6 @@ class DockerAdapter:
         )
         return result
 
-
     async def start_session(
         self,
         task: TaskSpec,
@@ -466,6 +540,7 @@ class DockerAdapter:
         gateway_url: str | None = None,
         gateway_token: str | None = None,
         gateway_network: str | None = None,
+        agent_task_dir: Path | None = None,
     ):
         from .session import OneShotAgentSession
 
@@ -475,6 +550,7 @@ class DockerAdapter:
             run_kwargs={
                 "task": task,
                 "task_dir": task_dir,
+                "agent_task_dir": agent_task_dir,
                 "run_dir": run_dir,
                 "environment_project": environment_project,
                 "environment_network": environment_network,
@@ -482,6 +558,7 @@ class DockerAdapter:
                 "gateway_url": gateway_url,
                 "gateway_token": gateway_token,
                 "gateway_network": gateway_network,
+                "cancel_path": run_dir / "agent.control.jsonl",
             },
         )
 

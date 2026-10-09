@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import ipaddress
+import json
 import os
+import signal
 import socket
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Self
 
@@ -13,10 +17,28 @@ from .gateway_runtime import GatewayConfig
 from .models import load_agent, load_task
 from .orchestrator import Orchestrator
 from .queue import JobPayload
+from .secureio import read_regular_text
 
 
 class WorkerError(RuntimeError):
     pass
+
+
+def _validate_control_url(value: str) -> None:
+    try:
+        url = httpx.URL(value)
+    except (TypeError, httpx.InvalidURL) as exc:
+        raise WorkerError("control-plane URL must be an absolute HTTP(S) URL") from exc
+    if not url.is_absolute_url or url.scheme not in {"http", "https"} or not url.host:
+        raise WorkerError("control-plane URL must be an absolute HTTP(S) URL")
+    if url.username or url.password or url.query or url.fragment:
+        raise WorkerError("control-plane URL cannot contain user info, query, or fragment")
+    try:
+        loopback = ipaddress.ip_address(url.host).is_loopback
+    except ValueError:
+        loopback = url.host.lower() == "localhost"
+    if url.scheme != "https" and not loopback:
+        raise WorkerError("control-plane connections require HTTPS unless the control plane is on loopback")
 
 
 class _Heartbeat:
@@ -27,13 +49,18 @@ class _Heartbeat:
         job_id: str,
         worker_id: str,
         lease_seconds: int,
+        on_error: Callable[[], None] | None = None,
     ) -> None:
         self.client = client
         self.job_id = job_id
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
+        self.on_error = on_error
         self.interval = max(3.0, lease_seconds / 3)
+        self.request_timeout = min(5.0, max(1.0, lease_seconds / 6))
         self.stop_event = threading.Event()
+        self.state_lock = threading.Lock()
+        self.stopping = False
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.error: str | None = None
 
@@ -46,11 +73,17 @@ class _Heartbeat:
                         "worker_id": self.worker_id,
                         "lease_seconds": self.lease_seconds,
                     },
+                    timeout=self.request_timeout,
                 )
                 response.raise_for_status()
             except Exception as exc:  # noqa: BLE001 - heartbeat boundary records failures.
-                self.error = str(exc)
-                self.stop_event.set()
+                self.error = type(exc).__name__
+                with self.state_lock:
+                    if not self.stopping:
+                        self.stopping = True
+                        self.stop_event.set()
+                        if self.on_error is not None:
+                            self.on_error()
                 return
 
     def __enter__(self) -> Self:
@@ -58,8 +91,12 @@ class _Heartbeat:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.stop_event.set()
-        self.thread.join(timeout=5)
+        with self.state_lock:
+            self.stopping = True
+            self.stop_event.set()
+        self.thread.join(timeout=self.request_timeout + 1.0)
+        if self.thread.is_alive() and self.error is None:
+            self.error = "TimeoutError"
 
 
 class Worker:
@@ -74,16 +111,21 @@ class Worker:
         workspace_root: str | Path = ".",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
+        if not token:
+            raise WorkerError("worker requires a configured control-plane token")
+        _validate_control_url(control_url)
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
         self.lease_seconds = lease_seconds
         self.allow_host_jobs = allow_host_jobs
         self.workspace_root = Path(workspace_root).resolve()
-        headers = {"authorization": f"Bearer {token}"} if token else {}
+        headers = {"authorization": f"Bearer {token}"}
         self.client = httpx.Client(
             base_url=control_url.rstrip("/"),
             headers=headers,
             timeout=30.0,
             transport=transport,
+            trust_env=False,
+            follow_redirects=False,
         )
 
     def close(self) -> None:
@@ -99,7 +141,12 @@ class Worker:
 
     def _path(self, raw: str) -> Path:
         path = Path(raw)
-        return path.resolve() if path.is_absolute() else (self.workspace_root / path).resolve()
+        resolved = path.resolve() if path.is_absolute() else (self.workspace_root / path).resolve()
+        try:
+            resolved.relative_to(self.workspace_root)
+        except ValueError as exc:
+            raise WorkerError("job paths must remain within the worker workspace") from exc
+        return resolved
 
     def _gateway_config(self, payload: JobPayload) -> GatewayConfig | None:
         spec = payload.gateway
@@ -117,20 +164,49 @@ class Worker:
             sidecar_runtime=spec.sidecar_runtime,
         )
 
-    def _execute(self, payload: JobPayload) -> dict[str, Any]:
+    def _execute(self, payload: JobPayload, *, run_id: str) -> dict[str, Any]:
         if payload.allow_host_agent and not self.allow_host_jobs:
             raise WorkerError("job requested host agent execution but worker disallows host jobs")
         task_path = self._path(payload.task_path)
         agent_path = self._path(payload.agent_path)
         runs_root = self._path(payload.runs_root)
-        return Orchestrator(runs_root).run(
-            task=load_task(task_path),
+        run_dir = runs_root / run_id
+        if run_dir.is_symlink():
+            raise WorkerError("job run directory cannot be a symlink")
+        task = load_task(task_path)
+        agent = load_agent(agent_path)
+        orchestrator = Orchestrator(runs_root)
+        if run_dir.exists():
+            result_path = run_dir / "result.json"
+            if result_path.is_file():
+                try:
+                    result = json.loads(read_regular_text(result_path))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise WorkerError("existing job result is unreadable; reconcile manually") from exc
+                if not isinstance(result, dict) or result.get("run_id") != run_id:
+                    raise WorkerError("existing job result does not match its owned run ID")
+                return result
+            if agent.type != "pi" or agent.pi is None or agent.pi.mode != "rpc":
+                raise WorkerError("interrupted non-Pi job requires manual reconciliation")
+            return orchestrator.run(
+                task=task,
+                task_path=task_path,
+                agent=agent,
+                agent_path=agent_path,
+                allow_host_agent=payload.allow_host_agent and self.allow_host_jobs,
+                seed=payload.seed,
+                gateway_config=self._gateway_config(payload),
+                resume_run_dir=run_dir,
+            )
+        return orchestrator.run(
+            task=task,
             task_path=task_path,
-            agent=load_agent(agent_path),
+            agent=agent,
             agent_path=agent_path,
             allow_host_agent=payload.allow_host_agent and self.allow_host_jobs,
             seed=payload.seed,
             gateway_config=self._gateway_config(payload),
+            run_id=run_id,
         )
 
     def run_once(self) -> bool:
@@ -140,16 +216,29 @@ class Worker:
 
         job_id = str(job["id"])
         payload = JobPayload.model_validate(job["payload"])
+        on_main_thread = threading.current_thread() is threading.main_thread()
+        previous_sigterm = None
+        if on_main_thread:
+            def handle_lease_loss(_signum, _frame) -> None:
+                raise WorkerError("worker received cancellation after lease loss")
+
+            previous_sigterm = signal.signal(signal.SIGTERM, handle_lease_loss)
+
+        def cancel_after_lease_loss() -> None:
+            if on_main_thread:
+                os.kill(os.getpid(), signal.SIGTERM)
+
         try:
             with _Heartbeat(
                 client=self.client,
                 job_id=job_id,
                 worker_id=self.worker_id,
                 lease_seconds=self.lease_seconds,
+                on_error=cancel_after_lease_loss,
             ) as heartbeat:
-                result = self._execute(payload)
-                if heartbeat.error:
-                    raise WorkerError(f"lease heartbeat failed: {heartbeat.error}")
+                result = self._execute(payload, run_id=str(job["run_id"]))
+            if heartbeat.error:
+                raise WorkerError(f"lease heartbeat failed ({heartbeat.error})")
             response = self.client.post(
                 f"/v1/jobs/{job_id}/complete",
                 json={"worker_id": self.worker_id, "result": result},
@@ -159,10 +248,22 @@ class Worker:
         except Exception as exc:  # noqa: BLE001 - worker must report terminal job failure.
             response = self.client.post(
                 f"/v1/jobs/{job_id}/fail",
-                json={"worker_id": self.worker_id, "error": f"{type(exc).__name__}: {exc}"},
+                # Provider, container and user-code exceptions may embed
+                # credentials. Persist the failure class without raw details.
+                json={
+                    "worker_id": self.worker_id,
+                    "error": f"{type(exc).__name__} (details omitted)",
+                },
             )
+            if response.status_code == 409:
+                # The lease expired or completion was already persisted. Never let
+                # a stale worker overwrite the current owner's state.
+                return True
             response.raise_for_status()
             return True
+        finally:
+            if on_main_thread and previous_sigterm is not None:
+                signal.signal(signal.SIGTERM, previous_sigterm)
 
     def run_forever(self, *, poll_interval: float = 2.0) -> None:
         while True:

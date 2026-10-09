@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from ..queue import JobPayload, SQLiteQueue
+from ..queue import JobPayload, SQLiteQueue, validate_terminal_result
 from .common import authorize
 
 
@@ -20,6 +20,11 @@ class LeaseRequest(BaseModel):
 class CompleteRequest(BaseModel):
     worker_id: str = Field(min_length=1, max_length=200)
     result: dict
+
+    @field_validator("result")
+    @classmethod
+    def result_is_bounded_json(cls, value: dict) -> dict:
+        return validate_terminal_result(value)
 
 
 class FailRequest(BaseModel):
@@ -79,6 +84,16 @@ def build_jobs_router(queue: SQLiteQueue, token: str | None) -> APIRouter:
         authorize(request, token)
         if not queue.fail(job_id, body.worker_id, body.error):
             raise HTTPException(status_code=409, detail="lease is not owned by worker")
+        return {"ok": True}
+
+    @router.post("/v1/jobs/{job_id}/requeue")
+    async def requeue(request: Request, job_id: str) -> dict[str, bool]:
+        authorize(request, token)
+        if not queue.requeue(job_id):
+            raise HTTPException(
+                status_code=409,
+                detail="job is not awaiting operator reconciliation",
+            )
         return {"ok": True}
 
     @router.get("/v1/leaderboard")

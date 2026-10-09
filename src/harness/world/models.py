@@ -25,6 +25,7 @@ class WorldRecord(BaseModel):
     valid_from: datetime | None = None
     expires_at: datetime | None = None
     supersedes: list[str] = Field(default_factory=list)
+    contradicts: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_temporal_window(self) -> Self:
@@ -38,6 +39,10 @@ class WorldRecord(BaseModel):
             and self.expires_at < self.valid_from
         ):
             raise ValueError("expires_at must be greater than or equal to valid_from")
+        for name in ("supersedes", "contradicts"):
+            links = getattr(self, name)
+            if any(not link for link in links) or len(set(links)) != len(links):
+                raise ValueError(f"{name} must contain unique non-empty IDs")
         return self
 
     def is_valid_at(self, at: datetime | None = None) -> bool:
