@@ -8,6 +8,7 @@ Modules are separated by responsibilities and explicit composition points.
 - `benchmark/`: externally provisioned challenge lifecycle, submissions and adapters.
 - `api/`: transport-facing HTTP handlers, not a place for solver policies.
 - `agent.py`, `session.py`, `pi_*.py`: agent/session integration and infrastructure.
+- `tool_adapter.py`: domain-neutral async tool plugin contract; concrete tools are explicitly selected by application composition and remain subject to Gateway authorization.
 - `solver_loop.py`, `planner.py`, `action_verifier.py`: solver policies.
 - `orchestrator.py`: local-run lifecycle and environment integration.
 
@@ -40,9 +41,13 @@ and this document does not claim the full package has been relocated.
 `tests/test_architecture.py` parses package imports without importing modules.
 It rejects reverse imports from world into API, benchmark, runtime or entry
 points; from runtime into transport or use-case entry points; and from
-benchmark adapters into API/CLI/worker. These rules deliberately target
-high-risk dependency inversions instead of pretending all top-level modules
-have already been migrated.
+benchmark adapters into API/CLI/worker. It also prevents `world` and `runtime`
+from importing FastAPI, Starlette, Docker, subprocess, httpx, or the TSec SDK,
+and prevents benchmark adapters from importing web-server or Docker
+implementations. Negative fixtures verify that the guard detects these
+infrastructure dependencies. These rules deliberately target high-risk
+dependency inversions instead of pretending all top-level modules have already
+been migrated.
 
 CI executes the boundary check in the regular pytest suite. A boundary
 exception should be explicit, documented and reviewed rather than hidden
