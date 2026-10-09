@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .agent import AgentResult
+from .budget import UsageMetrics
+from .secureio import open_regular_file
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,8 @@ class AgentCheckpoint:
     id: str
     event_offset: int
     feedback_offset: int
+    session_id: str | None = None
+    gateway_event_offset: int = 0
 
 
 class AgentSession(Protocol):
@@ -66,6 +71,64 @@ class OneShotAgentSession:
         self._event_line = 0
         self._feedback_offset = 0
         self._closed = False
+        self._usage_metrics = UsageMetrics()
+        self._usage_telemetry_valid = True
+
+    @property
+    def usage_metrics(self) -> dict[str, int | float]:
+        return self._usage_metrics.as_dict()
+
+    @property
+    def usage_telemetry_valid(self) -> bool:
+        return self._usage_telemetry_valid
+
+    @staticmethod
+    def _counter(data: dict[str, Any], name: str, default: int = 0) -> int | None:
+        value = data.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    @staticmethod
+    def _cost(data: dict[str, Any]) -> float | None:
+        value = data.get("cost_usd", 0.0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        amount = float(value)
+        return amount if math.isfinite(amount) and amount >= 0 else None
+
+    def _account(self, event: AgentEvent) -> None:
+        if event.type == "model.usage_missing":
+            self._usage_telemetry_valid = False
+        elif event.type == "model.request":
+            count = self._counter(event.data, "count", 1)
+            if count is None:
+                self._usage_telemetry_valid = False
+            else:
+                self._usage_metrics.model_calls += count
+        elif event.type == "model.usage":
+            input_tokens = self._counter(event.data, "input_tokens")
+            output_tokens = self._counter(event.data, "output_tokens")
+            total_tokens = self._counter(
+                event.data, "total_tokens", (input_tokens or 0) + (output_tokens or 0)
+            )
+            cost = self._cost(event.data)
+            if (
+                None in (input_tokens, output_tokens, total_tokens, cost)
+                or total_tokens < input_tokens + output_tokens
+            ):
+                self._usage_telemetry_valid = False
+            else:
+                self._usage_metrics.input_tokens += input_tokens
+                self._usage_metrics.output_tokens += output_tokens
+                self._usage_metrics.total_tokens += total_tokens
+                self._usage_metrics.cost_usd += cost
+        elif event.type in {"tool.call", "tool.denied"}:
+            count = self._counter(event.data, "count", 1)
+            if count is None:
+                self._usage_telemetry_valid = False
+            else:
+                self._usage_metrics.tool_calls += count
 
     @classmethod
     async def start(
@@ -85,38 +148,30 @@ class OneShotAgentSession:
         if self._task is None:
             raise RuntimeError("session has not been started")
 
-        remainder = ""
         while True:
+            event = None
             if self.event_path.exists():
-                with self.event_path.open("r", encoding="utf-8", errors="replace") as handle:
+                with open_regular_file(
+                    self.event_path, "r", encoding="utf-8", errors="replace"
+                ) as handle:
                     handle.seek(self._event_offset)
-                    chunk = handle.read()
-                    self._event_offset = handle.tell()
-                if chunk:
-                    text = remainder + chunk
-                    lines = text.splitlines(keepends=True)
-                    remainder = ""
-                    for line in lines:
-                        if not line.endswith(("\n", "\r")):
-                            remainder = line
-                            continue
+                    line = handle.readline()
+                    if line and (line.endswith(("\n", "\r")) or self._task.done()):
+                        # Advance only through the event yielded below. A read-ahead
+                        # chunk could contain later events that have not been applied.
+                        self._event_offset = handle.tell()
                         self._event_line += 1
                         event = self._parse_event(
                             line,
                             fallback_event_id=f"agent-event-line:{self._event_line}",
                         )
-                        if event is not None:
-                            yield event
+
+            if event is not None:
+                self._account(event)
+                yield event
+                continue
 
             if self._task.done():
-                if remainder.strip():
-                    self._event_line += 1
-                    event = self._parse_event(
-                        remainder,
-                        fallback_event_id=f"agent-event-line:{self._event_line}",
-                    )
-                    if event is not None:
-                        yield event
                 await self._task
                 break
             await asyncio.sleep(self.poll_interval)
@@ -155,7 +210,7 @@ class OneShotAgentSession:
         await asyncio.to_thread(self._append_feedback, line)
 
     def _append_feedback(self, line: str) -> None:
-        with self.feedback_path.open("a", encoding="utf-8") as handle:
+        with open_regular_file(self.feedback_path, "a") as handle:
             handle.write(line)
             handle.flush()
             self._feedback_offset = handle.tell()
@@ -179,7 +234,7 @@ class OneShotAgentSession:
         await asyncio.to_thread(self._append_control, line)
 
     def _append_control(self, line: str) -> None:
-        with self.control_path.open("a", encoding="utf-8") as handle:
+        with open_regular_file(self.control_path, "a") as handle:
             handle.write(line)
             handle.flush()
 

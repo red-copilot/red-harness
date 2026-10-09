@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -8,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 from .session import AgentEvent
+from .verification import AuthorizedObjectiveVerdict, VerifierRegistry
 
 
 class ProgressHypothesis(BaseModel):
@@ -20,7 +23,7 @@ class ProgressHypothesis(BaseModel):
 
 
 class ProgressLedger(BaseModel):
-    schema_version: str = "harness/progress/v2"
+    schema_version: str = "harness/progress/v3"
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     active_goal: str | None = None
     completed_subgoals: list[str] = Field(default_factory=list)
@@ -50,8 +53,12 @@ class ProgressLedger(BaseModel):
     active_actions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     failure_count: int = 0
     no_progress_count: int = 0
+    replan_count: int = 0
     failed_skill_counts: dict[str, int] = Field(default_factory=dict)
     reconciled_actions: dict[str, str] = Field(default_factory=dict)
+    # Correlates legacy events that predate tool_call_id, so replay uses the
+    # same generated action identity after a checkpoint reload.
+    tool_event_correlations: dict[str, str] = Field(default_factory=dict)
     budget_limits: dict[str, float] = Field(default_factory=dict)
     budget_used: dict[str, float] = Field(default_factory=dict)
     tool_calls: int = 0
@@ -59,7 +66,10 @@ class ProgressLedger(BaseModel):
     accepted_submissions: int = 0
     rejected_submissions: int = 0
     objective_completed: bool = False
+    objective_verdict: dict[str, Any] | None = None
     last_event_type: str | None = None
+    last_event_id: str | None = None
+    event_count: int = 0
 
     @field_validator("started_at")
     @classmethod
@@ -69,7 +79,9 @@ class ProgressLedger(BaseModel):
         return value
 
     def record_event(self, event: AgentEvent) -> None:
+        self.event_count += 1
         self.last_event_type = event.type
+        self.last_event_id = event.event_id
         if event.type == "tool.call":
             self.tool_calls += 1
             self.actual_observation = None
@@ -243,10 +255,23 @@ class ProgressLedger(BaseModel):
         elif kind == "goal_advanced":
             self.goal_advanced += 1
         elif kind == "objective_completed":
-            self.objective_completed = True
+            raise ValueError("objective completion requires an authorized ObjectiveVerdict")
         else:
             raise ValueError(f"unknown trusted progress kind: {kind}")
         self.no_progress_count = 0
+
+    def record_objective_verdict(
+        self,
+        authorized: AuthorizedObjectiveVerdict,
+        registry: VerifierRegistry,
+    ) -> None:
+        if not registry.is_authorized_objective(authorized):
+            raise ValueError("objective verdict was not authorized by the run verifier registry")
+        verdict = authorized.verdict
+        self.objective_verdict = verdict.model_dump(mode="json")
+        self.objective_completed = verdict.status == "verified"
+        if self.objective_completed:
+            self.no_progress_count = 0
 
     def consume_replan_reasons(self, reasons: list[str]) -> None:
         consumed = set(reasons)
@@ -280,7 +305,23 @@ class ProgressLedger(BaseModel):
         return min(remaining)
 
     def write(self, path: Path) -> None:
-        path.write_text(
-            json.dumps(self.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(self.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
         )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, path)
+            if hasattr(os, "O_DIRECTORY"):
+                directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
