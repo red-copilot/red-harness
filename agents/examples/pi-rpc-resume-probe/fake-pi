@@ -1,0 +1,62 @@
+#!/usr/local/bin/python3
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+
+def emit(record: dict) -> None:
+    print(json.dumps(record), flush=True)
+
+
+arguments = sys.argv[1:]
+session_id = (
+    arguments[arguments.index("--session") + 1]
+    if "--session" in arguments
+    else "pi-new-session-without-resume"
+)
+emit({"type": "session", "id": session_id, "version": 1})
+
+for line in sys.stdin:
+    try:
+        command = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if command.get("type") != "prompt":
+        continue
+    Path("/run/harness/proof.txt").write_text("red-harness-ok", encoding="utf-8")
+    emit(
+        {
+            "type": "message_start",
+            "message": {"role": "assistant", "provider": "fake", "model": "probe"},
+        }
+    )
+    emit({"type": "tool_execution_start", "toolCallId": "probe-call", "toolName": "write"})
+    if os.environ.get("PI_PROBE_HANG") == "1":
+        while True:
+            time.sleep(1)
+    emit(
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "probe-call",
+            "toolName": "write",
+            "isError": False,
+        }
+    )
+    emit(
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "provider": "fake",
+                "model": "probe",
+                "usage": {"input": 1, "output": 1, "totalTokens": 2},
+            },
+        }
+    )
+    emit({"type": "agent_end"})
+    emit({"type": "agent_settled"})
+    break

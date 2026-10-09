@@ -15,6 +15,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+      - name: install Python verifier sandbox
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.0.4
       - run: pi --version
       - run: python -m pip install -e ".[dev]"
@@ -51,8 +53,12 @@ jobs:
               )
           PY
       - run: ruff check .
+      - run: docker build -t harness-isolation-probe:ci agents/examples/isolation-probe
+      - run: docker build -t harness-pi-rpc-resume-probe:ci agents/examples/pi-rpc-resume-probe
+      - run: docker build -t harness/pi-kali:ci docker/pi-kali
       - run: pytest -q
       - run: harness validate benchmarks/examples/hello/task.yaml
+      - run: harness preflight benchmarks/examples/hello/task.yaml --agent agents/examples/demo.yaml
       - run: harness validate benchmarks/examples/hello-docker-verifier/task.yaml
       - run: harness validate-suite benchmarks/examples/smoke-suite.yaml
       - run: python -c "from harness.models import load_agent; a=load_agent('agents/examples/pi.yaml'); assert a.type == 'pi'"
@@ -68,6 +74,22 @@ jobs:
           --agent agents/examples/demo.yaml
           --allow-host-agent
           --workers 2
+          > /tmp/smoke-suite-candidate.json
+      - run: >-
+          harness compare-evaluations
+          benchmarks/baselines/smoke-suite.json
+          /tmp/smoke-suite-candidate.json
+      - run: harness validate-suite benchmarks/examples/generalization-smoke-suite.yaml
+      - run: >-
+          harness suite benchmarks/examples/generalization-smoke-suite.yaml
+          --agent agents/examples/multidomain-demo.yaml
+          --allow-host-agent
+          --workers 3
+          > /tmp/generalization-suite-candidate.json
+      - run: >-
+          harness compare-evaluations
+          benchmarks/baselines/generalization-smoke-suite.json
+          /tmp/generalization-suite-candidate.json
       - run: >-
           harness run benchmarks/examples/hello/task.yaml
           --agent agents/examples/gateway-demo.yaml
