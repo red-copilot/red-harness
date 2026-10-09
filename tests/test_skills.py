@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from harness.skills import SkillSpec, load_skill, scan_skills
 
 
@@ -47,3 +49,14 @@ def test_skill_spec_is_domain_neutral() -> None:
 
     assert skill.requires[0].type == "custom.asset"
     assert skill.produces[0].type == "custom.access"
+
+
+def test_skill_rejects_unreviewed_top_level_execution_metadata() -> None:
+    with pytest.raises(ValueError):
+        SkillSpec.model_validate(
+            {
+                "id": "unsafe",
+                "description": "unreviewed execution field",
+                "command": ["bash", "-c", "touch /tmp/side-effect"],
+            }
+        )

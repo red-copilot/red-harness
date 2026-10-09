@@ -6,8 +6,9 @@ import hashlib
 import json
 import math
 import os
+import re
 import stat
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -15,6 +16,8 @@ from pydantic import BaseModel, Field
 SCHEMA_VERSION = "harness/audit/v1"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_TRACE_EVENTS = 100_000
+MAX_JSONL_LINE_BYTES = 256 * 1024
+MAX_EVIDENCE_BYTES = 1024 * 1024
 _REQUIRED = ("result.json", "trace.jsonl")
 _OPTIONAL = ("progress.json", "world.events.jsonl", "world.snapshot.json")
 
@@ -131,14 +134,33 @@ def _jsonl(
     max_events: int | None = None,
 ) -> list[tuple[int, dict[str, Any]]]:
     events: list[tuple[int, dict[str, Any]]] = []
-    lines = raw.splitlines()
-    for number, line in enumerate(lines, 1):
+    line_limit = (max_events if max_events is not None else MAX_TRACE_EVENTS) + 1
+    offset = 0
+    number = 0
+    while offset < len(raw):
+        line_start = offset
+        newline = raw.find(b"\n", offset)
+        end = len(raw) if newline < 0 else newline
+        content_end = end - 1 if end > offset and raw[end - 1] == 13 else end
+        offset = len(raw) if newline < 0 else newline + 1
+        number += 1
+        if number > line_limit:
+            _add(issues, "line_count_limit_exceeded", "warning", file, line=number)
+            break
+        if content_end - line_start > MAX_JSONL_LINE_BYTES:
+            _add(issues, "event_size_limit_exceeded", "warning", file, line=number)
+            break
+        line = raw[line_start:content_end]
         if not line.strip():
             continue
         try:
-            value = json.loads(line)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            code = "truncated_event" if number == len(lines) else "invalid_event_json"
+            value = json.loads(
+                line,
+                parse_constant=_reject_json_constant,
+                parse_float=_finite_float,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            code = "truncated_event" if offset >= len(raw) else "invalid_event_json"
             _add(issues, code, "warning", file, line=number)
             continue
         if not isinstance(value, dict):
@@ -151,6 +173,17 @@ def _jsonl(
     return events
 
 
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
 def _same(a: Any, b: Any) -> bool:
     if (
         isinstance(a, (int, float))
@@ -160,6 +193,146 @@ def _same(a: Any, b: Any) -> bool:
     ):
         return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-9)
     return a == b
+
+
+def _read_evidence_artifact(root: Path, reference: str) -> bytes:
+    pure_path = PurePosixPath(reference)
+    if (
+        not reference
+        or pure_path.is_absolute()
+        or any(part in {"", ".", ".."} for part in pure_path.parts)
+        or "\\" in reference
+        or "\x00" in reference
+    ):
+        raise ValueError("unsafe evidence artifact reference")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(root, directory_flags)
+    try:
+        for component in pure_path.parts[:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd = os.open(
+            pure_path.parts[-1],
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=directory_fd,
+        )
+        try:
+            info = os.fstat(file_fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_EVIDENCE_BYTES:
+                raise ValueError("unsafe or oversized evidence artifact")
+            chunks: list[bytes] = []
+            remaining = MAX_EVIDENCE_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(file_fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            if len(data) > MAX_EVIDENCE_BYTES or len(data) != info.st_size:
+                raise ValueError("evidence artifact size changed or exceeded limit")
+            return data
+        finally:
+            os.close(file_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _validate_objective_evidence(
+    root: Path,
+    event: dict[str, Any],
+    data: dict[str, Any],
+    result: dict[str, Any] | None,
+    issues: list[AuditIssue],
+    line: int,
+) -> tuple[str | None, bool]:
+    from pydantic import ValidationError
+
+    from .verification import ObjectiveVerdict
+
+    try:
+        verdict = ObjectiveVerdict.model_validate(data)
+    except (ValidationError, TypeError, ValueError):
+        _add(issues, "objective_verdict_invalid", "error", "trace.jsonl", line=line)
+        return None, False
+    if event.get("actor") != "harness":
+        _add(
+            issues,
+            "objective_verdict_untrusted_actor",
+            "error",
+            "trace.jsonl",
+            line=line,
+            event_id=event.get("event_id"),
+        )
+        return verdict.status, False
+    expected_run_id = result.get("run_id") if isinstance(result, dict) else event.get("run_id")
+    if isinstance(expected_run_id, str) and verdict.run_id != expected_run_id:
+        _add(
+            issues,
+            "objective_verdict_run_mismatch",
+            "error",
+            "trace.jsonl",
+            line=line,
+            field="data.run_id",
+            event_id=event.get("event_id"),
+        )
+        return verdict.status, False
+
+    valid = True
+    for evidence in verdict.evidence:
+        if not re.fullmatch(r"[0-9a-f]{64}", evidence.artifact_hash or ""):
+            valid = False
+            _add(issues, "objective_evidence_hash_invalid", "error", "trace.jsonl", line=line)
+            continue
+        if evidence.evidence_id != f"sha256:{evidence.artifact_hash}":
+            valid = False
+            _add(issues, "objective_evidence_id_mismatch", "error", "trace.jsonl", line=line)
+            continue
+        if evidence.artifact_ref != f"evidence/sha256/{evidence.artifact_hash}.json":
+            valid = False
+            _add(
+                issues,
+                "objective_evidence_reference_mismatch",
+                "error",
+                "trace.jsonl",
+                line=line,
+            )
+            continue
+        try:
+            artifact = _read_evidence_artifact(root, evidence.artifact_ref or "")
+        except (OSError, ValueError):
+            valid = False
+            _add(issues, "objective_evidence_missing_or_unsafe", "error", "trace.jsonl", line=line)
+            continue
+        digest = hashlib.sha256(artifact).hexdigest()
+        if digest != evidence.artifact_hash:
+            valid = False
+            _add(issues, "objective_evidence_hash_mismatch", "error", "trace.jsonl", line=line)
+            continue
+        try:
+            artifact_data = json.loads(artifact)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            valid = False
+            _add(issues, "objective_evidence_invalid", "error", "trace.jsonl", line=line)
+            continue
+        if not isinstance(artifact_data, dict) or any(
+            artifact_data.get(key) != expected
+            for key, expected in (
+                ("schema_version", "harness/objective-evidence/v1"),
+                ("run_id", verdict.run_id),
+                ("action_id", evidence.action_id),
+                ("producer", verdict.producer),
+                ("captured_at", verdict.captured_at.isoformat()),
+                ("world_revision", verdict.world_revision),
+                ("status", verdict.status),
+            )
+        ):
+            valid = False
+            _add(
+                issues, "objective_evidence_provenance_mismatch", "error", "trace.jsonl", line=line
+            )
+    return verdict.status, valid and bool(verdict.evidence)
 
 
 def _add_if_diff(
@@ -249,10 +422,12 @@ def audit_run(run_dir: str | Path) -> AuditReport:
         "contradicted": 0,
         "pending": 0,
         "untraceable_verdicts": 0,
+        "objective_verdicts": 0,
         "events": len(unique),
     }
     terminal: list[tuple[int, dict[str, Any]]] = []
     grader: list[tuple[int, dict[str, Any]]] = []
+    objective_verdicts: list[tuple[int, str | None, dict[str, Any], bool]] = []
     action_ids: set[str] = set()
     for _, event in unique:
         if event.get("type") == "action.verified":
@@ -277,6 +452,17 @@ def audit_run(run_dir: str | Path) -> AuditReport:
                 field="data.confirmed_fact",
                 event_id=event.get("event_id"),
             )
+        if kind == "objective.verdict":
+            counts["objective_verdicts"] += 1
+            objective_status, evidence_valid = _validate_objective_evidence(
+                root,
+                event,
+                data,
+                result,
+                issues,
+                line,
+            )
+            objective_verdicts.append((line, objective_status, data, evidence_valid))
         if (
             kind in {"goal.completed", "objective.completed"}
             or data.get("objective_completed") is True
@@ -306,6 +492,26 @@ def audit_run(run_dir: str | Path) -> AuditReport:
             status = data.get("status")
             if status in {"verified", "contradicted", "pending"}:
                 counts[status] += 1
+                evidence = data.get("evidence")
+                if status == "verified" and (
+                    not isinstance(evidence, list)
+                    or not evidence
+                    or any(
+                        not isinstance(item, dict)
+                        or not isinstance(item.get("evidence_id"), str)
+                        or not item.get("evidence_id")
+                        for item in evidence
+                    )
+                ):
+                    _add(
+                        issues,
+                        "verdict_evidence_missing",
+                        "error",
+                        "trace.jsonl",
+                        line=line,
+                        field="data.evidence",
+                        event_id=event.get("event_id"),
+                    )
                 action_id = event.get("action_id") or data.get("action_id")
                 if not isinstance(action_id, str) or action_id not in action_ids:
                     counts["untraceable_verdicts"] += 1
@@ -335,7 +541,7 @@ def audit_run(run_dir: str | Path) -> AuditReport:
 
     if result is not None:
         version = result.get("schema_version")
-        if version not in (None, "harness/result/v1"):
+        if version not in (None, "harness/result/v1", "harness/result/v2"):
             _add(
                 issues,
                 "unsupported_result_version",
@@ -377,6 +583,71 @@ def audit_run(run_dir: str | Path) -> AuditReport:
                 _add_if_diff(issues, line, event, key, result, key)
         if any(key not in result for key in ("success", "status", "score")):
             _add(issues, "result_fields_missing", "warning", "result.json")
+        if version == "harness/result/v2" and result.get("success") is True:
+            terminal_line = max((line for line, _ in terminal), default=-1)
+            preceding_verdicts = [
+                verdict for verdict in objective_verdicts if verdict[0] < terminal_line
+            ]
+            revisions = [
+                revision
+                for _, _, data, _ in preceding_verdicts
+                if isinstance((revision := data.get("world_revision")), int)
+                and not isinstance(revision, bool)
+                and revision >= 0
+            ]
+            latest_revision = max(revisions, default=-1)
+            current_verdicts = [
+                verdict
+                for verdict in preceding_verdicts
+                if verdict[2].get("world_revision") == latest_revision
+            ]
+            latest_verdict = max(current_verdicts, key=lambda verdict: verdict[0], default=None)
+            for line, _, data, _ in preceding_verdicts:
+                revision = data.get("world_revision")
+                if isinstance(revision, int) and not isinstance(revision, bool) and revision < latest_revision:
+                    _add(
+                        issues,
+                        "objective_verdict_superseded",
+                        "warning",
+                        "trace.jsonl",
+                        line=line,
+                    )
+            has_verified_objective = (
+                latest_verdict is not None and latest_verdict[1] == "verified" and latest_verdict[3]
+            )
+            if len({verdict[1] for verdict in current_verdicts if verdict[1]}) > 1:
+                _add(
+                    issues,
+                    "objective_verdict_conflict",
+                    "error",
+                    "trace.jsonl",
+                )
+            if not has_verified_objective:
+                _add(
+                    issues,
+                    "objective_verdict_missing_or_untraceable",
+                    "error",
+                    "trace.jsonl",
+                )
+            result_progress = result.get("progress")
+            projected_verdict = (
+                result_progress.get("objective_verdict")
+                if isinstance(result_progress, dict)
+                else None
+            )
+            if not (
+                latest_verdict is not None
+                and projected_verdict == latest_verdict[2]
+                and latest_verdict[1] == "verified"
+                and latest_verdict[3]
+            ):
+                _add(
+                    issues,
+                    "objective_verdict_projection_mismatch",
+                    "error",
+                    "result.json",
+                    field="progress.objective_verdict",
+                )
 
     if "progress.json" in raw_files:
         progress = _json(raw_files["progress.json"], "progress.json", issues)
@@ -384,6 +655,7 @@ def audit_run(run_dir: str | Path) -> AuditReport:
             None,
             "harness/progress/v1",
             "harness/progress/v2",
+            "harness/progress/v3",
         ):
             _add(
                 issues,

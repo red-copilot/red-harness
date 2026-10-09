@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://red-harness.dev/schemas/trace-event.schema.json",
+  "title": "Red Harness trace event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "parent_event_id",
+    "plan_id",
+    "subgoal_id",
+    "action_id",
+    "hypothesis_id",
+    "ts",
+    "run_id",
+    "task_id",
+    "type",
+    "actor",
+    "data"
+  ],
+  "properties": {
+    "event_id": { "type": "string", "minLength": 1 },
+    "parent_event_id": { "type": ["string", "null"] },
+    "plan_id": { "type": ["string", "null"] },
+    "subgoal_id": { "type": ["string", "null"] },
+    "action_id": { "type": ["string", "null"] },
+    "hypothesis_id": { "type": ["string", "null"] },
+    "ts": { "type": "string", "format": "date-time" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "task_id": { "type": "string", "minLength": 1 },
+    "type": { "type": "string", "minLength": 1 },
+    "actor": { "type": "string", "minLength": 1 },
+    "data": { "type": "object" }
+  }
+}

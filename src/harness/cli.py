@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ from pydantic import ValidationError
 from .audit import audit_run
 from .benchmark.tsec import TSecRunner, load_tsec_config
 from .control_plane import create_control_plane
+from .evaluation import compare_suite_reports
 from .execution import ExecutionCapabilities
 from .gateway import ModelPricing, create_gateway_app
 from .gateway_runtime import GatewayConfig
@@ -21,7 +23,9 @@ from .models import BudgetSpec, load_agent, load_suite, load_task
 from .orchestrator import Orchestrator
 from .otel import export_otlp_json
 from .policy import load_policy
+from .preflight import run_preflight
 from .queue import GatewayJobSpec, JobPayload
+from .runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from .skills import load_skill
 from .suite import SuiteRunner
 from .worker import Worker
@@ -91,6 +95,21 @@ def _control_headers(token_env: str) -> dict[str, str]:
     return {"authorization": f"Bearer {_required_env(token_env)}"}
 
 
+def _validate_control_plane_listener(
+    host: str, *, ssl_certfile: Path | None, ssl_keyfile: Path | None
+) -> None:
+    if bool(ssl_certfile) != bool(ssl_keyfile):
+        raise typer.BadParameter("--ssl-certfile and --ssl-keyfile must be supplied together")
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host.lower() == "localhost"
+    if not loopback and ssl_certfile is None:
+        raise typer.BadParameter(
+            "non-loopback control-plane listeners require --ssl-certfile and --ssl-keyfile"
+        )
+
+
 @app.command()
 def validate(
     task: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
@@ -102,6 +121,36 @@ def validate(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(f"valid: {spec.id} ({spec.api_version})")
+
+
+@app.command()
+def preflight(
+    task: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    agent: Annotated[Path, typer.Option("--agent", exists=True, dir_okay=False)],
+    tsec: Annotated[bool, typer.Option("--tsec")] = False,
+    gateway_enabled: Annotated[bool, typer.Option("--gateway")] = False,
+    gateway_mode: Annotated[str, typer.Option("--gateway-mode")] = "host",
+    gateway_image: Annotated[str | None, typer.Option("--gateway-image")] = None,
+    model_upstream: Annotated[str | None, typer.Option("--model-upstream")] = None,
+) -> None:
+    """Check local run prerequisites without fetching images or contacting services."""
+    try:
+        report = run_preflight(
+            load_task(task),
+            load_agent(agent),
+            task_path=task,
+            require_tsec=tsec,
+            gateway_enabled=gateway_enabled,
+            gateway_mode=gateway_mode,
+            gateway_image=gateway_image,
+            model_upstream=model_upstream,
+        )
+    except (ValidationError, ValueError, TypeError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(report.model_dump_json(indent=2))
+    if not report.ready:
+        raise typer.Exit(code=1)
 
 
 @app.command("validate-skill")
@@ -155,6 +204,10 @@ def run(
         Path | None,
         typer.Option("--resume-world", exists=True, dir_okay=False),
     ] = None,
+    resume_run: Annotated[
+        Path | None,
+        typer.Option("--resume-run", exists=True, file_okay=False),
+    ] = None,
     allow_host_agent: Annotated[
         bool,
         typer.Option(
@@ -162,8 +215,13 @@ def run(
             help="Allow trusted CLI agent command to execute on the host.",
         ),
     ] = False,
+    solver_profile: Annotated[SolverProfile, typer.Option("--solver-profile")] = (
+        DEFAULT_SOLVER_PROFILE
+    ),
 ) -> None:
     """Run one task with one agent."""
+    if resume_run is not None and (resume_world is not None or repeat != 1):
+        raise typer.BadParameter("--resume-run cannot be combined with --resume-world or --repeat")
     task_spec = load_task(task)
     agent_spec = load_agent(agent)
     gateway_config = _gateway_config(
@@ -188,6 +246,8 @@ def run(
             seed=seed + index,
             gateway_config=gateway_config,
             resume_world_events=resume_world,
+            resume_run_dir=resume_run,
+            solver_profile=solver_profile,
         )
         for index in range(repeat)
     ]
@@ -234,6 +294,9 @@ def run_suite(
             help="Allow trusted CLI agent command to execute on the host.",
         ),
     ] = False,
+    solver_profile: Annotated[SolverProfile, typer.Option("--solver-profile")] = (
+        DEFAULT_SOLVER_PROFILE
+    ),
 ) -> None:
     """Run all tasks and repeats declared by a suite."""
     summary = SuiteRunner(runs_root=runs_root, suites_root=suites_root).run(
@@ -254,9 +317,40 @@ def run_suite(
             sidecar_image=gateway_image,
             sidecar_runtime=gateway_runtime,
         ),
+        solver_profile=solver_profile,
     )
     typer.echo(json.dumps(summary, ensure_ascii=False, indent=2))
     if any(item["status"] == "error" for item in summary["runs"]):
+        raise typer.Exit(code=1)
+
+
+@app.command("compare-evaluations")
+def compare_evaluations(
+    baseline: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    candidate: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    max_success_rate_drop: Annotated[
+        float, typer.Option("--max-success-rate-drop", min=0, max=1)
+    ] = 0.0,
+    max_score_drop: Annotated[float, typer.Option("--max-score-drop", min=0, max=100)] = 0.0,
+) -> None:
+    """Compare suite reports on the same frozen manifest and gate regressions."""
+    from .secureio import read_regular_text
+
+    try:
+        before = json.loads(read_regular_text(baseline, max_bytes=64 * 1024 * 1024))
+        after = json.loads(read_regular_text(candidate, max_bytes=64 * 1024 * 1024))
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            raise TypeError("evaluation report must contain a JSON object")
+        comparison = compare_suite_reports(
+            before,
+            after,
+            max_success_rate_drop=max_success_rate_drop,
+            max_score_drop=max_score_drop,
+        )
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(comparison, ensure_ascii=False, indent=2))
+    if not comparison["passed"]:
         raise typer.Exit(code=1)
 
 
@@ -324,8 +418,11 @@ def serve(
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8780,
     token_env: Annotated[str, typer.Option("--token-env")] = "HARNESS_CONTROL_TOKEN",
+    ssl_certfile: Annotated[Path | None, typer.Option("--ssl-certfile", exists=True)] = None,
+    ssl_keyfile: Annotated[Path | None, typer.Option("--ssl-keyfile", exists=True)] = None,
 ) -> None:
     """Serve the authenticated queue, leaderboard, registry, and trace-viewer API."""
+    _validate_control_plane_listener(host, ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     token = _required_env(token_env)
     api = create_control_plane(
         queue_db=queue_db.resolve(),
@@ -334,7 +431,14 @@ def serve(
         skills_root=skills_root.resolve(),
         token=token,
     )
-    uvicorn.run(api, host=host, port=port, access_log=False)
+    uvicorn.run(
+        api,
+        host=host,
+        port=port,
+        access_log=False,
+        ssl_certfile=str(ssl_certfile) if ssl_certfile else None,
+        ssl_keyfile=str(ssl_keyfile) if ssl_keyfile else None,
+    )
 
 
 @app.command("submit")
@@ -447,6 +551,7 @@ def gateway(
     event_file: Annotated[Path, typer.Option("--event-file")] = Path(
         ".harness/gateway/events.jsonl"
     ),
+    trusted_event_file: Annotated[Path | None, typer.Option("--trusted-event-file")] = None,
     workspace: Annotated[Path, typer.Option("--workspace", file_okay=False)] = Path("."),
     task_dir: Annotated[Path, typer.Option("--task-dir", file_okay=False)] = Path("."),
     policy: Annotated[Path | None, typer.Option("--policy", dir_okay=False)] = None,
@@ -473,6 +578,7 @@ def gateway(
 
     app_instance = create_gateway_app(
         event_file=event_file.resolve(),
+        trusted_event_file=trusted_event_file.resolve() if trusted_event_file else None,
         workspace=workspace.resolve(),
         task_dir=task_dir.resolve(),
         policy=load_policy(policy),
