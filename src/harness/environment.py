@@ -24,7 +24,8 @@ class EnvironmentProvider:
     def start(self) -> EnvironmentHandle:
         raise NotImplementedError
 
-    def stop(self) -> None:
+    def stop(self, *, preserve_state: bool = False) -> None:
+        del preserve_state
         raise NotImplementedError
 
 
@@ -36,7 +37,8 @@ class NoneEnvironment(EnvironmentProvider):
         self.trace.emit("environment.started", data={"provider": "none"})
         return EnvironmentHandle(provider="none")
 
-    def stop(self) -> None:
+    def stop(self, *, preserve_state: bool = False) -> None:
+        del preserve_state
         self.trace.emit("environment.finished", data={"provider": "none"})
 
 
@@ -47,12 +49,14 @@ class DockerComposeEnvironment(EnvironmentProvider):
         task_dir: Path,
         run_id: str,
         trace: TraceRecorder,
+        resume_existing: bool = False,
     ) -> None:
         if shutil.which("docker") is None:
             raise EnvironmentError("docker executable was not found")
         self.spec = spec
         self.task_dir = task_dir
         self.trace = trace
+        self.resume_existing = resume_existing
         self.project_name = ("rh_" + run_id.lower()).replace("-", "_")[:48]
         self.manifest = (task_dir / str(spec.manifest)).resolve()
 
@@ -87,16 +91,28 @@ class DockerComposeEnvironment(EnvironmentProvider):
             "environment.started",
             data={"provider": "docker-compose", "manifest": str(self.manifest)},
         )
-        self._compose("up", "-d", "--build")
+        if self.resume_existing:
+            expected_services = set(self._compose("config", "--services").stdout.splitlines())
+            existing_services = set(
+                self._compose("ps", "--all", "--services").stdout.splitlines()
+            )
+            if not expected_services or not expected_services.issubset(existing_services):
+                raise EnvironmentError("cannot resume: existing Compose services were not found")
+            self._compose("start")
+        else:
+            self._compose("up", "-d", "--build")
         return EnvironmentHandle(
             provider="docker-compose",
             project_name=self.project_name,
             network_name=f"{self.project_name}_default",
         )
 
-    def stop(self) -> None:
+    def stop(self, *, preserve_state: bool = False) -> None:
         try:
-            self._compose("down", "-v", "--remove-orphans", timeout=180)
+            if preserve_state:
+                self._compose("stop", timeout=180)
+            else:
+                self._compose("down", "-v", "--remove-orphans", timeout=180)
         finally:
             self.trace.emit(
                 "environment.finished",
@@ -110,9 +126,12 @@ def build_environment(
     task_dir: Path,
     run_id: str,
     trace: TraceRecorder,
+    resume_existing: bool = False,
 ) -> EnvironmentProvider:
     if spec.provider == "none":
         return NoneEnvironment(trace)
     if spec.provider == "docker-compose":
-        return DockerComposeEnvironment(spec, task_dir, run_id, trace)
+        return DockerComposeEnvironment(
+            spec, task_dir, run_id, trace, resume_existing=resume_existing
+        )
     raise EnvironmentError(f"unsupported environment provider: {spec.provider}")
