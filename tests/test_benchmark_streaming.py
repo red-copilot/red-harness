@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from harness.runtime.solver_profile import SolverProfile
 from harness.agent import AgentResult
 from harness.audit import audit_run
 from harness.benchmark.base import (
@@ -565,6 +566,7 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
             seed=1,
             submission_extractor=lambda _result: [],
             allow_host_agent=True,
+            solver_profile=SolverProfile.PI_WORLD_HEURISTIC,
         )
     )
 
@@ -1156,6 +1158,7 @@ def test_benchmark_runner_replans_after_negative_feedback(monkeypatch, tmp_path:
             seed=1,
             submission_extractor=lambda _result: [],
             allow_host_agent=True,
+            solver_profile=SolverProfile.PI_WORLD_HEURISTIC,
         )
     )
 
