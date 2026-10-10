@@ -7,6 +7,7 @@ modules, including imports nested inside functions.
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "harness"
@@ -323,3 +324,17 @@ def test_architecture_guard_rejects_builtin_module_dynamic_execution(
     violations = _dependency_violations(package_root)
 
     assert "world/unsafe.py -> <dynamic code execution>" in violations
+
+
+def test_v2_contracts_do_not_depend_on_legacy_runtime_or_execution() -> None:
+    violations = []
+    for name in ("contracts.py", "verification.py"):
+        source = PACKAGE_ROOT / "v2" / name
+        for imported in _imports(source):
+            root = imported.split(".")[0]
+            if root in sys.stdlib_module_names or root == "pydantic":
+                continue
+            if imported == "harness.v2.contracts" or imported.startswith("harness.v2.contracts."):
+                continue
+            violations.append(f"{source.relative_to(PACKAGE_ROOT)} -> {imported}")
+    assert not violations, "invalid v2 dependency:\n" + "\n".join(violations)

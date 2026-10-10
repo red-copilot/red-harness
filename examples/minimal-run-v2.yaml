@@ -1,0 +1,16 @@
+# Contract example only: the existing CLI does not execute v2 configurations yet.
+apiVersion: harness/v2
+task:
+  id: proof
+  description: Write the exact text "proof" to proof.txt.
+pi:
+  image: pi-test:1.0.4
+  provider: test
+  model: fake
+budgets:
+  wall_time: 30
+  cleanup_timeout: 30
+evaluation:
+  kind: local
+  image: verifier-test:1
+  command: [verify]
