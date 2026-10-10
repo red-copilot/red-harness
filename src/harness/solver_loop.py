@@ -461,6 +461,10 @@ class SolverLoop:
             actor="harness",
             data=payload,
         )
+        # Commit the complete planner transition once, before exposing it to Pi.
+        # Previously we persisted and synced an intermediate progress state, then
+        # consumed the reasons and wrote again without syncing the final state.
+        self.progress.consume_replan_reasons(reasons)
         self.progress.write(self.progress_path)
         self._sync_agent_views()
         await session.observe(
@@ -472,8 +476,6 @@ class SolverLoop:
                 },
             )
         )
-        self.progress.consume_replan_reasons(reasons)
-        self.progress.write(self.progress_path)
         self._last_plan_signature = signature
         return plan
 
