@@ -1,0 +1,61 @@
+{
+  "schema_version": "pi-ablation/v1",
+  "status": "design-only",
+  "baseline_implementation": "NOT_IMPLEMENTED",
+  "objective": "Verify incremental outcomes of Pi native, minimal control, world state, and selective collaboration",
+  "benchmark": "tsec",
+  "dataset_snapshot": null,
+  "challenge_ids": [],
+  "repeats": 3,
+  "seeds": [
+    101,
+    202,
+    303
+  ],
+  "environment": {
+    "pi_version": null,
+    "container_image_digest": null,
+    "model_id": null,
+    "thinking": "medium",
+    "sdk_version": null,
+    "network_profile": "benchmark-only",
+    "hints": false
+  },
+  "limits": {
+    "wall_time_seconds": 3600,
+    "max_tokens": 200000,
+    "max_model_calls": 300,
+    "max_tool_calls": 1000,
+    "max_cost_usd": 20
+  },
+  "arms": [
+    {
+      "id": "01-native-pi",
+      "enabled": false,
+      "requires": "dedicated native Pi runner with no bootstrap_solver"
+    },
+    {
+      "id": "02-minimal",
+      "enabled": false,
+      "requires": "verified world/planner disabled"
+    },
+    {
+      "id": "03-world",
+      "enabled": false,
+      "requires": "world retrieval, capability tracking, rolling horizon"
+    },
+    {
+      "id": "04-collaboration",
+      "enabled": false,
+      "requires": "preregistered failure clusters after 01-03"
+    }
+  ],
+  "scoring": {
+    "primary": "verified_success_rate",
+    "unit": "challenge-seed attempt",
+    "compare_to": "01-native-pi",
+    "bootstrap_cluster": "challenge_id",
+    "relative_success_lift_gate": 0.15,
+    "missing_values": "null"
+  }
+}
