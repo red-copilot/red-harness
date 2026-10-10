@@ -39,8 +39,10 @@ On Linux, `network: host` is the recommended TSec mode because the Kali containe
 
 ## Solver profiles
 
-The default `pi-world` profile keeps durable context and verification while disabling the
-heuristic skill planner. Compare it with `pi-only` (no World context or planner) and
+The default `pi-only` profile leaves reasoning and context management to Pi while keeping
+trusted verification, budgets, run persistence and TSec resource management. It bypasses
+World context projection and heuristic planning but retains internal authoritative evidence.
+`pi-world` enables World context without heuristic planning. Compare it with `pi-only` (no World context or planner) and
 `pi-world-heuristic` (legacy planner enabled) using the same model, tasks and budgets:
 
 ```bash
