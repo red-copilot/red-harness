@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from harness.runtime.solver_profile import SolverProfile
 from harness.agent import AgentResult
 from harness.audit import audit_run
 from harness.benchmark.base import (
@@ -19,6 +18,7 @@ from harness.benchmark.base import (
 from harness.benchmark.runner import BenchmarkRunner, _evaluate_benchmark
 from harness.budget import UsageMetrics
 from harness.models import AgentSpec, BudgetSpec, ObjectiveSpec
+from harness.runtime.solver_profile import SolverProfile
 from harness.session import AgentCheckpoint, AgentEvent
 
 
