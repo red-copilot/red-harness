@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from .progress import ProgressLedger
@@ -18,6 +19,17 @@ from .solver_policy import SolverAction, SolverDecision, decide_solver_action
 from .trace import TraceRecorder
 
 MAX_EVENT_IDS = 50_000
+
+
+@dataclass
+class LeanStats:
+    aci_accepted: int = 0
+    aci_rejected: int = 0
+    aci_world_mutations: int = 0
+    inbox_accepted: int = 0
+    inbox_rejected: int = 0
+    duplicate_events: int = 0
+    conflicting_event_ids: int = 0
 
 
 class LeanSolver:
@@ -38,6 +50,7 @@ class LeanSolver:
         processed_event_ids: dict[str, str] | None = None,
         sync_agent_views: Callable[[], None] | None = None,
     ) -> None:
+        self.stats = LeanStats()
         self.progress = progress
         self.progress_path = run_dir / "progress.json"
         self.trace = trace
@@ -73,6 +86,10 @@ class LeanSolver:
             ).hexdigest()
             previous = self.processed_event_ids.get(event.event_id)
             if previous is not None:
+                if previous == fingerprint:
+                    self.stats.duplicate_events += 1
+                else:
+                    self.stats.conflicting_event_ids += 1
                 if previous != fingerprint:
                     self.trace.emit(
                         "event.id_conflict", actor="harness",
