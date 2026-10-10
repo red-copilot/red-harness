@@ -37,6 +37,24 @@ pi:
 
 On Linux, `network: host` is the recommended TSec mode because the Kali container directly shares the Worker network namespace and VPN routes. If your VPN permits Docker bridge forwarding, `network: environment` can be used instead.
 
+## Solver profiles
+
+The default `pi-world` profile keeps durable context and verification while disabling the
+heuristic skill planner. Compare it with `pi-only` (no World context or planner) and
+`pi-world-heuristic` (legacy planner enabled) using the same model, tasks and budgets:
+
+```bash
+harness tsec --agent agents/examples/pi-tsec.yaml --solver-profile pi-world
+harness tsec --agent agents/examples/pi-tsec.yaml --solver-profile pi-only
+harness tsec --agent agents/examples/pi-tsec.yaml --solver-profile pi-world-heuristic
+```
+
+The choice is recorded in the run-start trace. A profile only controls planner/context
+projection; it does **not** disable benchmark verification, resource isolation,
+budget enforcement or SDK lifecycle management. Profile comparisons require independent
+attempts on comparable unfinished challenges; do not treat sequential submissions to
+an already solved platform challenge as independent runs.
+
 ## Run
 
 One unfinished challenge:
