@@ -44,3 +44,22 @@ def test_legacy_profile_still_loads_skills(tmp_path, monkeypatch):
     )
     assert len(seen) == 1
     assert runtime.loop.planner is not None
+
+
+def test_default_profile_skips_world_projection_and_skills(tmp_path, monkeypatch):
+    def fail_skills(_root):
+        raise AssertionError("default must not load heuristic skills")
+
+    monkeypatch.setattr(bootstrap_module, "load_skills", fail_skills)
+    runtime = bootstrap_module.bootstrap_solver(
+        run_dir=tmp_path,
+        trace=TraceRecorder(tmp_path / "trace.jsonl", "run-lean", "case-test"),
+        goal=Goal(id="goal:test", description="test challenge", status="active"),
+        actor="agent:test",
+        context_query="test challenge",
+        skills_root=tmp_path / "absent",
+    )
+    assert runtime.loop.planner is None
+    assert not runtime.loop.world_context_enabled
+    assert (tmp_path / "world.context.txt").read_text(encoding="utf-8") == ""
+    assert (tmp_path / "progress.json").exists()
