@@ -24,7 +24,7 @@ def summarize(rows: list[dict]) -> dict:
     seen = set()
     grouped = {arm: [] for arm in sorted(ARMS)}
     for i, row in enumerate(rows):
-        if not isinstance(row, dict) or missing := (REQUIRED - row.keys()):
+        if not isinstance(row, dict) or (missing := (REQUIRED - row.keys())):
             raise ValueError(f"row {i}: missing fields or invalid record: {sorted(missing) if isinstance(row, dict) else 'not an object'}")
         if row["arm"] not in ARMS:
             raise ValueError(f"row {i}: unknown experiment arm")
