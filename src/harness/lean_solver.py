@@ -25,6 +25,8 @@ class LeanSolver:
 
     planner_enabled = False
     world_context_enabled = False
+    planner = None
+    skills = ()
 
     def __init__(
         self,
@@ -32,13 +34,14 @@ class LeanSolver:
         progress: ProgressLedger,
         run_dir: Path,
         trace: TraceRecorder,
+        world_revision: int = 0,
         processed_event_ids: dict[str, str] | None = None,
         sync_agent_views: Callable[[], None] | None = None,
     ) -> None:
         self.progress = progress
         self.progress_path = run_dir / "progress.json"
         self.trace = trace
-        self.planned_world_revision = 0
+        self.planned_world_revision = world_revision
         self.processed_event_ids = dict(processed_event_ids or {})
         self._sync = sync_agent_views
 
