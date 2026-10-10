@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..lean_solver import LeanSolver
 from ..progress import ProgressLedger
 from ..secureio import read_regular_text
 from ..skills import load_skills
@@ -27,7 +28,7 @@ class SolverRuntime:
     context_builder: WorldContextBuilder
     progress: ProgressLedger
     verifier_registry: VerifierRegistry
-    loop: SolverLoop
+    loop: SolverLoop | LeanSolver
 
 
 def bootstrap_solver(
@@ -79,25 +80,34 @@ def bootstrap_solver(
         if agent_workspace is not None
         else None
     )
-    loop = SolverLoop(
-        world=world,
-        progress=progress,
-        run_dir=run_dir,
-        trace=trace,
-        actor=actor,
-        context_query=context_query,
-        planned_world_revision=world.snapshot.revision,
-        context_builder=context_builder,
-        verifier_registry=verifier_registry,
-        world_inbox_path=(agent_workspace / "world.inbox.jsonl")
-        if agent_workspace is not None
-        else None,
-        sync_agent_views=sync_workspace,
-        skills=load_skills(skills_root) if planner_enabled else [],
-        planner_enabled=planner_enabled,
-        world_context_enabled=world_context_enabled,
-        processed_event_ids=processed_event_ids,
-    )
+    if SolverProfile(solver_profile) is SolverProfile.PI_ONLY:
+        loop = LeanSolver(
+            progress=progress,
+            run_dir=run_dir,
+            trace=trace,
+            processed_event_ids=processed_event_ids,
+            sync_agent_views=sync_workspace,
+        )
+    else:
+        loop = SolverLoop(
+            world=world,
+            progress=progress,
+            run_dir=run_dir,
+            trace=trace,
+            actor=actor,
+            context_query=context_query,
+            planned_world_revision=world.snapshot.revision,
+            context_builder=context_builder,
+            verifier_registry=verifier_registry,
+            world_inbox_path=(agent_workspace / "world.inbox.jsonl")
+            if agent_workspace is not None
+            else None,
+            sync_agent_views=sync_workspace,
+            skills=load_skills(skills_root) if planner_enabled else [],
+            planner_enabled=planner_enabled,
+            world_context_enabled=world_context_enabled,
+            processed_event_ids=processed_event_ids,
+        )
     return SolverRuntime(
         world=world,
         context_builder=context_builder,
