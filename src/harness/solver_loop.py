@@ -378,9 +378,6 @@ class SolverLoop:
         self.progress.write(self.progress_path)
         self._sync_agent_views()
         decision = self.decide(event_type=event.type)
-        if decision.action is SolverAction.REPLAN and not self.planner_enabled:
-            # Do not invoke the heuristic planner or report a synthetic plan in lean runs.
-            decision = SolverDecision(SolverAction.CONTINUE, "planner_disabled")
         if decision.action is SolverAction.REPLAN:
             plan = await self.maybe_replan(session)
             if plan is None:
