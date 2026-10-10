@@ -6,14 +6,10 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from .aci import TypedACI
 from .action_verifier import ActionVerifier
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .planner import RollingHorizonPlanner, RollingPlan
 from .progress import ProgressLedger
 from .session import AgentEvent, AgentObservation, AgentSession
 from .skills import SkillSpec
@@ -24,6 +20,9 @@ MAX_PROCESSED_EVENT_IDS = 50_000
 from .verification import AuthorizedActionVerdict, VerifierRegistry
 from .world import Observation, Provenance, WorldContextBuilder, WorldRepository
 from .world.live import WorldInboxCursor
+
+if TYPE_CHECKING:
+    from .planner import RollingHorizonPlanner, RollingPlan
 
 
 @dataclass
