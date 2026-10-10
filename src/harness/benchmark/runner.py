@@ -16,6 +16,7 @@ from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..session import AgentObservation
 from ..trace import TraceRecorder, sanitize_observability_data
 from ..runtime import bootstrap_solver
+from ..runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from ..runtime.agent_workspace import create_agent_workspace, sync_agent_workspace
 from ..runtime.checkpoint import run_action_owner, save_session_checkpoint
 from ..runtime.evidence import persist_objective_verdict
@@ -92,6 +93,7 @@ class BenchmarkRunner:
         seed: int,
         submission_extractor: SubmissionExtractor,
         allow_host_agent: bool = False,
+        solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
     ) -> dict:
         if agent.type in {"docker", "pi"} and agent.network == "environment":
             raise ValueError(
@@ -213,6 +215,7 @@ class BenchmarkRunner:
                 target_actor=f"benchmark:{session.benchmark}",
                 budget_limits=budgets.model_dump(exclude_none=True),
                 agent_workspace=agent_workspace,
+                solver_profile=solver_profile,
             )
             world = runtime.world
             context_builder = runtime.context_builder
@@ -239,6 +242,7 @@ class BenchmarkRunner:
                     "case_id": session.case_id,
                     "agent_id": agent.id,
                     "seed": seed,
+                    "solver_profile": solver_profile.value,
                     "world_revision": world.snapshot.revision,
                 },
             )
