@@ -268,7 +268,9 @@ class SolverLoop:
             "world.artifact",
             "world.failure",
         }
-        if self.planner_enabled and ((semantic_agent_update and aci_mutations) or live_ingest.accepted):
+        if self.planner_enabled and (
+            (semantic_agent_update and aci_mutations) or live_ingest.accepted
+        ):
             self.progress.request_replan("world_state_changed")
         after_revision = self.world.snapshot.revision
         if live_ingest.accepted or live_ingest.rejected:
