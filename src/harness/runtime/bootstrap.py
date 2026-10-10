@@ -93,7 +93,7 @@ def bootstrap_solver(
         if agent_workspace is not None
         else None,
         sync_agent_views=sync_workspace,
-        skills=load_skills(skills_root),
+        skills=load_skills(skills_root) if planner_enabled else [],
         planner_enabled=planner_enabled,
         world_context_enabled=world_context_enabled,
         processed_event_ids=processed_event_ids,
