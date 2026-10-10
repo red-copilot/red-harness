@@ -21,7 +21,6 @@ from .gateway import ModelPricing, create_gateway_app
 from .gateway_runtime import GatewayConfig
 from .models import BudgetSpec, load_agent, load_suite, load_task
 from .orchestrator import Orchestrator
-from .otel import export_otlp_json
 from .policy import load_policy
 from .preflight import run_preflight
 from .queue import GatewayJobSpec, JobPayload
@@ -527,21 +526,6 @@ def worker(
             instance.run_forever(poll_interval=poll_interval)
     finally:
         instance.close()
-
-
-@app.command("otel-export")
-def otel_export(
-    run_dir: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
-    output: Annotated[Path | None, typer.Option("--output")] = None,
-) -> None:
-    """Export trace.jsonl as OTLP/HTTP JSON-compatible trace data."""
-    trace_path = run_dir / "trace.jsonl"
-    if not trace_path.is_file():
-        typer.echo(f"missing {trace_path}", err=True)
-        raise typer.Exit(code=2)
-    target = output or (run_dir / "otel-traces.json")
-    export_otlp_json(trace_path, target)
-    typer.echo(str(target))
 
 
 @app.command("capabilities")
