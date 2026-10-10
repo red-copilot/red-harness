@@ -21,6 +21,7 @@ def test_bootstrap_solver_initializes_state_and_targets(tmp_path: Path) -> None:
         skills_root=tmp_path / "nonexistent-skills",
         targets=[target],
         target_actor="benchmark:example",
+        solver_profile=SolverProfile.PI_WORLD,
     )
     assert runtime.progress.active_goal == goal.id
     assert runtime.loop.world is runtime.world
