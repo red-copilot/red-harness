@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from harness.v2.contracts import (
+    AgentEvent,
     ArtifactRef,
     EvaluationReply,
     EvidenceRef,
@@ -124,6 +125,22 @@ def test_unregistered_producer_cannot_select_a_trusted_channel(tmp_path, artifac
     assert result.status == "unknown"
     assert result.error_code == "unregistered_producer"
     assert evaluator.calls == store.calls == 0
+
+
+@pytest.mark.parametrize("exit_field", ["tool_exit_code", "process_exit_code"])
+def test_zero_exit_events_cannot_be_promoted_to_verdicts(tmp_path, artifacts, exit_field):
+    event = AgentEvent.model_validate(
+        {
+            "id": "event-1",
+            "type": "execution.end",
+            "text": "objective complete",
+            exit_field: 0,
+        }
+    )
+    verdict, store = evaluate(tmp_path, artifacts, RecordingEvaluator(event))
+    assert verdict.status == "unknown"
+    assert verdict.error_code == "invalid_response"
+    assert store.calls == 0
 
 
 @pytest.mark.parametrize("error", [RuntimeError("secret-canary"), TimeoutError("secret-canary")])

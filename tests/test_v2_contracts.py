@@ -6,6 +6,7 @@ import yaml
 from pydantic import ValidationError
 
 from harness.v2.contracts import (
+    AgentEvent,
     ArtifactRef,
     BudgetSpec,
     CleanupResult,
@@ -166,6 +167,15 @@ def test_missing_usage_is_unknown_not_zero() -> None:
     for payload in ({"total_tokens": -1}, {"tool_calls": True}, {"cost_usd": float("nan")}):
         with pytest.raises(ValidationError):
             UsageMetrics.model_validate(payload)
+
+
+@pytest.mark.parametrize("exit_field", ["tool_exit_code", "process_exit_code"])
+def test_execution_exit_codes_are_observations_without_objective_authority(exit_field) -> None:
+    event = AgentEvent.model_validate({"id": "event-1", "type": "execution.end", exit_field: 0})
+    assert getattr(event, exit_field) == 0
+    assert "status" not in event.model_dump()
+    with pytest.raises(ValidationError):
+        AgentEvent.model_validate({"id": "event-1", "type": "execution.end", "status": "passed"})
 
 
 def test_cleanup_is_unknown_until_the_owner_confirms_it() -> None:

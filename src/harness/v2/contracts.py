@@ -278,6 +278,7 @@ class AgentEvent(Contract):
     type: Name
     text: str | None = None
     tool_exit_code: Annotated[int, Field(strict=True)] | None = None
+    process_exit_code: Annotated[int, Field(strict=True)] | None = None
     usage: UsageMetrics | None = None
 
 
@@ -286,7 +287,9 @@ class PiSession(Protocol):
 
     def events(self) -> AsyncIterator[AgentEvent]: ...
 
-    async def close(self, reason: StopReason) -> None: ...
+    async def close(self, reason: StopReason) -> int | None:
+        """Return the observed process exit code, or None if exit is unconfirmed."""
+        ...
 
 
 class CaseAdapter(Protocol):

@@ -20,10 +20,11 @@ original worktree are not incorporated into this proposal.
 - Credentials are environment-variable selectors, never literal keys in this
   schema. A Pi credential selector cannot overlap the configured TSec platform
   selectors. Enforcement of process environment isolation is a later stage.
-- `PiSession` exposes start, events and close. `CaseAdapter` exposes prepare,
+- `PiSession` exposes start, events and close; close returns the observed process
+  exit code, or unknown when exit is unconfirmed. `CaseAdapter` exposes prepare,
   evaluate and release. Their protocols contain no SDK, Docker or old Runtime
   types, and no checkpoint or resume interface.
-- `AgentEvent` records observations, tool exits and usage independently of the
+- `AgentEvent` records observations, tool exits, process exits and usage independently of the
   objective verdict. Missing usage stays `null`; it does not become zero.
 - `RunResult` separates stop reason, objective verdict and cleanup. Abnormal
   termination has an unknown objective verdict. Cleanup remains unknown until
@@ -102,11 +103,11 @@ python -m pytest -q
 git diff --check
 ```
 
-The new contract/boundary tests add 60 cases, plus one architecture gate. Default
+The new contract/boundary tests add 64 cases, plus one architecture gate. Default
 CLI import was checked and does not load `harness.v2`.
 
 After rebasing onto `62485bc`, targeted contract/boundary/architecture tests
-passed **65 tests**. The full suite passed **566 tests**, with **4 Docker
+passed **69 tests**. The full suite passed **570 tests**, with **4 Docker
 integration tests skipped** because `harness-isolation-probe:ci` and
 `harness-pi-rpc-resume-probe:ci` were not built, and seven existing dependency
 deprecation warnings. Ruff and `git diff --check` passed. The existing 1,000-event
