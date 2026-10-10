@@ -610,6 +610,7 @@ class BenchmarkRunner:
             status=status,
             success=bool(evaluation and evaluation.success),
             score=evaluation.score if evaluation is not None else 0.0,
+            render_context=solver_loop.world_context_enabled,
         )
         world.flush()
 
