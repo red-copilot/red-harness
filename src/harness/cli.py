@@ -36,6 +36,16 @@ app = typer.Typer(
 )
 
 
+@app.command("compare-profiles")
+def compare_profiles(
+    runs_root: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
+) -> None:
+    """Compare observed Pi-only, World and heuristic benchmark runs."""
+    from .benchmark.ablation import compare_solver_profiles
+
+    typer.echo(json.dumps(compare_solver_profiles(runs_root), indent=2))
+
+
 @app.command("audit-run")
 def audit_run_command(
     run_dir: Annotated[Path, typer.Argument(file_okay=False)],
