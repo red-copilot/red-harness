@@ -372,6 +372,9 @@ def tsec(
         bool,
         typer.Option("--hint", help="Request the platform hint; this may reduce flag score."),
     ] = False,
+    solver_profile: Annotated[SolverProfile, typer.Option("--solver-profile")] = (
+        DEFAULT_SOLVER_PROFILE
+    ),
     start_retries: Annotated[int, typer.Option("--start-retries", min=0, max=10)] = 2,
     retry_delay: Annotated[float, typer.Option("--retry-delay", min=0)] = 2.0,
     allow_host_agent: Annotated[
@@ -404,6 +407,7 @@ def tsec(
             start_retries=start_retries,
             retry_delay=retry_delay,
             allow_host_agent=allow_host_agent,
+            solver_profile=solver_profile,
         )
     )
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
