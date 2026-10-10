@@ -10,7 +10,10 @@ from typing import ClassVar
 
 from .aci import TypedACI
 from .action_verifier import ActionVerifier
-from .planner import RollingHorizonPlanner, RollingPlan
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .planner import RollingHorizonPlanner, RollingPlan
 from .progress import ProgressLedger
 from .session import AgentEvent, AgentObservation, AgentSession
 from .skills import SkillSpec
@@ -86,7 +89,11 @@ class SolverLoop:
         self.sync_agent_views = sync_agent_views
         self.plan_path = run_dir / "plan.json"
         self.skills = list(skills or [])
-        self.planner = (planner or RollingHorizonPlanner()) if planner_enabled else None
+        if planner_enabled and planner is None:
+            from .planner import RollingHorizonPlanner
+
+            planner = RollingHorizonPlanner()
+        self.planner = planner if planner_enabled else None
         self.planner_enabled = planner_enabled
         self.world_context_enabled = world_context_enabled
         self.plan_horizon = max(1, min(3, plan_horizon))
@@ -287,7 +294,8 @@ class SolverLoop:
             )
 
         if after_revision != before_revision:
-            self._write_context()
+            if self.world_context_enabled:
+                self._write_context()
             self.trace.emit(
                 "world.state.updated",
                 data={
@@ -295,9 +303,10 @@ class SolverLoop:
                     "revision_after": after_revision,
                 },
             )
-            await session.observe(
-                AgentObservation(
-                    type="world.state.updated",
+            if self.world_context_enabled:
+                await session.observe(
+                    AgentObservation(
+                        type="world.state.updated",
                     data={
                         "revision_before": before_revision,
                         "revision_after": after_revision,
@@ -356,7 +365,8 @@ class SolverLoop:
                                 actor="harness",
                                 source_event_id=event.event_id,
                             )
-                            self._write_context()
+                            if self.world_context_enabled:
+                                self._write_context()
                             self.trace.emit(
                                 "world.state.updated",
                                 data={
