@@ -43,7 +43,7 @@ Under the same challenge, model, tools, network, budget and seed, does the Harne
 ## Build sequence
 
 - [x] Separate experiment branch and versioned protocol.
-- [ ] EXP-01: actual native Pi execution path + tests. **Block further live comparisons until this lands.**
+- [x] EXP-01 initial standalone Pi execution path + baseline protocol-isolation unit tests. **Integration tests, complete token accounting and live validation remain pending.**
 - [ ] EXP-02: minimal control profile with assertions world/planner are disabled.
 - [ ] EXP-03: state/profile and deterministic retrieval-vs-no-retrieval ablations.
 - [ ] EXP-04: selective collaboration/model routing triggered by observed failure classes.
@@ -58,6 +58,15 @@ harness tsec --agent agents/examples/pi-tsec.yaml --challenge WEB-001 \
   --max-tool-calls 1000 --max-cost-usd 20
 ```
 
-Once EXP-01 is implemented, document its **real** command here. Do not add an alias that silently invokes the full BenchmarkRunner.
+Native Pi baseline (experimental, requires an authorized TSec challenge and configured SDK/VPN):
+
+```bash
+python -m experiments.pi_ablation.native_pi \\
+  --agent experiments/pi-ablation/pi-native.yaml \\
+  --challenge WEB-001 --wall-time 3600 --seed 101
+python -m pytest tests/test_native_pi_baseline.py
+```
+
+The standalone runner is intentionally one-shot: no feedback is passed to the Pi process. SDK submissions are done after Pi exits, so it can underperform a fully interactive Pi; document that limitation in comparisons. Current native runner records model/tool usage as null pending implementation of trustworthy Pi JSONL accounting. Do not compare it under token/cost ceilings until those limits are enforced identically across arms. A successful code commit does not establish a tested Docker/SDK integration.
 
 See `experiments/pi-ablation/manifest.json` for experiment freeze parameters and `experiments/pi-ablation/summarize.py` for strict result completeness checks.
