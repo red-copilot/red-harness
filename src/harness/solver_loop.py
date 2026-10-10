@@ -307,13 +307,13 @@ class SolverLoop:
                 await session.observe(
                     AgentObservation(
                         type="world.state.updated",
-                    data={
-                        "revision_before": before_revision,
-                        "revision_after": after_revision,
-                        "context_path": "world.context.txt",
-                    },
+                        data={
+                            "revision_before": before_revision,
+                            "revision_after": after_revision,
+                            "context_path": "world.context.txt",
+                        },
+                    )
                 )
-            )
 
         if event.type in self.VERIFY_EVENTS:
             verification = self.action_verifier.verify(
