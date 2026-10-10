@@ -1,7 +1,7 @@
 {
   "schema_version": "pi-ablation/v1",
-  "status": "design-only",
-  "baseline_implementation": "NOT_IMPLEMENTED",
+  "status": "initial-baseline-implementation-unvalidated",
+  "baseline_implementation": "experimental-one-shot",
   "objective": "Verify incremental outcomes of Pi native, minimal control, world state, and selective collaboration",
   "benchmark": "tsec",
   "dataset_snapshot": null,
@@ -32,7 +32,7 @@
     {
       "id": "01-native-pi",
       "enabled": false,
-      "requires": "dedicated native Pi runner with no bootstrap_solver"
+      "requires": "standalone Pi one-shot implemented; integration validation and accounting pending"
     },
     {
       "id": "02-minimal",
