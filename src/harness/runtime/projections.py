@@ -12,7 +12,7 @@ def finalize_world_goal(
     *,
     world: WorldRepository,
     goal: Goal,
-    context_builder: WorldContextBuilder,
+    context_builder: WorldContextBuilder | None,
     run_dir: Path,
     status: str,
     success: bool,
@@ -24,6 +24,8 @@ def finalize_world_goal(
     goal.attributes.update({"run_status": status, "score": score, "success": success})
     world.upsert("goal", goal)
     if render_context:
+        if context_builder is None:
+            raise ValueError("World context projection requires a context builder")
         (run_dir / "world.context.txt").write_text(
             context_builder.render(world.snapshot),
             encoding="utf-8",
