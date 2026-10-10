@@ -51,3 +51,16 @@ def test_lean_solver_preserves_stop_and_rejects_conflicting_ids(tmp_path):
     assert conflicting.reason == "conflicting_event_id"
     assert progress.event_count == 1
     assert any(item.type == "event.id_conflict" for item in session.feedback)
+
+
+def test_lean_solver_exposes_zero_world_projection_stats(tmp_path):
+    loop = LeanSolver(
+        progress=ProgressLedger(),
+        run_dir=tmp_path,
+        trace=TraceRecorder(tmp_path / "trace.jsonl", "run", "task"),
+    )
+    assert loop.stats.aci_accepted == 0
+    assert loop.stats.aci_rejected == 0
+    assert loop.stats.aci_world_mutations == 0
+    assert loop.stats.inbox_accepted == 0
+    assert loop.stats.inbox_rejected == 0
