@@ -315,40 +315,43 @@ class BenchmarkRunner:
                 submission_completed = await evaluate_final()
 
             revision_before_feedback = world.snapshot.revision
-            feedback_id = f"benchmark-feedback:{submission_digest[:16]}"
-            world.upsert(
-                "observation",
-                Observation(
-                    id=feedback_id,
-                    type="benchmark.submission.feedback",
-                    content={
-                        "submission_type": submission.type,
-                        "value_sha256": submission_digest,
-                        "accepted": submitted.accepted,
-                        "score_delta": submitted.score_delta,
-                        "completed": submitted.completed,
-                        "metadata": safe_submission_metadata,
-                    },
-                    confidence=1.0,
-                    source=session.benchmark,
-                ),
-                actor=f"benchmark:{session.benchmark}",
-            )
-            if not submitted.accepted:
+            # In Pi-first mode, SDK feedback already lives in progress, trace,
+            # and submission_results. Avoid duplicating it into the legacy World graph.
+            if solver_loop.world_context_enabled:
+                feedback_id = f"benchmark-feedback:{submission_digest[:16]}"
                 world.upsert(
-                    "failure",
-                    Failure(
-                        id=f"benchmark-rejection:{submission_digest[:16]}",
-                        type="benchmark.candidate_rejected",
-                        message="Benchmark rejected submitted candidate",
-                        recoverable=True,
-                        attributes={
+                    "observation",
+                    Observation(
+                        id=feedback_id,
+                        type="benchmark.submission.feedback",
+                        content={
                             "submission_type": submission.type,
                             "value_sha256": submission_digest,
+                            "accepted": submitted.accepted,
+                            "score_delta": submitted.score_delta,
+                            "completed": submitted.completed,
+                            "metadata": safe_submission_metadata,
                         },
+                        confidence=1.0,
+                        source=session.benchmark,
                     ),
                     actor=f"benchmark:{session.benchmark}",
                 )
+                if not submitted.accepted:
+                    world.upsert(
+                        "failure",
+                        Failure(
+                            id=f"benchmark-rejection:{submission_digest[:16]}",
+                            type="benchmark.candidate_rejected",
+                            message="Benchmark rejected submitted candidate",
+                            recoverable=True,
+                            attributes={
+                                "submission_type": submission.type,
+                                "value_sha256": submission_digest,
+                            },
+                        ),
+                        actor=f"benchmark:{session.benchmark}",
+                    )
             revision_after_feedback = world.snapshot.revision
             # Only legacy World profiles project the internal evidence graph to Pi.
             # The default Pi-first path receives benchmark feedback directly.
