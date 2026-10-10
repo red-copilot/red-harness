@@ -13,6 +13,7 @@ from harness.orchestrator import Orchestrator, _remaining_budget_task
 from harness.runtime.agent_workspace import create_agent_workspace
 from harness.runtime.bootstrap import bootstrap_solver
 from harness.runtime.checkpoint import save_session_checkpoint
+from harness.runtime.solver_profile import SolverProfile
 from harness.session import AgentCheckpoint, AgentEvent
 from harness.trace import TraceRecorder
 from harness.world import Goal
@@ -172,6 +173,7 @@ def test_smoke_resume_world_state(tmp_path: Path) -> None:
         agent=load_agent(agent_path),
         agent_path=agent_path,
         allow_host_agent=True,
+        solver_profile=SolverProfile.PI_WORLD,
         seed=1,
     )
     first_dir = tmp_path / "runs" / first["run_id"]
@@ -188,6 +190,7 @@ def test_smoke_resume_world_state(tmp_path: Path) -> None:
         agent=load_agent(agent_path),
         agent_path=agent_path,
         allow_host_agent=True,
+        solver_profile=SolverProfile.PI_WORLD,
         seed=2,
         resume_world_events=world_events,
     )
@@ -527,6 +530,7 @@ def test_orchestrator_ingests_world_state_during_session(
         agent=load_agent(agent_path),
         agent_path=agent_path,
         allow_host_agent=True,
+        solver_profile=SolverProfile.PI_WORLD,
         seed=9,
     )
 
