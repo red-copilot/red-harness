@@ -85,6 +85,7 @@ def bootstrap_solver(
             progress=progress,
             run_dir=run_dir,
             trace=trace,
+            world_revision=world.snapshot.revision,
             processed_event_ids=processed_event_ids,
             sync_agent_views=sync_workspace,
         )
