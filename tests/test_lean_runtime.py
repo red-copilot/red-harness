@@ -60,6 +60,7 @@ def test_default_profile_skips_world_projection_and_skills(tmp_path, monkeypatch
         skills_root=tmp_path / "absent",
     )
     assert runtime.loop.planner is None
+    assert runtime.context_builder is None
     assert not runtime.loop.world_context_enabled
     assert (tmp_path / "world.context.txt").read_text(encoding="utf-8") == ""
     assert (tmp_path / "progress.json").exists()
