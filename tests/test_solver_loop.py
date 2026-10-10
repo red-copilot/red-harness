@@ -465,3 +465,32 @@ def test_solver_loop_preserves_stream_order_and_world_revisions_on_replay(
     assert world.snapshot.revision == 2
     assert [event.object["id"] for event in events] == ["obs-first", "obs-second"]
     assert [event.source_event_id for event in events] == ["stream-2", "stream-1"]
+
+
+def test_replan_persists_consumed_reasons_before_agent_observes(tmp_path: Path) -> None:
+    world = SQLiteWorldRepository(tmp_path / "world.events.jsonl")
+    progress = ProgressLedger(replan_reasons=["retry_alternate"])
+    observed = []
+
+    class InspectingSession:
+        async def observe(self, observation) -> None:
+            if observation.type == "solver.plan.updated":
+                disk = ProgressLedger.model_validate_json(
+                    (tmp_path / "progress.json").read_text(encoding="utf-8")
+                )
+                observed.append((list(disk.replan_reasons), disk.replan_count))
+
+    loop = SolverLoop(
+        world=world,
+        progress=progress,
+        run_dir=tmp_path,
+        trace=TraceRecorder(tmp_path / "trace.jsonl", "run-atomic", "task-atomic"),
+        actor="agent:test",
+        context_query="test",
+        planned_world_revision=world.snapshot.revision,
+        skills=[SkillSpec(id="alternate", description="Try alternative")],
+    )
+
+    assert asyncio.run(loop.maybe_replan(InspectingSession())) is not None
+    assert observed == [([], 1)]
+    assert progress.replan_reasons == []
