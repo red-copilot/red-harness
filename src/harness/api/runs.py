@@ -9,7 +9,6 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from ..audit import audit_run
-from ..otel import trace_to_otlp_json
 from ..planner import HeuristicSkillPlanner, RollingHorizonPlanner
 from ..progress import ProgressLedger
 from ..secureio import open_regular_file, read_regular_text
@@ -240,17 +239,5 @@ def build_runs_router(
             horizon=horizon,
         )
         return plan.model_dump(mode="json")
-
-    @router.get("/v1/runs/{run_id}/otel")
-    async def run_otel(request: Request, run_id: str) -> dict:
-        authorize(request, token)
-        directory = run_dir(run_root, run_id)
-        trace_path = directory / "trace.jsonl"
-        if not trace_path.is_file():
-            raise HTTPException(status_code=404, detail="trace not found")
-        try:
-            return trace_to_otlp_json(trace_path)
-        except (OSError, TypeError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="trace artifact is invalid") from exc
 
     return router
