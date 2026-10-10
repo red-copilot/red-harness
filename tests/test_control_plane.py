@@ -221,46 +221,6 @@ def test_control_plane_endpoints(tmp_path: Path) -> None:
     assert rolling["actions"][0]["skill_id"] == "network.service-discovery"
     assert "no_progress_threshold" in rolling["actions"][0]["replan_triggers"]
 
-    published = client.post(
-        "/v1/runs/run_test/plan/publish",
-        headers=headers,
-        json={
-            "skill_id": "network.service-discovery",
-            "description": "enumerate reachable services",
-            "goal_id": "goal-1",
-            "priority": 0.8,
-        },
-    )
-    assert published.status_code == 200
-    work_id = published.json()["id"]
-
-    claimed_work = client.post(
-        "/v1/work/claim",
-        headers=headers,
-        json={"run_id": "run_test", "agent_id": "agent-a", "lease_seconds": 60},
-    )
-    assert claimed_work.status_code == 200
-    assert claimed_work.json()["id"] == work_id
-    assert claimed_work.json()["skill_id"] == "network.service-discovery"
-
-    heartbeat_work = client.post(
-        f"/v1/work/{work_id}/heartbeat",
-        headers=headers,
-        json={"agent_id": "agent-a", "lease_seconds": 60},
-    )
-    assert heartbeat_work.status_code == 200
-
-    completed_work = client.post(
-        f"/v1/work/{work_id}/complete",
-        headers=headers,
-        json={"agent_id": "agent-a", "result": {"status": "done"}},
-    )
-    assert completed_work.status_code == 200
-
-    otel = client.get("/v1/runs/run_test/otel", headers=headers).json()
-    spans = otel["resourceSpans"][0]["scopeSpans"][0]["spans"]
-    assert spans[0]["name"] == "run.started"
-
     capabilities = client.get("/v1/capabilities", headers=headers)
     assert set(capabilities.json()) == {
         "docker",
@@ -367,26 +327,6 @@ def test_control_plane_rejects_symlinked_world_artifact(tmp_path: Path) -> None:
 
     assert response.status_code == 422
     assert outside.read_bytes() == b"not a database"
-
-
-def test_otlp_endpoint_rejects_valid_json_with_invalid_trace_shape(tmp_path: Path) -> None:
-    runs = tmp_path / "runs"
-    run = runs / "run_invalid_otel"
-    run.mkdir(parents=True)
-    (run / "trace.jsonl").write_text(json.dumps({"type": "agent.output"}) + "\n")
-    app = create_control_plane(
-        queue_db=tmp_path / "control.db",
-        runs_root=runs,
-        token="read-token",
-    )
-
-    response = TestClient(app, raise_server_exceptions=False).get(
-        "/v1/runs/run_invalid_otel/otel",
-        headers={"Authorization": "Bearer read-token"},
-    )
-
-    assert response.status_code == 422
-    assert response.json()["detail"] == "trace artifact is invalid"
 
 
 def test_rolling_plan_rejects_symlinked_world_database(tmp_path: Path) -> None:
@@ -545,7 +485,6 @@ def test_control_plane_artifact_routes_reject_symlinked_inputs(tmp_path: Path) -
     audit = client.get("/v1/runs/run_linked_artifacts/audit", headers=headers)
     assert audit.status_code == 200
     assert audit.json()["status"] == "incomplete"
-    assert client.get("/v1/runs/run_linked_artifacts/otel", headers=headers).status_code == 422
     rolling = client.get(
         "/v1/runs/run_linked_artifacts/plan/rolling", headers=headers
     )

@@ -215,10 +215,27 @@ def sync_agent_workspace(*, run_dir: Path, workspace: Path) -> None:
         source = run_dir / name
         if not source.is_file():
             continue
+        # Multiple solver checkpoints can request the same projection. Avoid
+        # replacing an unchanged view; never follow workspace symlinks.
+        payload = source.read_bytes()
+        target = workspace / name
+        try:
+            fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            pass
+        else:
+            try:
+                info = os.fstat(fd)
+                if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size == len(payload):
+                    with os.fdopen(os.dup(fd), "rb") as existing:
+                        if existing.read() == payload:
+                            continue
+            finally:
+                os.close(fd)
         descriptor, temp_name = tempfile.mkstemp(prefix=f".{name}.", dir=workspace)
         try:
             with os.fdopen(descriptor, "wb") as stream:
-                stream.write(source.read_bytes())
+                stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
             workspace_info = workspace.stat(follow_symlinks=False)

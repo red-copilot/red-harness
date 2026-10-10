@@ -29,7 +29,6 @@ Version 0.8 provides:
 - event-sourced universal world-state runtime with materialized snapshots
 - domain-neutral skill metadata registry for planner and domain extensions
 - rolling-horizon planner integrated with the interactive SolverLoop
-- leased coordination blackboard for explicit multi-agent work distribution
 - leaderboard aggregation
 - OTLP/HTTP JSON-compatible trace export
 - Firecracker capability detection and machine-profile contract
@@ -289,15 +288,6 @@ GET  /v1/runs/{run_id}/trace
 GET  /v1/runs/{run_id}/world
 GET  /v1/runs/{run_id}/world/events
 GET  /v1/runs/{run_id}/plan
-POST /v1/runs/{run_id}/plan/publish
-GET  /v1/work
-POST /v1/work
-POST /v1/work/claim
-POST /v1/work/{work_id}/heartbeat
-POST /v1/work/{work_id}/complete
-POST /v1/work/{work_id}/fail
-POST /v1/work/{work_id}/release
-GET  /v1/runs/{run_id}/otel
 ```
 
 `/health` remains unauthenticated for service health checks. Other control-plane routes require the configured bearer token.
@@ -320,30 +310,11 @@ The queue stores full result JSON, so richer benchmark-profile or suite-level le
 
 The control plane recursively scans `task.yaml` files beneath `--benchmarks-root` and exposes valid tasks through `/v1/benchmarks`. Invalid task contracts are returned with validation errors instead of crashing the registry.
 
-## Trace viewer and OpenTelemetry
+## Trace viewer
 
-Every run continues to write append-only `trace.jsonl`.
-
-The control plane exposes the normalized events directly:
-
-```text
-GET /v1/runs/{run_id}/trace
-```
-
-It also converts them to an OTLP/HTTP JSON-compatible trace document:
-
-```text
-GET /v1/runs/{run_id}/otel
-```
-
-Local export:
-
-```bash
-harness otel-export .harness/runs/run_... \
-  --output trace.otlp.json
-```
-
-Each Red Harness event becomes a span carrying run/task/actor/event attributes plus serialized event data. This export is intentionally file/HTTP payload generation in v0.7; direct collector delivery can be added without modifying the trace recorder.
+Every run writes append-only `trace.jsonl`. Normalized events are available at
+`GET /v1/runs/{run_id}/trace`. OTLP export and multi-agent Blackboard APIs
+are removed from the lean competition runtime.
 
 ## Gateway modes
 
@@ -594,8 +565,8 @@ The planner can filter state requirements by minimum provenance level (`claim`, 
 SolverLoop. A session receives an initial
 `solver.plan.updated` observation and receives a new plan when verification, repeated no-progress,
 or benchmark feedback requests replanning. Plans are persisted to `plan.json` and guide the Agent;
-the Harness still does not execute Skill metadata directly as commands. Coordination-plane work
-publication remains explicit.
+the Harness still does not execute Skill metadata directly as commands.
+The legacy planner is opt-in and not part of the Pi-first default.
 
 
 ### SQLite World State

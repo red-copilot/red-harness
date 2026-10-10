@@ -6,11 +6,10 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from .aci import TypedACI
 from .action_verifier import ActionVerifier
-from .planner import RollingHorizonPlanner, RollingPlan
 from .progress import ProgressLedger
 from .session import AgentEvent, AgentObservation, AgentSession
 from .skills import SkillSpec
@@ -21,6 +20,9 @@ MAX_PROCESSED_EVENT_IDS = 50_000
 from .verification import AuthorizedActionVerdict, VerifierRegistry
 from .world import Observation, Provenance, WorldContextBuilder, WorldRepository
 from .world.live import WorldInboxCursor
+
+if TYPE_CHECKING:
+    from .planner import RollingHorizonPlanner, RollingPlan
 
 
 @dataclass
@@ -86,7 +88,11 @@ class SolverLoop:
         self.sync_agent_views = sync_agent_views
         self.plan_path = run_dir / "plan.json"
         self.skills = list(skills or [])
-        self.planner = planner or RollingHorizonPlanner()
+        if planner_enabled and planner is None:
+            from .planner import RollingHorizonPlanner
+
+            planner = RollingHorizonPlanner()
+        self.planner = planner if planner_enabled else None
         self.planner_enabled = planner_enabled
         self.world_context_enabled = world_context_enabled
         self.plan_horizon = max(1, min(3, plan_horizon))
@@ -268,7 +274,9 @@ class SolverLoop:
             "world.artifact",
             "world.failure",
         }
-        if (semantic_agent_update and aci_mutations) or live_ingest.accepted:
+        if self.planner_enabled and (
+            (semantic_agent_update and aci_mutations) or live_ingest.accepted
+        ):
             self.progress.request_replan("world_state_changed")
         after_revision = self.world.snapshot.revision
         if live_ingest.accepted or live_ingest.rejected:
@@ -285,7 +293,8 @@ class SolverLoop:
             )
 
         if after_revision != before_revision:
-            self._write_context()
+            if self.world_context_enabled:
+                self._write_context()
             self.trace.emit(
                 "world.state.updated",
                 data={
@@ -293,16 +302,17 @@ class SolverLoop:
                     "revision_after": after_revision,
                 },
             )
-            await session.observe(
-                AgentObservation(
-                    type="world.state.updated",
-                    data={
-                        "revision_before": before_revision,
-                        "revision_after": after_revision,
-                        "context_path": "world.context.txt",
-                    },
+            if self.world_context_enabled:
+                await session.observe(
+                    AgentObservation(
+                        type="world.state.updated",
+                        data={
+                            "revision_before": before_revision,
+                            "revision_after": after_revision,
+                            "context_path": "world.context.txt",
+                        },
+                    )
                 )
-            )
 
         if event.type in self.VERIFY_EVENTS:
             verification = self.action_verifier.verify(
@@ -328,7 +338,8 @@ class SolverLoop:
                     self.stats.last_verification_key = verification_key
                     self.progress.record_verification(verification)
                     if verification.status == "verified":
-                        self.progress.request_replan("evidence_confirmed")
+                        if self.planner_enabled:
+                            self.progress.request_replan("evidence_confirmed")
                         action_id = (self.progress.last_action or {}).get("tool_call_id")
                         if isinstance(action_id, str) and action_id:
                             revision_before_verification = self.world.snapshot.revision
@@ -353,7 +364,8 @@ class SolverLoop:
                                 actor="harness",
                                 source_event_id=event.event_id,
                             )
-                            self._write_context()
+                            if self.world_context_enabled:
+                                self._write_context()
                             self.trace.emit(
                                 "world.state.updated",
                                 data={
@@ -457,6 +469,10 @@ class SolverLoop:
             actor="harness",
             data=payload,
         )
+        # Commit the complete planner transition once, before exposing it to Pi.
+        # Previously we persisted and synced an intermediate progress state, then
+        # consumed the reasons and wrote again without syncing the final state.
+        self.progress.consume_replan_reasons(reasons)
         self.progress.write(self.progress_path)
         self._sync_agent_views()
         await session.observe(
@@ -468,8 +484,6 @@ class SolverLoop:
                 },
             )
         )
-        self.progress.consume_replan_reasons(reasons)
-        self.progress.write(self.progress_path)
         self._last_plan_signature = signature
         return plan
 

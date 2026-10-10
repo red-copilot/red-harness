@@ -37,6 +37,35 @@ pi:
 
 On Linux, `network: host` is the recommended TSec mode because the Kali container directly shares the Worker network namespace and VPN routes. If your VPN permits Docker bridge forwarding, `network: environment` can be used instead.
 
+## Pi-first benchmark execution
+
+The default `pi-only` mode skips the benchmark feedback World-context render and
+does not send `world.state.updated` or heuristic `solver.replan_requested`
+messages to Pi. Pi still receives direct `benchmark.feedback` after submissions;
+Harness continues to persist the authoritative evidence, submit through the SDK,
+enforce budgets, and independently evaluate success. This is execution-path
+decoupling, not removal of the legacy World persistence model.
+
+## Solver profiles
+
+The default `pi-only` profile leaves reasoning and context management to Pi while keeping
+trusted verification, budgets, run persistence and TSec resource management. It bypasses
+World context projection and heuristic planning but retains internal authoritative evidence.
+`pi-world` enables World context without heuristic planning. Compare it with `pi-only` (no World context or planner) and
+`pi-world-heuristic` (legacy planner enabled) using the same model, tasks and budgets:
+
+```bash
+harness tsec --agent agents/examples/pi-tsec.yaml --solver-profile pi-world
+harness tsec --agent agents/examples/pi-tsec.yaml --solver-profile pi-only
+harness tsec --agent agents/examples/pi-tsec.yaml --solver-profile pi-world-heuristic
+```
+
+The choice is recorded in the run-start trace. A profile only controls planner/context
+projection; it does **not** disable benchmark verification, resource isolation,
+budget enforcement or SDK lifecycle management. Profile comparisons require independent
+attempts on comparable unfinished challenges; do not treat sequential submissions to
+an already solved platform challenge as independent runs.
+
 ## Run
 
 One unfinished challenge:
@@ -130,3 +159,20 @@ A TSec result records:
 If a challenge was partially solved before the run, Pi is told only how many flags remain. `DuplicateSubmit` is treated as an idempotent submission and does not expose the plaintext flag in trace output.
 
 The SDK context manager performs the VPN preflight before challenge API calls. Harness converts a `VpnCheckError` into an actionable TSec adapter error while preserving the SDK-provided detail reason.
+
+## Evidence-driven profile comparison
+
+Run identical TSecBench cases with the same seed, agent and budget under
+`pi-only`, `pi-world` and `pi-world-heuristic`. Keep SDK and model settings
+identical. Then compare actual persisted outcomes:
+
+```bash
+harness compare-profiles .harness/runs
+```
+
+The comparison reads `run.started` traces and saved `result.json` files.
+It reports successes, observed costs and elapsed times by profile; `paired_cases`
+contains only matching benchmark/case/seed combinations. Missing profile
+metadata is excluded instead of guessed. A paired result is descriptive, not
+a statistically supported gain; use repeated cases and seeds before deciding
+which optional feedback capability merits retention.

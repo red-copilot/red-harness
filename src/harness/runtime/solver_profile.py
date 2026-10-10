@@ -10,7 +10,7 @@ class SolverProfile(StrEnum):
     PI_WORLD_HEURISTIC = "pi-world-heuristic"
 
 
-DEFAULT_SOLVER_PROFILE = SolverProfile.PI_WORLD_HEURISTIC
+DEFAULT_SOLVER_PROFILE = SolverProfile.PI_ONLY
 
 
 def solver_profile_settings(profile: SolverProfile | str) -> tuple[bool, bool]:

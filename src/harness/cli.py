@@ -21,7 +21,6 @@ from .gateway import ModelPricing, create_gateway_app
 from .gateway_runtime import GatewayConfig
 from .models import BudgetSpec, load_agent, load_suite, load_task
 from .orchestrator import Orchestrator
-from .otel import export_otlp_json
 from .policy import load_policy
 from .preflight import run_preflight
 from .queue import GatewayJobSpec, JobPayload
@@ -35,6 +34,16 @@ app = typer.Typer(
     help="Reproducible evaluation runtime for security agents.",
     no_args_is_help=True,
 )
+
+
+@app.command("compare-profiles")
+def compare_profiles(
+    runs_root: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
+) -> None:
+    """Compare observed Pi-only, World and heuristic benchmark runs."""
+    from .benchmark.ablation import compare_solver_profiles
+
+    typer.echo(json.dumps(compare_solver_profiles(runs_root), indent=2))
 
 
 @app.command("audit-run")
@@ -372,6 +381,9 @@ def tsec(
         bool,
         typer.Option("--hint", help="Request the platform hint; this may reduce flag score."),
     ] = False,
+    solver_profile: Annotated[SolverProfile, typer.Option("--solver-profile")] = (
+        DEFAULT_SOLVER_PROFILE
+    ),
     start_retries: Annotated[int, typer.Option("--start-retries", min=0, max=10)] = 2,
     retry_delay: Annotated[float, typer.Option("--retry-delay", min=0)] = 2.0,
     allow_host_agent: Annotated[
@@ -404,6 +416,7 @@ def tsec(
             start_retries=start_retries,
             retry_delay=retry_delay,
             allow_host_agent=allow_host_agent,
+            solver_profile=solver_profile,
         )
     )
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
@@ -523,21 +536,6 @@ def worker(
             instance.run_forever(poll_interval=poll_interval)
     finally:
         instance.close()
-
-
-@app.command("otel-export")
-def otel_export(
-    run_dir: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
-    output: Annotated[Path | None, typer.Option("--output")] = None,
-) -> None:
-    """Export trace.jsonl as OTLP/HTTP JSON-compatible trace data."""
-    trace_path = run_dir / "trace.jsonl"
-    if not trace_path.is_file():
-        typer.echo(f"missing {trace_path}", err=True)
-        raise typer.Exit(code=2)
-    target = output or (run_dir / "otel-traces.json")
-    export_otlp_json(trace_path, target)
-    typer.echo(str(target))
 
 
 @app.command("capabilities")

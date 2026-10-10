@@ -18,6 +18,7 @@ from harness.benchmark.base import (
 from harness.benchmark.runner import BenchmarkRunner, _evaluate_benchmark
 from harness.budget import UsageMetrics
 from harness.models import AgentSpec, BudgetSpec, ObjectiveSpec
+from harness.runtime.solver_profile import SolverProfile
 from harness.session import AgentCheckpoint, AgentEvent
 
 
@@ -565,6 +566,7 @@ def test_benchmark_runner_streams_submission_and_feedback(monkeypatch, tmp_path:
             seed=1,
             submission_extractor=lambda _result: [],
             allow_host_agent=True,
+            solver_profile=SolverProfile.PI_WORLD_HEURISTIC,
         )
     )
 
@@ -793,6 +795,7 @@ def test_tool_success_and_agent_claim_do_not_override_failed_final_evaluator(
             seed=1,
             submission_extractor=lambda _result: [],
             allow_host_agent=True,
+            solver_profile=SolverProfile.PI_WORLD,
         )
     )
 
@@ -964,6 +967,7 @@ def test_checkpoint_failure_after_feedback_is_rejected_by_event_cursor(monkeypat
                 seed=1,
                 submission_extractor=lambda _result: [],
                 allow_host_agent=True,
+                solver_profile=SolverProfile.PI_WORLD,
             )
         )
 
@@ -1156,6 +1160,7 @@ def test_benchmark_runner_replans_after_negative_feedback(monkeypatch, tmp_path:
             seed=1,
             submission_extractor=lambda _result: [],
             allow_host_agent=True,
+            solver_profile=SolverProfile.PI_WORLD_HEURISTIC,
         )
     )
 
@@ -1181,3 +1186,41 @@ def test_benchmark_runner_replans_after_negative_feedback(monkeypatch, tmp_path:
     run_dir = next(tmp_path.glob("fake_CASE-REPLAN_*"))
     context = (run_dir / "world.context.txt").read_text(encoding="utf-8")
     assert "benchmark.candidate_rejected" in context
+
+
+def test_pi_first_submission_feedback_does_not_write_world_observation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import harness.benchmark.runner as runner_module
+    from harness.world import SQLiteWorldRepository
+
+    adapter = FakeAgentAdapter()
+    monkeypatch.setattr(runner_module, "build_agent_adapter", lambda *_a, **_kw: adapter)
+    result = asyncio.run(
+        BenchmarkRunner(runs_root=tmp_path).run_case(
+            adapter=FakeBenchmarkAdapter(),
+            case=BenchmarkCase(id="CASE-LEAN", benchmark="fake"),
+            agent=AgentSpec.model_validate({
+                "apiVersion": "harness/v1", "id": "demo",
+                "type": "cli", "command": ["true"],
+            }),
+            budgets=BudgetSpec(wall_time=30),
+            seed=1,
+            submission_extractor=lambda _result: [],
+            allow_host_agent=True,
+            solver_profile=SolverProfile.PI_ONLY,
+        )
+    )
+    assert result["success"] is True
+    assert result["progress"]["accepted_submissions"] == 1
+    assert adapter.session is not None
+    types = [item.type for item in adapter.session.feedback]
+    assert "benchmark.feedback" in types
+    assert "world.state.updated" not in types
+    assert "solver.replan_requested" not in types
+    run_dir = tmp_path / result["run_id"]
+    world = SQLiteWorldRepository(run_dir / "world.events.jsonl")
+    assert not any(
+        item.type == "benchmark.submission.feedback"
+        for item in world.snapshot.observations.values()
+    )

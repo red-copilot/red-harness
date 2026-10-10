@@ -12,20 +12,24 @@ def finalize_world_goal(
     *,
     world: WorldRepository,
     goal: Goal,
-    context_builder: WorldContextBuilder,
+    context_builder: WorldContextBuilder | None,
     run_dir: Path,
     status: str,
     success: bool,
     score: float,
+    render_context: bool = True,
 ) -> None:
     """Persist final objective state and render the final snapshot."""
     goal.status = "completed" if success else "failed"
     goal.attributes.update({"run_status": status, "score": score, "success": success})
     world.upsert("goal", goal)
-    (run_dir / "world.context.txt").write_text(
-        context_builder.render(world.snapshot),
-        encoding="utf-8",
-    )
+    if render_context:
+        if context_builder is None:
+            raise ValueError("World context projection requires a context builder")
+        (run_dir / "world.context.txt").write_text(
+            context_builder.render(world.snapshot),
+            encoding="utf-8",
+        )
 
 
 def world_result(

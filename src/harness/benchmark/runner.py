@@ -16,6 +16,7 @@ from ..models import AgentSpec, BudgetSpec, TaskSpec
 from ..session import AgentObservation
 from ..trace import TraceRecorder, sanitize_observability_data
 from ..runtime import bootstrap_solver
+from ..runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from ..runtime.agent_workspace import create_agent_workspace, sync_agent_workspace
 from ..runtime.checkpoint import run_action_owner, save_session_checkpoint
 from ..runtime.evidence import persist_objective_verdict
@@ -92,6 +93,7 @@ class BenchmarkRunner:
         seed: int,
         submission_extractor: SubmissionExtractor,
         allow_host_agent: bool = False,
+        solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
     ) -> dict:
         if agent.type in {"docker", "pi"} and agent.network == "environment":
             raise ValueError(
@@ -213,6 +215,7 @@ class BenchmarkRunner:
                 target_actor=f"benchmark:{session.benchmark}",
                 budget_limits=budgets.model_dump(exclude_none=True),
                 agent_workspace=agent_workspace,
+                solver_profile=solver_profile,
             )
             world = runtime.world
             context_builder = runtime.context_builder
@@ -239,6 +242,7 @@ class BenchmarkRunner:
                     "case_id": session.case_id,
                     "agent_id": agent.id,
                     "seed": seed,
+                    "solver_profile": solver_profile.value,
                     "world_revision": world.snapshot.revision,
                 },
             )
@@ -311,48 +315,54 @@ class BenchmarkRunner:
                 submission_completed = await evaluate_final()
 
             revision_before_feedback = world.snapshot.revision
-            feedback_id = f"benchmark-feedback:{submission_digest[:16]}"
-            world.upsert(
-                "observation",
-                Observation(
-                    id=feedback_id,
-                    type="benchmark.submission.feedback",
-                    content={
-                        "submission_type": submission.type,
-                        "value_sha256": submission_digest,
-                        "accepted": submitted.accepted,
-                        "score_delta": submitted.score_delta,
-                        "completed": submitted.completed,
-                        "metadata": safe_submission_metadata,
-                    },
-                    confidence=1.0,
-                    source=session.benchmark,
-                ),
-                actor=f"benchmark:{session.benchmark}",
-            )
-            if not submitted.accepted:
+            # In Pi-first mode, SDK feedback already lives in progress, trace,
+            # and submission_results. Avoid duplicating it into the legacy World graph.
+            if solver_loop.world_context_enabled:
+                feedback_id = f"benchmark-feedback:{submission_digest[:16]}"
                 world.upsert(
-                    "failure",
-                    Failure(
-                        id=f"benchmark-rejection:{submission_digest[:16]}",
-                        type="benchmark.candidate_rejected",
-                        message="Benchmark rejected submitted candidate",
-                        recoverable=True,
-                        attributes={
+                    "observation",
+                    Observation(
+                        id=feedback_id,
+                        type="benchmark.submission.feedback",
+                        content={
                             "submission_type": submission.type,
                             "value_sha256": submission_digest,
+                            "accepted": submitted.accepted,
+                            "score_delta": submitted.score_delta,
+                            "completed": submitted.completed,
+                            "metadata": safe_submission_metadata,
                         },
+                        confidence=1.0,
+                        source=session.benchmark,
                     ),
                     actor=f"benchmark:{session.benchmark}",
                 )
+                if not submitted.accepted:
+                    world.upsert(
+                        "failure",
+                        Failure(
+                            id=f"benchmark-rejection:{submission_digest[:16]}",
+                            type="benchmark.candidate_rejected",
+                            message="Benchmark rejected submitted candidate",
+                            recoverable=True,
+                            attributes={
+                                "submission_type": submission.type,
+                                "value_sha256": submission_digest,
+                            },
+                        ),
+                        actor=f"benchmark:{session.benchmark}",
+                    )
             revision_after_feedback = world.snapshot.revision
-            (run_dir / "world.context.txt").write_text(
-                context_builder.render(
-                    world.snapshot,
-                    query=session.objective.description,
-                ),
-                encoding="utf-8",
-            )
+            # Only legacy World profiles project the internal evidence graph to Pi.
+            # The default Pi-first path receives benchmark feedback directly.
+            if solver_loop.world_context_enabled:
+                (run_dir / "world.context.txt").write_text(
+                    context_builder.render(
+                        world.snapshot,
+                        query=session.objective.description,
+                    ),
+                    encoding="utf-8",
+                )
             sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
 
             feedback_data = {
@@ -373,7 +383,7 @@ class BenchmarkRunner:
                         data=feedback_data,
                     )
                 )
-                if feedback_data["replan_required"]:
+                if solver_loop.planner_enabled and feedback_data["replan_required"]:
                     await agent_session.observe(
                         AgentObservation(
                             type="solver.replan_requested",
@@ -386,7 +396,10 @@ class BenchmarkRunner:
                         )
                     )
                     await solver_loop.maybe_replan(agent_session)
-                if revision_after_feedback != revision_before_feedback:
+                if (
+                    solver_loop.world_context_enabled
+                    and revision_after_feedback != revision_before_feedback
+                ):
                     await agent_session.observe(
                         AgentObservation(
                             type="world.state.updated",
@@ -597,6 +610,7 @@ class BenchmarkRunner:
             status=status,
             success=bool(evaluation and evaluation.success),
             score=evaluation.score if evaluation is not None else 0.0,
+            render_context=solver_loop.world_context_enabled,
         )
         world.flush()
 

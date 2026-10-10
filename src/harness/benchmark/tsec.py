@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..agent import AgentResult
 from ..models import AgentSpec, BudgetSpec
+from ..runtime.solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile
 from .base import Submission
 from .runner import BenchmarkRunner
 from .tsec_adapter import TSecBenchmarkAdapter
@@ -88,6 +89,7 @@ class TSecRunner:
         start_retries: int = 2,
         retry_delay: float = 2.0,
         allow_host_agent: bool = False,
+        solver_profile: SolverProfile = DEFAULT_SOLVER_PROFILE,
     ) -> list[dict]:
         results: list[dict] = []
         effective_budgets = budgets.model_copy(
@@ -128,6 +130,7 @@ class TSecRunner:
                         seed=seed + index,
                         submission_extractor=_extract_submissions,
                         allow_host_agent=allow_host_agent,
+                        solver_profile=solver_profile,
                     )
                     evaluation = result.get("evaluation", {})
                     session_meta = result.get("benchmark", {}).get("session", {})
