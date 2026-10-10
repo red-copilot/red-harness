@@ -350,13 +350,16 @@ class BenchmarkRunner:
                     actor=f"benchmark:{session.benchmark}",
                 )
             revision_after_feedback = world.snapshot.revision
-            (run_dir / "world.context.txt").write_text(
-                context_builder.render(
-                    world.snapshot,
-                    query=session.objective.description,
-                ),
-                encoding="utf-8",
-            )
+            # Only legacy World profiles project the internal evidence graph to Pi.
+            # The default Pi-first path receives benchmark feedback directly.
+            if solver_loop.world_context_enabled:
+                (run_dir / "world.context.txt").write_text(
+                    context_builder.render(
+                        world.snapshot,
+                        query=session.objective.description,
+                    ),
+                    encoding="utf-8",
+                )
             sync_agent_workspace(run_dir=run_dir, workspace=agent_workspace)
 
             feedback_data = {
@@ -377,7 +380,7 @@ class BenchmarkRunner:
                         data=feedback_data,
                     )
                 )
-                if feedback_data["replan_required"]:
+                if solver_loop.planner_enabled and feedback_data["replan_required"]:
                     await agent_session.observe(
                         AgentObservation(
                             type="solver.replan_requested",
@@ -390,7 +393,10 @@ class BenchmarkRunner:
                         )
                     )
                     await solver_loop.maybe_replan(agent_session)
-                if revision_after_feedback != revision_before_feedback:
+                if (
+                    solver_loop.world_context_enabled
+                    and revision_after_feedback != revision_before_feedback
+                ):
                     await agent_session.observe(
                         AgentObservation(
                             type="world.state.updated",
