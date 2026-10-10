@@ -2,6 +2,11 @@
 
 **Scope:** `action_verifier.py`, `verifier.py`, `audit.py`, `solver_loop.py`, World provenance. Existing code conservatively treats Agent observations as claims and accepts structured trusted evidence; preserve those safeguards.
 
+### VER-V2-01 [~] P0 — Minimal Harness 2.0 contracts and boundary review ([PR #12](https://github.com/red-copilot/red-harness/pull/12))
+Deliver: isolated `harness.v2` configuration/result/protocol contracts and a host-composed evaluator boundary with input-manifest-bound evidence. Existing CLI and schemas stay active until reviewed cutover.
+Accept: immutable scoped evidence; rejection of forged producers, malformed results and corrupted artifacts; evaluator faults remain unknown; compatibility suite passes; maintainer reviews public and verification contracts before dependent runtime work.
+Evidence: [review proposal](../harness-2.0-review.md), [contract tests](../../tests/test_v2_contracts.py), [boundary tests](../../tests/test_v2_verification.py), and [architecture guard](../../tests/test_architecture.py). Acceptance is pending maintainer review. This proposal does not replace the existing VER-01/02 World/action contracts until reviewed cutover.
+
 ### VER-01 [x] P0 — Typed evidence and verdict contracts
 Deliver: separate immutable EvidenceRef, ActionVerdict, ObjectiveVerdict models with action/run IDs, producer, capture time, world revision and artifact hash/ref; distinguish command execution, observed effect and objective completion. Reject non-Harness producers from the trusted channel. Wire adapter results without trusting an Agent-authored source string.
 Accept: unit tests for forged producer, missing action ID, stale revision, conflicting evidence, failed tool with apparent success text; no false verified verdicts. Version or migrate existing event schemas.

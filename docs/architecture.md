@@ -1,5 +1,15 @@
 # Modular monolith boundaries
 
+## Staged Harness 2.0 contracts
+
+The isolated `harness.v2` package stages the new minimal configuration, result,
+Agent/adapter protocols and host-owned verification boundary. It is not composed
+into the current CLI or runtime. See the [2.0 review](harness-2.0-review.md) for
+implemented behavior, migration decisions and the required maintainer review
+before implementing the remaining runtime and cutover stages.
+
+## Current architecture
+
 Harness is one deployable Python application, not a collection of microservices.
 Modules are separated by responsibilities and explicit composition points.
 
