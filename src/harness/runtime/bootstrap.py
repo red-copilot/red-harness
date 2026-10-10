@@ -3,12 +3,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..lean_solver import LeanSolver
 from ..progress import ProgressLedger
 from ..secureio import read_regular_text
 from ..skills import load_skills
-from ..solver_loop import SolverLoop
 from ..trace import TraceRecorder
 from ..verification import VerifierRegistry
 from ..world import (
@@ -20,6 +20,9 @@ from ..world import (
 )
 from .agent_workspace import sync_agent_workspace
 from .solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile, solver_profile_settings
+
+if TYPE_CHECKING:
+    from ..solver_loop import SolverLoop
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,8 @@ def bootstrap_solver(
             sync_agent_views=sync_workspace,
         )
     else:
+        from ..solver_loop import SolverLoop
+
         loop = SolverLoop(
             world=world,
             progress=progress,
