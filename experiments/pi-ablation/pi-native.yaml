@@ -1,0 +1,23 @@
+apiVersion: harness/v1
+id: pi-kali-native-baseline
+type: pi
+image: harness/pi-kali:local
+network: host
+network_profile: benchmark-only
+env: {}
+pi:
+  provider: openai
+  model: gpt-5.6-sol
+  mode: json
+  thinking: medium
+  tools: [read, bash, edit, write]
+  env_passthrough: [OPENAI_API_KEY]
+  cap_add: [NET_RAW]
+  approve_project: false
+  context_files: false
+  extensions: false
+  skills: false
+  prompt_templates: false
+  themes: false
+  mcp: false
+  offline: true
