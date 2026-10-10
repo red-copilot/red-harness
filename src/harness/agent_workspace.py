@@ -221,7 +221,7 @@ def sync_agent_workspace(*, run_dir: Path, workspace: Path) -> None:
         target = workspace / name
         try:
             fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
-        except (FileNotFoundError, OSError):
+        except OSError:
             pass
         else:
             try:
