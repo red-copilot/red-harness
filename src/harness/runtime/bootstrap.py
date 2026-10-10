@@ -25,7 +25,7 @@ from .solver_profile import DEFAULT_SOLVER_PROFILE, SolverProfile, solver_profil
 @dataclass(frozen=True)
 class SolverRuntime:
     world: WorldRepository
-    context_builder: WorldContextBuilder
+    context_builder: WorldContextBuilder | None
     progress: ProgressLedger
     verifier_registry: VerifierRegistry
     loop: SolverLoop | LeanSolver
@@ -60,10 +60,12 @@ def bootstrap_solver(
     for target in targets:
         world.upsert("entity", target, actor=target_actor or actor)
 
-    context_builder = WorldContextBuilder()
     world_context_enabled, planner_enabled = solver_profile_settings(solver_profile)
+    context_builder = WorldContextBuilder() if world_context_enabled else None
     (run_dir / "world.context.txt").write_text(
-        context_builder.render(world.snapshot, query=context_query) if world_context_enabled else "",
+        context_builder.render(world.snapshot, query=context_query)
+        if context_builder is not None
+        else "",
         encoding="utf-8",
     )
     progress = (
