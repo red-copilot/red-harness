@@ -159,3 +159,20 @@ A TSec result records:
 If a challenge was partially solved before the run, Pi is told only how many flags remain. `DuplicateSubmit` is treated as an idempotent submission and does not expose the plaintext flag in trace output.
 
 The SDK context manager performs the VPN preflight before challenge API calls. Harness converts a `VpnCheckError` into an actionable TSec adapter error while preserving the SDK-provided detail reason.
+
+## Evidence-driven profile comparison
+
+Run identical TSecBench cases with the same seed, agent and budget under
+`pi-only`, `pi-world` and `pi-world-heuristic`. Keep SDK and model settings
+identical. Then compare actual persisted outcomes:
+
+```bash
+harness compare-profiles .harness/runs
+```
+
+The comparison reads `run.started` traces and saved `result.json` files.
+It reports successes, observed costs and elapsed times by profile; `paired_cases`
+contains only matching benchmark/case/seed combinations. Missing profile
+metadata is excluded instead of guessed. A paired result is descriptive, not
+a statistically supported gain; use repeated cases and seeds before deciding
+which optional feedback capability merits retention.
