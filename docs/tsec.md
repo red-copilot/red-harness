@@ -37,6 +37,15 @@ pi:
 
 On Linux, `network: host` is the recommended TSec mode because the Kali container directly shares the Worker network namespace and VPN routes. If your VPN permits Docker bridge forwarding, `network: environment` can be used instead.
 
+## Pi-first benchmark execution
+
+The default `pi-only` mode skips the benchmark feedback World-context render and
+does not send `world.state.updated` or heuristic `solver.replan_requested`
+messages to Pi. Pi still receives direct `benchmark.feedback` after submissions;
+Harness continues to persist the authoritative evidence, submit through the SDK,
+enforce budgets, and independently evaluate success. This is execution-path
+decoupling, not removal of the legacy World persistence model.
+
 ## Solver profiles
 
 The default `pi-only` profile leaves reasoning and context management to Pi while keeping
