@@ -795,6 +795,7 @@ def test_tool_success_and_agent_claim_do_not_override_failed_final_evaluator(
             seed=1,
             submission_extractor=lambda _result: [],
             allow_host_agent=True,
+            solver_profile=SolverProfile.PI_WORLD,
         )
     )
 
@@ -966,6 +967,7 @@ def test_checkpoint_failure_after_feedback_is_rejected_by_event_cursor(monkeypat
                 seed=1,
                 submission_extractor=lambda _result: [],
                 allow_host_agent=True,
+                solver_profile=SolverProfile.PI_WORLD,
             )
         )
 
