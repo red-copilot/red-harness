@@ -650,6 +650,7 @@ class Orchestrator:
             status=status,
             success=result["success"],
             score=result["score"],
+            render_context=solver_loop.world_context_enabled,
         )
         world.flush()
         result["world"] = world_result(world=world, solver_loop=solver_loop, agent_id=agent.id)
