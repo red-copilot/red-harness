@@ -12,8 +12,8 @@ from harness.runtime.solver_profile import (
 
 
 def test_default_keeps_world_context_without_heuristic_planner():
-    assert DEFAULT_SOLVER_PROFILE is SolverProfile.PI_WORLD
-    assert solver_profile_settings(DEFAULT_SOLVER_PROFILE) == (True, False)
+    assert DEFAULT_SOLVER_PROFILE is SolverProfile.PI_ONLY
+    assert solver_profile_settings(DEFAULT_SOLVER_PROFILE) == (False, False)
 
 
 def test_ablation_profiles_remain_selectable():
