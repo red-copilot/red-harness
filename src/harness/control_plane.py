@@ -6,11 +6,9 @@ from pathlib import Path
 from fastapi import FastAPI
 from starlette.responses import JSONResponse
 
-from .api.coordination import build_coordination_router
 from .api.jobs import build_jobs_router
 from .api.registry import build_registry_router
 from .api.runs import build_runs_router
-from .coordination import CoordinationStore
 from .queue import SQLiteQueue
 from .world import SQLiteWorldRepository, WorldRepository
 
@@ -85,7 +83,6 @@ def create_control_plane(
     app.add_middleware(_RequestBodyLimitMiddleware, max_bytes=_MAX_CONTROL_REQUEST_BYTES)
 
     queue = SQLiteQueue(queue_db)
-    coordination = CoordinationStore(queue_db.with_name("coordination.db"))
     run_root = runs_root.resolve()
     benchmark_root = benchmarks_root.resolve() if benchmarks_root else None
     skill_root = skills_root.resolve() if skills_root else None
@@ -108,14 +105,6 @@ def create_control_plane(
             skill_root=skill_root,
             token=token,
             world_repository_factory=world_repository_factory,
-        )
-    )
-    app.include_router(
-        build_coordination_router(
-            coordination=coordination,
-            run_root=run_root,
-            skill_root=skill_root,
-            token=token,
         )
     )
     return app
