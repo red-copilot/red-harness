@@ -86,7 +86,7 @@ class SolverLoop:
         self.sync_agent_views = sync_agent_views
         self.plan_path = run_dir / "plan.json"
         self.skills = list(skills or [])
-        self.planner = planner or RollingHorizonPlanner()
+        self.planner = (planner or RollingHorizonPlanner()) if planner_enabled else None
         self.planner_enabled = planner_enabled
         self.world_context_enabled = world_context_enabled
         self.plan_horizon = max(1, min(3, plan_horizon))
@@ -268,7 +268,7 @@ class SolverLoop:
             "world.artifact",
             "world.failure",
         }
-        if (semantic_agent_update and aci_mutations) or live_ingest.accepted:
+        if self.planner_enabled and ((semantic_agent_update and aci_mutations) or live_ingest.accepted):
             self.progress.request_replan("world_state_changed")
         after_revision = self.world.snapshot.revision
         if live_ingest.accepted or live_ingest.rejected:
@@ -328,7 +328,8 @@ class SolverLoop:
                     self.stats.last_verification_key = verification_key
                     self.progress.record_verification(verification)
                     if verification.status == "verified":
-                        self.progress.request_replan("evidence_confirmed")
+                        if self.planner_enabled:
+                            self.progress.request_replan("evidence_confirmed")
                         action_id = (self.progress.last_action or {}).get("tool_call_id")
                         if isinstance(action_id, str) and action_id:
                             revision_before_verification = self.world.snapshot.revision
@@ -377,6 +378,9 @@ class SolverLoop:
         self.progress.write(self.progress_path)
         self._sync_agent_views()
         decision = self.decide(event_type=event.type)
+        if decision.action is SolverAction.REPLAN and not self.planner_enabled:
+            # Do not invoke the heuristic planner or report a synthetic plan in lean runs.
+            decision = SolverDecision(SolverAction.CONTINUE, "planner_disabled")
         if decision.action is SolverAction.REPLAN:
             plan = await self.maybe_replan(session)
             if plan is None:
